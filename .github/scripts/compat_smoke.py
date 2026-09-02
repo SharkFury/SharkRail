@@ -18,7 +18,7 @@ env["PYTHONPATH"] = str(ROOT / "src")
 
 
 def run(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, env=env)
+    return subprocess.run(args, capture_output=True, text=True, env=env, check=False)
 
 
 version = run([sys.executable, "-m", "sharkrail", "--version"])
@@ -47,7 +47,7 @@ timeout = run(
         "--json",
         "--timeout-ms",
         "200",
-        "python3",
+        sys.executable,
         "--",
         "-c",
         "import time; time.sleep(10)",

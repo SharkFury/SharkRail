@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 
 import pytest
@@ -76,7 +75,6 @@ def test_session_missing_id_is_structured_error():
     asyncio.run(_run())
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX PTY backend")
 def test_persistent_pty_session_supports_resize_and_write():
     async def _run() -> None:
         manager = SessionManager()

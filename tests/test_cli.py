@@ -55,7 +55,7 @@ def test_sharkrail_run_timeout_json_exit_code():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-m", "sharkrail", "run", "--json", "--timeout-ms", "200", "python3", "--", "-c", "import time; time.sleep(10)"],
+        [sys.executable, "-m", "sharkrail", "run", "--json", "--timeout-ms", "200", sys.executable, "--", "-c", "import time; time.sleep(10)"],
         capture_output=True,
         text=True,
         check=False,

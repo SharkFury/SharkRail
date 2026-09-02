@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 from sharkrail.executor import CommandRunner, LifecycleEventType
 from sharkrail.models import CommandSpec
@@ -23,7 +24,7 @@ def test_lifecycle_events_for_timeout_reason():
     async def _run() -> None:
         runner = CommandRunner()
         _, events = await runner.run_events(
-            CommandSpec(executable="python3", argv=("-c", "import time; time.sleep(10)")),
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(10)")),
             timeout_ms=200,
         )
 
