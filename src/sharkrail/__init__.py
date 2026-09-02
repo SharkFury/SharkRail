@@ -9,6 +9,7 @@ from .executor import (
     LifecycleEvent,
     LifecycleEventType,
 )
+from .capabilities import Capability, collect
 from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
 
 __all__ = [
@@ -18,6 +19,8 @@ __all__ = [
     "CommandRunner",
     "LifecycleEvent",
     "LifecycleEventType",
+    "Capability",
+    "collect",
     "InvalidTransition",
     "SessionLifecycle",
     "SessionState",

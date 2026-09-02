@@ -9,6 +9,7 @@ import json
 from . import __version__
 from .executor import CommandRunner
 from .models import CommandMode, CommandSpec
+from .capabilities import collect
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--cwd", default=None)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--json", action="store_true", help="Print machine-readable output")
+
+    caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
+    caps.add_argument("--json", action="store_true", help="Print machine-readable output")
 
     return parser
 
@@ -72,6 +76,31 @@ def main() -> int:
 
     if ns.command == "run":
         return asyncio.run(_run_cmd(ns))
+
+    if ns.command == "capabilities":
+        capability = collect()
+        if ns.json:
+            print(
+                json.dumps(
+                    {
+                        "platform": capability.platform_name,
+                        "modes": capability.modes,
+                        "process_tree": capability.process_tree,
+                        "supports_timeout": capability.supports_timeout,
+                        "max_output_bytes": capability.max_output_bytes,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        print(
+            "platform: " + capability.platform_name
+            + ", modes: "
+            + ", ".join(capability.modes)
+            + ", process_tree: "
+            + capability.process_tree
+        )
+        return 0
 
     parser.print_help()
     return 1

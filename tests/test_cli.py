@@ -71,3 +71,19 @@ def test_sharkrail_version():
     )
     assert result.returncode == 0
     assert result.stdout.startswith("sharkrail ")
+
+
+def test_sharkrail_capabilities_json():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "capabilities", "--json"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    payload = json.loads(result.stdout.strip())
+    assert result.returncode == 0
+    assert "platform" in payload
+    assert "modes" in payload and isinstance(payload["modes"], list)
+    assert payload["supports_timeout"] is True
