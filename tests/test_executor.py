@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 from sharkrail.executor import CommandRunner
 from sharkrail.models import CommandSpec
@@ -7,7 +8,9 @@ from sharkrail.models import CommandSpec
 def test_command_runner_executes_command():
     async def _run() -> None:
         runner = CommandRunner()
-        result = await runner.run(CommandSpec(executable="python", argv=("-c", "print('ok')")))
+        result = await runner.run(
+            CommandSpec(executable=sys.executable, argv=("-c", "print('ok')"))
+        )
         assert result.exit_code == 0
         assert "ok" in result.stdout
         assert result.reason.value == "success"
@@ -20,7 +23,7 @@ def test_command_runner_timeout():
         runner = CommandRunner()
         result = await runner.run(
             CommandSpec(
-                executable="python",
+                executable=sys.executable,
                 argv=("-c", "import time; time.sleep(10)"),
             ),
             timeout_ms=200,
