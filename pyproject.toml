@@ -17,6 +17,9 @@ sharkrail = "sharkrail.cli:main"
 [project.urls]
 Source = "https://github.com/imlarrychen/SharkRail"
 
+[tool.ruff]
+target-version = "py39"
+
 [tool.pytest.ini_options]
 addopts = "-q"
 
