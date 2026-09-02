@@ -60,6 +60,8 @@ sharkrail serve
 
 Every push and pull request is verified on Ubuntu, macOS, and Windows with Python 3.9 and 3.11. CI runs unit/integration tests, Ruff, compatibility smoke checks, capability checks, and distribution builds.
 
+Tagged releases use PyPI trusted publishing and attach the verified Python distributions to a GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md) for repository setup and release instructions.
+
 ## Clean generated artifacts
 
 Build outputs are written to `build/`, `dist/`, and `src/sharkrail.egg-info/`; all are ignored by Git and may be removed safely when no build is running.

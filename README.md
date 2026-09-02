@@ -108,6 +108,7 @@ Clients should call `runtime.capabilities` instead of guessing from the OS name.
 - [Product and architecture](docs/PRODUCT.md)
 - [Protocol reference](docs/PROTOCOL.md)
 - [Build and test](BUILD.md)
+- [Release process](docs/RELEASING.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [简体中文 README](README.zh-CN.md)

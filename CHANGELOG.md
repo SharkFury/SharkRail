@@ -13,6 +13,7 @@
 - Add stdio JSON-RPC 2.0 runtime service
 - Add capability negotiation and doctor diagnostics
 - Add Windows, Linux, and macOS CI for Python 3.9 and 3.11
+- Add a tested PyPI trusted-publishing and GitHub Release pipeline
 
 ## 0.0.1
 
