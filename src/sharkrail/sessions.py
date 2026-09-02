@@ -23,7 +23,7 @@ from .executor import (
     LifecycleEvent,
     LifecycleEventType,
 )
-from .lifecycle import SessionState
+from .lifecycle import SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec
 from .output import capture_output
 
@@ -36,7 +36,7 @@ class Session:
     handle: ProcessHandle
     max_output_bytes: Optional[int]
     timeout_ms: Optional[int]
-    state: SessionState = SessionState.ACCEPTED
+    lifecycle: SessionLifecycle = field(default_factory=SessionLifecycle)
     events: list[LifecycleEvent] = field(default_factory=list)
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
@@ -50,6 +50,13 @@ class Session:
     output_event_limit_reported: bool = False
     monitor_task: Optional[asyncio.Task[None]] = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+    @property
+    def state(self) -> SessionState:
+        return self.lifecycle.state
+
+    def transition(self, target: SessionState) -> None:
+        self.lifecycle.transition(target)
 
     async def emit(self, kind: LifecycleEventType, payload: Optional[dict[str, object]] = None) -> None:
         async with self.condition:
@@ -184,8 +191,10 @@ class SessionManager:
             max_output_events=self._max_output_events,
         )
         self._sessions[session.id] = session
+        session.transition(SessionState.ACCEPTED)
         await session.emit(LifecycleEventType.ACCEPTED, {"session_id": session.id})
-        session.state = SessionState.RUNNING
+        session.transition(SessionState.STARTING)
+        session.transition(SessionState.RUNNING)
         await session.emit(
             LifecycleEventType.PROCESS_STARTED,
             {"pid": handle.pid, "mode": spec.mode.value},
@@ -245,7 +254,8 @@ class SessionManager:
         policy: Optional[CancellationPolicy] = None,
     ) -> tuple[str, ...]:
         session = self._require_active(session_id)
-        session.state = SessionState.CANCELLING
+        if session.state == SessionState.RUNNING:
+            session.transition(SessionState.CANCELLING)
         session.completion_reason = CompletionReason.CANCELLED
         steps = await cancel_process(session.backend, session.handle, policy)
         for step in steps:
@@ -292,7 +302,7 @@ class SessionManager:
                     raise
             await self.wait(session_id)
         await session.backend.dispose(session.handle)
-        session.state = SessionState.DISPOSED
+        session.transition(SessionState.DISPOSED)
         self._sessions.pop(session_id, None)
 
     async def shutdown(self) -> None:
@@ -326,7 +336,9 @@ class SessionManager:
             await session.backend.kill_tree(session.handle)
             await session.handle.process.wait()
 
-        session.state = SessionState.DRAINING
+        if session.state == SessionState.RUNNING:
+            session.transition(SessionState.EXITING)
+        session.transition(SessionState.DRAINING)
         await session.emit(
             LifecycleEventType.PROCESS_EXITED,
             {"exit_code": session.handle.process.returncode},
@@ -357,7 +369,7 @@ class SessionManager:
             reason=reason,
             timed_out=reason == CompletionReason.TIMEOUT,
         )
-        session.state = SessionState.COMPLETED
+        session.transition(SessionState.COMPLETED)
         await session.emit(
             LifecycleEventType.SESSION_COMPLETED,
             {"reason": reason.value, "exit_code": session.result.exit_code},

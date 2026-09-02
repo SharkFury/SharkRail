@@ -25,6 +25,15 @@ def test_session_streams_input_output_and_events():
         assert result is not None
         assert result.stdout.splitlines() == ["HELLO"]
         assert session.state == SessionState.COMPLETED
+        assert session.lifecycle.history == [
+            SessionState.CREATED,
+            SessionState.ACCEPTED,
+            SessionState.STARTING,
+            SessionState.RUNNING,
+            SessionState.EXITING,
+            SessionState.DRAINING,
+            SessionState.COMPLETED,
+        ]
         assert [event.seq for event in session.events] == list(range(len(session.events)))
         assert session.events[-1].kind == LifecycleEventType.SESSION_COMPLETED
         assert any(event.kind == LifecycleEventType.STDOUT for event in session.events)
