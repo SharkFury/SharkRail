@@ -105,3 +105,18 @@ def test_sharkrail_run_json_with_events():
     assert result.returncode == 0
     assert "events" in payload
     assert payload["events"][0]["kind"] == "accepted"
+
+
+def test_sharkrail_run_json_nonzero_exit_is_failed():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "run", "--json", "--", sys.executable, "-c", "import sys; sys.exit(5)"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    payload = json.loads(result.stdout.strip())
+    assert result.returncode == 5
+    assert payload["reason"] == "failed"
+    assert payload["exit_code"] == 5
