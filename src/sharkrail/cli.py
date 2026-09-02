@@ -13,8 +13,10 @@ from .capabilities import collect
 from .doctor import diagnose, format_report, write_diagnostic_bundle
 from .executor import CommandRunner
 from .models import CommandMode, ResourceLimits
-from .protocol import serve_stdio
+from .protocol import JsonRpcRuntime, serve_stdio
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
+from .sessions import SessionManager
+from .telemetry import EventRecorder
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--wsl-user", default=None)
     run.add_argument("--wsl-cwd", default=None)
     _add_resource_arguments(run)
+    _add_event_log_arguments(run)
 
     shell = subparsers.add_parser("shell", help="Run an explicit shell script")
     shell.add_argument("shell", choices=[item.value for item in Shell])
@@ -59,11 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("--wsl-user", default=None)
     shell.add_argument("--wsl-cwd", default=None)
     _add_resource_arguments(shell)
+    _add_event_log_arguments(shell)
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
 
-    subparsers.add_parser("serve", help="Serve newline-delimited JSON-RPC 2.0 over stdio")
+    serve = subparsers.add_parser(
+        "serve", help="Serve newline-delimited JSON-RPC 2.0 over stdio"
+    )
+    _add_event_log_arguments(serve)
 
     doctor = subparsers.add_parser("doctor", help="Diagnose local runtime capabilities")
     doctor.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -76,6 +83,12 @@ def _add_resource_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--memory-bytes", type=int, default=None)
     parser.add_argument("--cpu-time-seconds", type=int, default=None)
     parser.add_argument("--process-count", type=int, default=None)
+
+
+def _add_event_log_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--event-log", metavar="PATH", default=None)
+    parser.add_argument("--event-log-max-bytes", type=int, default=16 * 1024 * 1024)
+    parser.add_argument("--event-log-include-output", action="store_true")
 
 
 async def _run_cmd(ns: argparse.Namespace) -> int:
@@ -109,7 +122,20 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
             wsl=wsl,
             resources=resources,
         )
-    runner = CommandRunner(dry_run=ns.dry_run, max_output_bytes=ns.max_output_bytes)
+    recorder = (
+        EventRecorder(
+            Path(ns.event_log),
+            max_bytes=ns.event_log_max_bytes,
+            include_output=ns.event_log_include_output,
+        )
+        if ns.event_log
+        else None
+    )
+    runner = CommandRunner(
+        dry_run=ns.dry_run,
+        max_output_bytes=ns.max_output_bytes,
+        event_recorder=recorder,
+    )
 
     events: list[dict[str, object]] = []
     if ns.events:
@@ -215,7 +241,17 @@ def main() -> int:
         return 0
 
     if ns.command == "serve":
-        asyncio.run(serve_stdio())
+        recorder = (
+            EventRecorder(
+                Path(ns.event_log),
+                max_bytes=ns.event_log_max_bytes,
+                include_output=ns.event_log_include_output,
+            )
+            if ns.event_log
+            else None
+        )
+        runtime = JsonRpcRuntime(SessionManager(event_recorder=recorder))
+        asyncio.run(serve_stdio(runtime=runtime))
         return 0
 
     if ns.command == "doctor":

@@ -12,6 +12,7 @@ from typing import Callable, Optional
 from .backends import ExecutionBackend
 from .errors import ErrorCode, ExecutionError, SharkRailError
 from .models import CommandSpec
+from .telemetry import EventRecorder
 
 
 class CompletionReason(str, Enum):
@@ -82,10 +83,12 @@ class CommandRunner:
         dry_run: bool = False,
         max_output_bytes: int | None = None,
         backend: ExecutionBackend | None = None,
+        event_recorder: EventRecorder | None = None,
     ) -> None:
         self._dry_run = dry_run
         self._max_output_bytes = max_output_bytes
         self._backend = backend
+        self._event_recorder = event_recorder
 
     async def run(
         self,
@@ -139,7 +142,10 @@ class CommandRunner:
         # public result and event contracts are defined in this module.
         from .sessions import SessionManager
 
-        manager = SessionManager(backend=self._backend)
+        manager = SessionManager(
+            backend=self._backend,
+            event_recorder=self._event_recorder,
+        )
 
         try:
             session = await manager.start(

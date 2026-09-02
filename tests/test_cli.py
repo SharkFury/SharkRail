@@ -237,3 +237,33 @@ def test_sharkrail_doctor_json():
     assert result.returncode == 0
     assert payload["healthy"] is True
     assert payload["checks"]
+
+
+def test_cli_event_log_is_bounded_and_redacted(tmp_path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    destination = tmp_path / "events.jsonl"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--event-log",
+            str(destination),
+            "--",
+            sys.executable,
+            "-c",
+            "print('secret-output')",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    records = [json.loads(line) for line in destination.read_text().splitlines()]
+    output = next(record for record in records if record["kind"] == "stdout")
+    assert output["payload"]["output_redacted"] is True
+    assert "text" not in output["payload"]
