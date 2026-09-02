@@ -199,3 +199,26 @@ def test_protocol_exposes_traces_stats_and_session_inspection():
         assert events["result"]["events"][0]["timestamp"].endswith("+00:00")
 
     asyncio.run(_run())
+
+
+def test_protocol_validates_resource_policy():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime()
+        response = await runtime.dispatch(
+            request(
+                "session.start",
+                {
+                    "spec": {
+                        "executable": sys.executable,
+                        "argv": ["-c", "pass"],
+                        "resources": {"memory_bytes": 0},
+                    }
+                },
+            )
+        )
+
+        assert response is not None
+        assert response["error"]["code"] == -32602
+        assert "memory_bytes" in response["error"]["data"]["message"]
+
+    asyncio.run(_run())

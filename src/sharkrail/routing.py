@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from .models import CommandMode, CommandSpec
+from .models import CommandMode, CommandSpec, ResourceLimits
 
 
 class Shell(str, Enum):
@@ -40,13 +40,20 @@ def shell_command(
     mode: CommandMode = CommandMode.PIPE,
     target: Target = Target.NATIVE,
     wsl: Optional[WslOptions] = None,
+    resources: Optional[ResourceLimits] = None,
 ) -> CommandSpec:
     if not script:
         raise ValueError("shell script must be non-empty")
     if target == Target.WSL:
         if shell not in {Shell.BASH, Shell.ZSH}:
             raise ValueError("WSL target supports bash and zsh shell requests")
-        return _wsl_spec((shell.value, "-lc", script), mode=mode, env=env, options=wsl)
+        return _wsl_spec(
+            (shell.value, "-lc", script),
+            mode=mode,
+            env=env,
+            options=wsl,
+            resources=resources,
+        )
 
     if shell == Shell.CMD:
         argv = ("/d", "/s", "/c", script)
@@ -60,7 +67,14 @@ def shell_command(
     else:
         executable = shell.value
         argv = ("-lc", script)
-    return CommandSpec(executable=executable, argv=argv, cwd=cwd, env=env, mode=mode)
+    return CommandSpec(
+        executable=executable,
+        argv=argv,
+        cwd=cwd,
+        env=env,
+        mode=mode,
+        resources=resources or ResourceLimits(),
+    )
 
 
 def direct_command(
@@ -72,10 +86,24 @@ def direct_command(
     mode: CommandMode = CommandMode.PIPE,
     target: Target = Target.NATIVE,
     wsl: Optional[WslOptions] = None,
+    resources: Optional[ResourceLimits] = None,
 ) -> CommandSpec:
     if target == Target.WSL:
-        return _wsl_spec((executable, *argv), mode=mode, env=env, options=wsl)
-    return CommandSpec(executable=executable, argv=argv, cwd=cwd, env=env, mode=mode)
+        return _wsl_spec(
+            (executable, *argv),
+            mode=mode,
+            env=env,
+            options=wsl,
+            resources=resources,
+        )
+    return CommandSpec(
+        executable=executable,
+        argv=argv,
+        cwd=cwd,
+        env=env,
+        mode=mode,
+        resources=resources or ResourceLimits(),
+    )
 
 
 def _wsl_spec(
@@ -84,6 +112,7 @@ def _wsl_spec(
     mode: CommandMode,
     env: Optional[Mapping[str, str]],
     options: Optional[WslOptions],
+    resources: Optional[ResourceLimits],
 ) -> CommandSpec:
     options = options or WslOptions()
     prefix: list[str] = []
@@ -99,4 +128,5 @@ def _wsl_spec(
         argv=tuple(prefix) + command,
         env=env,
         mode=mode,
+        resources=resources or ResourceLimits(),
     )

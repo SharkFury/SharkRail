@@ -42,6 +42,7 @@ def collect() -> Capability:
             "exit_reasons",
             "capabilities",
             "process_tree_kill",
+            "resource_limits",
         ]
         degraded: list[str] = []
         if pty_available:
@@ -74,7 +75,7 @@ def collect() -> Capability:
             modes=("pipe", "pty"),
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
-            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
+            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize", "resource_limits"),
             targets=("native",),
             shells=shells,
         )
@@ -89,7 +90,7 @@ def collect() -> Capability:
         modes=("pipe", "pty"),
         max_output_bytes=16 * 1024 * 1024,
         supports_timeout=True,
-        features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
+        features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize", "resource_limits"),
         targets=("native",),
         shells=shells,
     )

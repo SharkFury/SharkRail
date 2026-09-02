@@ -22,6 +22,7 @@ from .windows import WindowsJob
 if os.name != "nt":
     import fcntl
     import pty
+    import resource
     import struct
     import termios
 
@@ -127,6 +128,7 @@ class PipeBackend(ExecutionBackend):
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
+            kwargs["preexec_fn"] = _resource_limiter(spec)
         process = await asyncio.create_subprocess_exec(*spec.argv_list, **kwargs)
         return ProcessHandle(process=process)
 
@@ -199,7 +201,11 @@ class WindowsPipeBackend(PipeBackend):
 
     async def start(self, spec: CommandSpec) -> WindowsProcessHandle:
         handle = await super().start(spec)
-        job = WindowsJob()
+        job = WindowsJob(
+            memory_bytes=spec.resources.memory_bytes,
+            cpu_time_seconds=spec.resources.cpu_time_seconds,
+            process_count=spec.resources.process_count,
+        )
         try:
             job.assign(handle.pid)
         except BaseException:
@@ -245,6 +251,7 @@ class PtyBackend(ExecutionBackend):
                 stdout=slave_fd,
                 stderr=slave_fd,
                 start_new_session=True,
+                preexec_fn=_resource_limiter(spec),
             )
         except BaseException:
             os.close(master_fd)
@@ -350,7 +357,11 @@ class WindowsPtyBackend(ExecutionBackend):
             dimensions=(24, 80),
         )
         process = _WinPtyAsyncProcess(native)
-        job = WindowsJob()
+        job = WindowsJob(
+            memory_bytes=spec.resources.memory_bytes,
+            cpu_time_seconds=spec.resources.cpu_time_seconds,
+            process_count=spec.resources.process_count,
+        )
         try:
             job.assign(process.pid)
         except BaseException:
@@ -413,6 +424,32 @@ class WindowsPtyBackend(ExecutionBackend):
         if pty_handle.job is not None:
             pty_handle.job.close()
             pty_handle.job = None
+
+
+def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:
+    limits = spec.resources
+    if (
+        limits.memory_bytes is None
+        and limits.cpu_time_seconds is None
+        and limits.process_count is None
+    ):
+        return None
+
+    def apply_limits() -> None:
+        if limits.memory_bytes is not None:
+            resource.setrlimit(resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes))
+        if limits.cpu_time_seconds is not None:
+            resource.setrlimit(
+                resource.RLIMIT_CPU,
+                (limits.cpu_time_seconds, limits.cpu_time_seconds),
+            )
+        if limits.process_count is not None and hasattr(resource, "RLIMIT_NPROC"):
+            resource.setrlimit(
+                resource.RLIMIT_NPROC,
+                (limits.process_count, limits.process_count),
+            )
+
+    return apply_limits
 
 
 def _as_pty(handle: ProcessHandle) -> PtyProcessHandle:

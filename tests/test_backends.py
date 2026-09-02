@@ -12,7 +12,7 @@ from sharkrail.backends import (
     cancel_process,
     wait_for_exit,
 )
-from sharkrail.models import CommandSpec
+from sharkrail.models import CommandSpec, ResourceLimits
 
 
 def test_pipe_backend_supports_stdin_and_eof():
@@ -142,3 +142,27 @@ def test_cancellation_reports_steps_before_attempting_them():
         assert reported == list(steps)
 
     asyncio.run(_run())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX setrlimit fixture")
+def test_posix_resource_policy_is_applied_before_exec():
+    from unittest.mock import patch
+
+    from sharkrail.backends import _resource_limiter
+
+    spec = CommandSpec(
+        executable=sys.executable,
+        argv=("-c", "pass"),
+        resources=ResourceLimits(
+            memory_bytes=1024,
+            cpu_time_seconds=2,
+            process_count=3,
+        ),
+    )
+    limiter = _resource_limiter(spec)
+    assert limiter is not None
+
+    with patch("sharkrail.backends.resource.setrlimit") as set_limit:
+        limiter()
+
+    assert set_limit.call_count == 3

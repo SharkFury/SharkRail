@@ -1,4 +1,4 @@
-from sharkrail.models import CommandMode, CommandSpec
+from sharkrail.models import CommandMode, CommandSpec, ResourceLimits
 
 
 def test_command_spec_validation_ok():
@@ -29,3 +29,17 @@ def test_command_spec_rejects_invalid_environment_name():
         assert False
     except ValueError as err:
         assert "environment" in str(err)
+
+
+def test_resource_limits_must_be_positive():
+    spec = CommandSpec(
+        executable="echo",
+        argv=("hello",),
+        resources=ResourceLimits(memory_bytes=0),
+    )
+
+    try:
+        spec.validate()
+        assert False
+    except ValueError as err:
+        assert "memory_bytes" in str(err)

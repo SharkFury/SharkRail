@@ -8,10 +8,20 @@ import os
 class WindowsJob:
     """A kill-on-close Job Object owned by one execution session."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        memory_bytes: int | None = None,
+        cpu_time_seconds: int | None = None,
+        process_count: int | None = None,
+    ) -> None:
         if os.name != "nt":
             raise OSError("Windows Job Objects are only available on Windows")
-        self._handle = _create_kill_on_close_job()
+        self._handle = _create_job(
+            memory_bytes=memory_bytes,
+            cpu_time_seconds=cpu_time_seconds,
+            process_count=process_count,
+        )
         self._closed = False
 
     def assign(self, pid: int) -> None:
@@ -48,6 +58,9 @@ if os.name == "nt":
     from ctypes import wintypes
 
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    JOB_OBJECT_LIMIT_JOB_TIME = 0x00000004
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+    JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
     PROCESS_TERMINATE = 0x0001
     PROCESS_SET_QUOTA = 0x0100
@@ -111,12 +124,27 @@ def _raise_last_error(operation: str) -> None:
     raise OSError(error, f"{operation} failed", None, error)
 
 
-def _create_kill_on_close_job() -> int:
+def _create_job(
+    *,
+    memory_bytes: int | None = None,
+    cpu_time_seconds: int | None = None,
+    process_count: int | None = None,
+) -> int:
     handle = _kernel32.CreateJobObjectW(None, None)
     if not handle:
         _raise_last_error("CreateJobObjectW")
     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if memory_bytes is not None:
+        info.JobMemoryLimit = memory_bytes
+        flags |= JOB_OBJECT_LIMIT_JOB_MEMORY
+    if cpu_time_seconds is not None:
+        info.BasicLimitInformation.PerJobUserTimeLimit = cpu_time_seconds * 10_000_000
+        flags |= JOB_OBJECT_LIMIT_JOB_TIME
+    if process_count is not None:
+        info.BasicLimitInformation.ActiveProcessLimit = process_count
+        flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+    info.BasicLimitInformation.LimitFlags = flags
     if not _kernel32.SetInformationJobObject(
         handle,
         JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,

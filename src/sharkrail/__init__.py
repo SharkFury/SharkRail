@@ -12,7 +12,7 @@ from .executor import (
     LifecycleEventType,
 )
 from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
-from .models import CommandMode, CommandSpec
+from .models import CommandMode, CommandSpec, ResourceLimits
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import Session, SessionManager
 
@@ -30,6 +30,7 @@ __all__ = [
     "InvalidTransition",
     "LifecycleEvent",
     "LifecycleEventType",
+    "ResourceLimits",
     "Session",
     "SessionLifecycle",
     "SessionManager",

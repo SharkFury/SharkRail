@@ -11,7 +11,7 @@ from . import __version__
 from .capabilities import collect
 from .doctor import diagnose, format_report, write_diagnostic_bundle
 from .executor import CommandRunner
-from .models import CommandMode
+from .models import CommandMode, ResourceLimits
 from .protocol import serve_stdio
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 
@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--wsl-distribution", default=None)
     run.add_argument("--wsl-user", default=None)
     run.add_argument("--wsl-cwd", default=None)
+    _add_resource_arguments(run)
 
     shell = subparsers.add_parser("shell", help="Run an explicit shell script")
     shell.add_argument("shell", choices=[item.value for item in Shell])
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("--wsl-distribution", default=None)
     shell.add_argument("--wsl-user", default=None)
     shell.add_argument("--wsl-cwd", default=None)
+    _add_resource_arguments(shell)
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -67,11 +69,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_resource_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--memory-bytes", type=int, default=None)
+    parser.add_argument("--cpu-time-seconds", type=int, default=None)
+    parser.add_argument("--process-count", type=int, default=None)
+
+
 async def _run_cmd(ns: argparse.Namespace) -> int:
     wsl = WslOptions(
         distribution=ns.wsl_distribution,
         user=ns.wsl_user,
         cwd=ns.wsl_cwd,
+    )
+    resources = ResourceLimits(
+        memory_bytes=ns.memory_bytes,
+        cpu_time_seconds=ns.cpu_time_seconds,
+        process_count=ns.process_count,
     )
     if ns.command == "shell":
         spec = shell_command(
@@ -81,6 +94,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
             mode=CommandMode(ns.mode),
             target=Target(ns.target),
             wsl=wsl,
+            resources=resources,
         )
     else:
         spec = direct_command(
@@ -90,6 +104,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
             mode=CommandMode(ns.mode),
             target=Target(ns.target),
             wsl=wsl,
+            resources=resources,
         )
     runner = CommandRunner(dry_run=ns.dry_run, max_output_bytes=ns.max_output_bytes)
 

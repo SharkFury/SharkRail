@@ -1,4 +1,4 @@
-from sharkrail.models import CommandMode
+from sharkrail.models import CommandMode, ResourceLimits
 from sharkrail.routing import Shell, Target, WslOptions, direct_command, shell_command
 
 
@@ -46,3 +46,10 @@ def test_wsl_shell_rejects_windows_shell():
 def test_shell_command_keeps_requested_mode():
     spec = shell_command(Shell.BASH, "printf hello", mode=CommandMode.PTY)
     assert spec.mode == CommandMode.PTY
+
+
+def test_direct_command_preserves_resource_policy():
+    limits = ResourceLimits(memory_bytes=1024 * 1024, process_count=2)
+    spec = direct_command("python", ("-V",), resources=limits)
+
+    assert spec.resources == limits

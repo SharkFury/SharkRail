@@ -14,7 +14,7 @@ from . import __version__
 from .backends import CancellationPolicy
 from .capabilities import Capability, collect
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
-from .models import CommandMode, CommandSpec
+from .models import CommandMode, CommandSpec, ResourceLimits
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import Session, SessionManager
 
@@ -299,6 +299,7 @@ def _parse_spec(params: dict[str, Any]) -> CommandSpec:
         "mode": CommandMode(spec.get("mode", "pipe")),
         "target": target,
         "wsl": wsl,
+        "resources": _parse_resources(spec),
     }
     if "shell" in spec:
         return shell_command(
@@ -307,6 +308,17 @@ def _parse_spec(params: dict[str, Any]) -> CommandSpec:
             **common,
         )
     return direct_command(_required_str(spec, "executable"), tuple(argv), **common)
+
+
+def _parse_resources(spec: dict[str, Any]) -> ResourceLimits:
+    resources = spec.get("resources", {})
+    if not isinstance(resources, dict):
+        raise TypeError("resources must be an object")
+    return ResourceLimits(
+        memory_bytes=_optional_int(resources, "memory_bytes"),
+        cpu_time_seconds=_optional_int(resources, "cpu_time_seconds"),
+        process_count=_optional_int(resources, "process_count"),
+    )
 
 
 def _parse_input(params: dict[str, Any]) -> bytes:
