@@ -45,7 +45,8 @@ The product standardizes intent and observable results—not OS mechanisms. Wind
 - POSIX process groups
 - Configurable timeout and cancellation grace periods
 - Byte-based output budgets with retained/dropped byte accounting
-- Concurrency, per-write, and output-event limits
+- Concurrency, per-write, cumulative-input, output-event, event-history, completed-session, and RPC limits
+- CPU, memory, process-count, wall-time, idle-time, drain, termination, and shutdown policies
 - Stable error codes, error stages, and native diagnostics
 
 ### Interfaces
@@ -54,12 +55,14 @@ The product standardizes intent and observable results—not OS mechanisms. Wind
 - Public asynchronous Python API
 - Concurrent newline-delimited JSON-RPC 2.0 over stdio
 - Capability negotiation and doctor diagnostics
+- Runtime health/stats, session inspection, traceable timed events, structured logs, bounded audit files, and optional OpenTelemetry
 
 ### Quality
 
 - Unit and integration tests for every implementation area
-- CI on Windows, Ubuntu, and macOS with Python 3.9 and 3.11
-- Lint, compatibility smoke, capability smoke, sdist, and wheel builds
+- Fault-injection, concurrency, protocol fuzz, and large-output reliability tests
+- CI on Windows, Ubuntu, and macOS with Python 3.9, 3.11, and 3.14
+- Lint, compatibility smoke, capability smoke, coverage/deadline gates, sdist, and wheel builds
 
 ## Runtime model
 
@@ -147,7 +150,6 @@ Direct argv avoids unintended shell interpretation, but executed programs have t
 - Optional Unix Domain Socket and current-user Windows Named Pipe transports
 - WSL in-distribution supervisor for stronger Linux descendant cleanup
 - Optional VT screen model and snapshots
-- CPU, memory, and process-count policies using Job Object/cgroup facilities
-- Signed release artifacts and package-index publication
+- Explicit signing for GitHub Release artifacts
 
 These are post-v0.1 integrations and enhancements, not missing parts of the v0.1 local execution contract.

@@ -21,6 +21,10 @@ SharkRail provides:
 - Windows Job Objects and POSIX process groups for process-tree cleanup
 - Ordered lifecycle/output events with resumable cursors
 - Byte-accurate output budgets, truncation accounting, and resource limits
+- CPU, memory, process-count, wall-time, idle-time, and cumulative-input policies
+- Bounded event history, paginated subscriptions, session expiry, and RPC backpressure
+- UTC/monotonic event timing, trace IDs, runtime health/stats, and session inspection
+- Structured stderr logs, redacted JSONL audit files, and optional OpenTelemetry
 - A newline-delimited JSON-RPC 2.0 stdio server
 - Native and WSL target routing
 - Runtime capability negotiation and `doctor` diagnostics
@@ -107,6 +111,8 @@ Clients should call `runtime.capabilities` instead of guessing from the OS name.
 
 - [Product and architecture](docs/PRODUCT.md)
 - [Protocol reference](docs/PROTOCOL.md)
+- [Reliability contract](docs/RELIABILITY.md)
+- [Observability](docs/OBSERVABILITY.md)
 - [Build and test](BUILD.md)
 - [Release process](docs/RELEASING.md)
 - [Contributing](CONTRIBUTING.md)

@@ -12,8 +12,17 @@
 - Add explicit shell and WSL target routing
 - Add stdio JSON-RPC 2.0 runtime service
 - Add capability negotiation and doctor diagnostics
-- Add Windows, Linux, and macOS CI for Python 3.9 and 3.11
+- Add Windows, Linux, and macOS CI for Python 3.9, 3.11, and 3.14
 - Add a tested PyPI trusted-publishing and GitHub Release pipeline
+- Unify CLI, Python, and JSON-RPC execution on the supervised session runtime
+- Guarantee structured terminal states for backend, drain, termination, and disposal failures
+- Add bounded drain/shutdown, idempotent cancellation, serialized session operations, and RPC backpressure
+- Add bounded event pages, explicit expired cursors, completed-session retention, and total input limits
+- Add CPU, memory, process-count, wall-time, and idle-time policies
+- Add lossless Base64 output and incremental UTF-8 stream decoding
+- Add event timestamps, trace IDs, runtime health/stats, session inspection, and active doctor probes
+- Add structured logs, redacted bounded event audits, diagnostic bundles, and optional OpenTelemetry
+- Add reliability stress tests, test deadlines, and a coverage gate
 
 ## 0.0.1
 

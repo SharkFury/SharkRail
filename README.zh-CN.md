@@ -20,6 +20,10 @@ SharkRail v0.1 已实现：
 - interrupt → terminate → kill_tree 取消升级；
 - Windows Job Object 与 POSIX process group 进程树管理；
 - 有序事件、增量游标、字节级输出上限与截断统计；
+- 有界事件分页、会话过期、累计输入和 RPC 背压；
+- CPU、内存、进程数、总时长、空闲时长与 drain 超时策略；
+- UTC/单调时钟事件、trace ID、health/stats、session 检查与主动 doctor 探测；
+- 结构化 stderr 日志、脱敏 JSONL 审计和可选 OpenTelemetry；
 - stdio JSON-RPC 2.0 服务；
 - Native/WSL target 路由；
 - capability negotiation 与 `doctor` 诊断；
@@ -68,6 +72,8 @@ sharkrail serve
 - [英文 README](README.md)
 - [产品与架构](docs/PRODUCT.md)
 - [协议参考](docs/PROTOCOL.md)
+- [可靠性契约](docs/RELIABILITY.md)
+- [可观测性](docs/OBSERVABILITY.md)
 - [构建与测试](BUILD.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)

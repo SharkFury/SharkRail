@@ -11,3 +11,7 @@ Please include:
 
 The maintainer team will investigate and publish a fix timeline in the public issue when resolved.
 
+Structured runtime logs exclude command arguments and environment values. JSONL
+event audit files redact output by default, but `--event-log-include-output`
+records command output verbatim and must only be used with an appropriately
+protected destination.
