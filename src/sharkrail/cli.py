@@ -83,22 +83,29 @@ def main() -> int:
             print(
                 json.dumps(
                     {
+                        "contract_version": capability.contract_version,
                         "platform": capability.platform_name,
                         "modes": capability.modes,
                         "process_tree": capability.process_tree,
                         "supports_timeout": capability.supports_timeout,
                         "max_output_bytes": capability.max_output_bytes,
+                        "features": capability.features,
                     },
                     ensure_ascii=False,
                 )
             )
             return 0
         print(
-            "platform: " + capability.platform_name
+            "protocol v"
+            + capability.contract_version
+            + ", platform: "
+            + capability.platform_name
             + ", modes: "
             + ", ".join(capability.modes)
             + ", process_tree: "
             + capability.process_tree
+            + ", features: "
+            + ", ".join(capability.features)
         )
         return 0
 

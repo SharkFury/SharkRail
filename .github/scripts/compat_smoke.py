@@ -62,8 +62,10 @@ capabilities = run([sys.executable, "-m", "sharkrail", "capabilities", "--json"]
 expect(capabilities.returncode == 0, "capabilities --json should return 0")
 cap_payload = json.loads(capabilities.stdout)
 expect("platform" in cap_payload, "capabilities payload should include platform")
+expect("contract_version" in cap_payload, "capabilities payload should include contract version")
 expect("modes" in cap_payload, "capabilities payload should include modes")
 expect(isinstance(cap_payload["modes"], list), "capabilities modes should be a list")
+expect("features" in cap_payload and isinstance(cap_payload["features"], list), "capabilities payload should include features list")
 expect(cap_payload.get("supports_timeout") is True, "capabilities should report timeout support")
 
 print("compat smoke passed")

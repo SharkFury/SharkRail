@@ -87,4 +87,6 @@ def test_sharkrail_capabilities_json():
     assert result.returncode == 0
     assert "platform" in payload
     assert "modes" in payload and isinstance(payload["modes"], list)
+    assert "contract_version" in payload
+    assert "features" in payload and isinstance(payload["features"], list)
     assert payload["supports_timeout"] is True
