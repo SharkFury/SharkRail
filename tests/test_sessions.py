@@ -311,3 +311,63 @@ def test_runtime_stats_and_session_inspection_are_bounded_metadata():
         await manager.dispose(session.id)
 
     asyncio.run(_run())
+
+
+def test_session_idle_timeout_is_distinct_from_wall_timeout():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)")),
+            idle_timeout_ms=50,
+        )
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=2)
+
+        assert result is not None
+        assert result.reason == CompletionReason.IDLE_TIMEOUT
+        assert result.timed_out is True
+        assert result.exit_code == 124
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_session_enforces_total_input_limit():
+    async def _run() -> None:
+        manager = SessionManager(max_input_bytes=4, max_total_input_bytes=5)
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import sys; sys.stdin.read()"))
+        )
+        await manager.write(session.id, b"123")
+        with pytest.raises(SharkRailError) as raised:
+            await manager.write(session.id, b"456")
+
+        assert raised.value.error.code == ErrorCode.RESOURCE_LIMITED
+        assert any(
+            event.kind == LifecycleEventType.RESOURCE_LIMIT_HIT
+            and event.payload.get("resource") == "total_input_bytes"
+            for event in session.events
+        )
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_streaming_utf8_decoder_handles_character_split_between_chunks():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(.1)"))
+        )
+        await session.append_output("stdout", b"\xe4")
+        await session.append_output("stdout", b"\xb8\xad")
+        result = await manager.wait(session.id)
+        output_events = [
+            event for event in session.events if event.kind == LifecycleEventType.STDOUT
+        ]
+
+        assert result is not None and result.stdout == "中"
+        assert "".join(str(event.payload["text"]) for event in output_events) == "中"
+        assert not any(event.payload["decoding_errors"] for event in output_events)
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())

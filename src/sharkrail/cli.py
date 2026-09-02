@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 from pathlib import Path
 
@@ -30,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("args", nargs="*", help="Arguments passed to executable")
     run.add_argument("--mode", choices=["pipe", "pty"], default="pipe")
     run.add_argument("--timeout-ms", type=int, default=None)
+    run.add_argument("--idle-timeout-ms", type=int, default=None)
     run.add_argument("--cwd", default=None)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -46,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("script")
     shell.add_argument("--mode", choices=["pipe", "pty"], default="pipe")
     shell.add_argument("--timeout-ms", type=int, default=None)
+    shell.add_argument("--idle-timeout-ms", type=int, default=None)
     shell.add_argument("--cwd", default=None)
     shell.add_argument("--dry-run", action="store_true")
     shell.add_argument("--json", action="store_true")
@@ -110,7 +113,11 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
 
     events: list[dict[str, object]] = []
     if ns.events:
-        result, raw_events = await runner.run_events(spec, timeout_ms=ns.timeout_ms)
+        result, raw_events = await runner.run_events(
+            spec,
+            timeout_ms=ns.timeout_ms,
+            idle_timeout_ms=ns.idle_timeout_ms,
+        )
         events = [
             {
                 "seq": event.seq,
@@ -120,7 +127,11 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
             for event in raw_events
         ]
     else:
-        result = await runner.run(spec, timeout_ms=ns.timeout_ms)
+        result = await runner.run(
+            spec,
+            timeout_ms=ns.timeout_ms,
+            idle_timeout_ms=ns.idle_timeout_ms,
+        )
 
     if ns.json:
         print(
@@ -131,6 +142,8 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                     "reason": result.reason.value,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
+                    "stdout_base64": base64.b64encode(result.stdout_bytes).decode("ascii"),
+                    "stderr_base64": base64.b64encode(result.stderr_bytes).decode("ascii"),
                     "output_truncated": result.output_truncated,
                     "retained_output_bytes": result.retained_output_bytes,
                     "truncated_output_bytes": result.truncated_output_bytes,
@@ -143,7 +156,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                 ensure_ascii=False,
             )
         )
-        if result.reason.value == "timeout":
+        if result.timed_out:
             return 124
         if result.exit_code != 0:
             return result.exit_code

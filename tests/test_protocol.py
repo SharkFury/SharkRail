@@ -222,3 +222,39 @@ def test_protocol_validates_resource_policy():
         assert "memory_bytes" in response["error"]["data"]["message"]
 
     asyncio.run(_run())
+
+
+def test_protocol_preserves_non_utf8_output_as_base64():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime()
+        started = await runtime.dispatch(
+            request(
+                "session.start",
+                {
+                    "spec": {
+                        "executable": sys.executable,
+                        "argv": ["-c", "import sys; sys.stdout.buffer.write(b'\\xff')"],
+                    }
+                },
+            )
+        )
+        assert started is not None
+        session_id = started["result"]["session_id"]
+        waited = await runtime.dispatch(
+            request("session.wait", {"session_id": session_id}, 2)
+        )
+        events = await runtime.dispatch(
+            request("session.subscribe", {"session_id": session_id}, 3)
+        )
+
+        assert waited is not None
+        assert base64.b64decode(waited["result"]["stdout_base64"]) == b"\xff"
+        assert events is not None
+        output = next(
+            event
+            for event in events["result"]["events"]
+            if event["kind"] == "stdout"
+        )
+        assert base64.b64decode(output["payload"]["data_base64"]) == b"\xff"
+
+    asyncio.run(_run())

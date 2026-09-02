@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
 import json
 import logging
 import time
@@ -43,6 +45,7 @@ class Session:
     handle: ProcessHandle
     max_output_bytes: Optional[int]
     timeout_ms: Optional[int]
+    idle_timeout_ms: Optional[int] = None
     lifecycle: SessionLifecycle = field(default_factory=SessionLifecycle)
     events: deque[LifecycleEvent] = field(default_factory=deque)
     stdout: bytearray = field(default_factory=bytearray)
@@ -73,6 +76,8 @@ class Session:
     exited_monotonic: Optional[float] = None
     drain_started_monotonic: Optional[float] = None
     last_output_monotonic: Optional[float] = None
+    input_bytes: int = 0
+    stream_decoders: dict[str, object] = field(default_factory=dict)
 
     @property
     def state(self) -> SessionState:
@@ -123,7 +128,11 @@ class Session:
             kind = LifecycleEventType.STDOUT
 
         if kept and self.output_event_count < self.max_output_events:
-            text = kept.decode("utf-8", errors="replace")
+            decoder = self.stream_decoders.get(stream)
+            if decoder is None:
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                self.stream_decoders[stream] = decoder
+            text = decoder.decode(kept, final=False)
             await self.emit(
                 kind,
                 {
@@ -132,6 +141,7 @@ class Session:
                     "bytes": len(kept),
                     "encoding": "utf-8",
                     "text": text,
+                    "data_base64": base64.b64encode(kept).decode("ascii"),
                     "decoding_errors": "\ufffd" in text,
                 },
             )
@@ -162,6 +172,7 @@ class SessionManager:
         default_max_output_bytes: int = 16 * 1024 * 1024,
         max_active_sessions: int = 64,
         max_input_bytes: int = 1024 * 1024,
+        max_total_input_bytes: int = 16 * 1024 * 1024,
         max_output_events: int = 10000,
         backend: Optional[ExecutionBackend] = None,
         drain_timeout_ms: int = 2000,
@@ -178,6 +189,7 @@ class SessionManager:
         if (
             max_active_sessions <= 0
             or max_input_bytes <= 0
+            or max_total_input_bytes <= 0
             or max_output_events <= 0
             or drain_timeout_ms < 0
             or termination_timeout_ms <= 0
@@ -192,6 +204,7 @@ class SessionManager:
         self._default_max_output_bytes = default_max_output_bytes
         self._max_active_sessions = max_active_sessions
         self._max_input_bytes = max_input_bytes
+        self._max_total_input_bytes = max_total_input_bytes
         self._max_output_events = max_output_events
         self._backend = backend
         self._drain_timeout_ms = drain_timeout_ms
@@ -220,6 +233,7 @@ class SessionManager:
         spec: CommandSpec,
         *,
         timeout_ms: Optional[int] = None,
+        idle_timeout_ms: Optional[int] = None,
         max_output_bytes: Optional[int] = None,
         trace_id: Optional[str] = None,
         request_id: Optional[str] = None,
@@ -242,6 +256,8 @@ class SessionManager:
             )
         if timeout_ms is not None and timeout_ms < 0:
             raise self._request_error("timeout_ms must be non-negative")
+        if idle_timeout_ms is not None and idle_timeout_ms <= 0:
+            raise self._request_error("idle_timeout_ms must be positive")
         if max_output_bytes is not None and max_output_bytes < 0:
             raise self._request_error("max_output_bytes must be non-negative")
         backend = self._backend or (
@@ -277,6 +293,7 @@ class SessionManager:
             handle=handle,
             max_output_bytes=self._default_max_output_bytes if max_output_bytes is None else max_output_bytes,
             timeout_ms=timeout_ms,
+            idle_timeout_ms=idle_timeout_ms,
             max_output_events=self._max_output_events,
             max_retained_events=self._max_retained_events,
             trace_id=trace_id or str(uuid4()),
@@ -340,11 +357,30 @@ class SessionManager:
                         message=f"input exceeds per-write limit ({self._max_input_bytes} bytes)",
                     )
                 )
+            if session.input_bytes + len(data) > self._max_total_input_bytes:
+                await session.emit(
+                    LifecycleEventType.RESOURCE_LIMIT_HIT,
+                    {
+                        "resource": "total_input_bytes",
+                        "limit": self._max_total_input_bytes,
+                    },
+                )
+                raise SharkRailError(
+                    ExecutionError(
+                        code=ErrorCode.RESOURCE_LIMITED,
+                        stage=ErrorStage.RUN,
+                        message=(
+                            "session input exceeds total limit "
+                            f"({self._max_total_input_bytes} bytes)"
+                        ),
+                    )
+                )
             await asyncio.wait_for(
                 session.backend.write(session.handle, data),
                 self._termination_timeout_ms / 1000,
             )
             self._total_input_bytes += len(data)
+            session.input_bytes += len(data)
 
     async def close_stdin(self, session_id: str) -> None:
         session = self.get(session_id)
@@ -621,11 +657,13 @@ class SessionManager:
                 else round((now - session.last_output_monotonic) * 1000, 3)
             ),
             "output_bytes": session.total_output_bytes,
+            "input_bytes": session.input_bytes,
             "retained_output_bytes": len(session.stdout) + len(session.stderr),
             "dropped_output_bytes": session.truncated_output_bytes,
             "first_cursor": session.first_event_seq,
             "next_cursor": session.next_event_seq,
             "cancellation_steps": session.cancellation_steps,
+            "idle_timeout_ms": session.idle_timeout_ms,
         }
 
     async def _monitor(self, session: Session) -> None:
@@ -640,17 +678,18 @@ class SessionManager:
 
         monitor_error: Optional[ExecutionError] = None
         disposed = False
+        process_wait = asyncio.create_task(session.handle.process.wait())
         try:
-            if session.timeout_ms is None:
-                await session.handle.process.wait()
-            else:
-                await asyncio.wait_for(session.handle.process.wait(), session.timeout_ms / 1000)
-        except asyncio.TimeoutError:
+            timeout_reason = await self._wait_reason(session, process_wait)
+        except Exception as err:  # noqa: BLE001 - backend boundary
+            timeout_reason = None
+            monitor_error = self._backend_error(err, ErrorStage.RUN)
+        if timeout_reason is not None:
             try:
-                session.completion_reason = CompletionReason.TIMEOUT
+                session.completion_reason = timeout_reason
                 await session.backend.kill_tree(session.handle)
                 await asyncio.wait_for(
-                    session.handle.process.wait(),
+                    asyncio.shield(process_wait),
                     self._termination_timeout_ms / 1000,
                 )
             except asyncio.TimeoutError:
@@ -715,6 +754,9 @@ class SessionManager:
             if monitor_error is None:
                 monitor_error = self._backend_error(err, ErrorStage.DISPOSE)
         finally:
+            if not process_wait.done():
+                process_wait.cancel()
+                await asyncio.gather(process_wait, return_exceptions=True)
             for reader in readers:
                 if not reader.done():
                     reader.cancel()
@@ -740,7 +782,7 @@ class SessionManager:
             )
 
         exit_code = session.handle.process.returncode
-        if reason == CompletionReason.TIMEOUT:
+        if reason in {CompletionReason.TIMEOUT, CompletionReason.IDLE_TIMEOUT}:
             exit_code = 124
         elif monitor_error is not None and (exit_code is None or exit_code == 0):
             exit_code = 1
@@ -754,10 +796,12 @@ class SessionManager:
             decoding_errors=captured.decoding_errors,
             max_output_bytes=session.max_output_bytes,
             reason=reason,
-            timed_out=reason == CompletionReason.TIMEOUT,
+            timed_out=reason in {CompletionReason.TIMEOUT, CompletionReason.IDLE_TIMEOUT},
             error=monitor_error,
             duration_ms=self._duration_ms(session),
             drain_duration_ms=self._drain_duration_ms(session),
+            stdout_bytes=bytes(session.stdout),
+            stderr_bytes=bytes(session.stderr),
         )
         if monitor_error is None:
             session.transition(SessionState.COMPLETED)
@@ -788,6 +832,49 @@ class SessionManager:
             error_code=monitor_error.code.value if monitor_error is not None else None,
         )
         self._prune_completed_sessions()
+
+    async def _wait_reason(
+        self,
+        session: Session,
+        process_wait: asyncio.Task[int],
+    ) -> Optional[CompletionReason]:
+        while True:
+            now = time.monotonic()
+            deadlines: list[tuple[float, CompletionReason]] = []
+            if session.timeout_ms is not None:
+                deadlines.append(
+                    (
+                        session.started_monotonic + session.timeout_ms / 1000,
+                        CompletionReason.TIMEOUT,
+                    )
+                )
+            if session.idle_timeout_ms is not None:
+                last_activity = session.last_output_monotonic or session.started_monotonic
+                deadlines.append(
+                    (
+                        last_activity + session.idle_timeout_ms / 1000,
+                        CompletionReason.IDLE_TIMEOUT,
+                    )
+                )
+            if not deadlines:
+                await asyncio.shield(process_wait)
+                return None
+
+            deadline, reason = min(deadlines, key=lambda item: item[0])
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(process_wait),
+                    max(0.0, deadline - now),
+                )
+                return None
+            except asyncio.TimeoutError:
+                current = time.monotonic()
+                if reason == CompletionReason.TIMEOUT and current >= deadline:
+                    return reason
+                if reason == CompletionReason.IDLE_TIMEOUT:
+                    last_activity = session.last_output_monotonic or session.started_monotonic
+                    if current >= last_activity + (session.idle_timeout_ms or 0) / 1000:
+                        return reason
 
     async def _read_pipe(
         self,

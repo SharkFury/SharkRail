@@ -120,6 +120,7 @@ class JsonRpcRuntime:
             session = await self.manager.start(
                 _parse_spec(params),
                 timeout_ms=_optional_int(params, "timeout_ms"),
+                idle_timeout_ms=_optional_int(params, "idle_timeout_ms"),
                 max_output_bytes=_optional_int(params, "max_output_bytes"),
                 trace_id=trace_id,
                 request_id=None if request_id is None else str(request_id),
@@ -377,6 +378,8 @@ def _result_dict(result: object) -> dict[str, Any]:
         "timed_out": result.timed_out,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "stdout_base64": base64.b64encode(result.stdout_bytes).decode("ascii"),
+        "stderr_base64": base64.b64encode(result.stderr_bytes).decode("ascii"),
         "output_truncated": result.output_truncated,
         "retained_output_bytes": result.retained_output_bytes,
         "truncated_output_bytes": result.truncated_output_bytes,

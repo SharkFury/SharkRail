@@ -67,6 +67,33 @@ def test_sharkrail_run_timeout_json_exit_code():
     assert payload["timed_out"] is True
 
 
+def test_sharkrail_run_idle_timeout_json_exit_code():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--idle-timeout-ms",
+            "50",
+            sys.executable,
+            "--",
+            "-c",
+            "import time; time.sleep(10)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    payload = json.loads(result.stdout.strip())
+    assert result.returncode == 124
+    assert payload["reason"] == "idle_timeout"
+
+
 def test_sharkrail_version():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"

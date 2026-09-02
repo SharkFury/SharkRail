@@ -21,6 +21,7 @@ class CompletionReason(str, Enum):
     CANCELLED = "cancelled"
     KILLED = "killed"
     RESOURCE_LIMITED = "resource_limited"
+    IDLE_TIMEOUT = "idle_timeout"
 
 
 class LifecycleEventType(str, Enum):
@@ -70,6 +71,8 @@ class CommandResult:
     error: ExecutionError | None = None
     duration_ms: float = 0.0
     drain_duration_ms: float = 0.0
+    stdout_bytes: bytes = b""
+    stderr_bytes: bytes = b""
 
 
 class CommandRunner:
@@ -87,14 +90,20 @@ class CommandRunner:
         self,
         spec: CommandSpec,
         timeout_ms: Optional[int] = None,
+        idle_timeout_ms: Optional[int] = None,
     ) -> CommandResult:
-        result, _ = await self.run_events(spec, timeout_ms=timeout_ms)
+        result, _ = await self.run_events(
+            spec,
+            timeout_ms=timeout_ms,
+            idle_timeout_ms=idle_timeout_ms,
+        )
         return result
 
     async def run_events(
         self,
         spec: CommandSpec,
         timeout_ms: Optional[int] = None,
+        idle_timeout_ms: Optional[int] = None,
         event_handler: Optional[Callable[[LifecycleEvent], None]] = None,
     ) -> tuple[CommandResult, list[LifecycleEvent]]:
         spec.validate()
@@ -135,6 +144,7 @@ class CommandRunner:
             session = await manager.start(
                 spec,
                 timeout_ms=timeout_ms,
+                idle_timeout_ms=idle_timeout_ms,
                 max_output_bytes=self._max_output_bytes,
             )
         except SharkRailError as err:
