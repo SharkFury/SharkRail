@@ -25,3 +25,7 @@ jobs:
         run: |
           pytest
           ruff check src tests
+      - name: Run compatibility smoke checks
+        run: |
+          python -m compileall src tests
+          python .github/scripts/compat_smoke.py
