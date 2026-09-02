@@ -86,8 +86,8 @@ def test_persistent_pty_session_supports_resize_and_write():
             )
         )
         await manager.resize(session.id, 120, 50)
-        await manager.write(session.id, b"sharkrail\n")
-        result = await manager.wait(session.id)
+        await manager.write(session.id, b"sharkrail\r\n")
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=10)
         assert result is not None
         assert "SHARKRAIL" in result.stdout
 
