@@ -12,6 +12,7 @@ import signal
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 from .models import CommandSpec
@@ -25,6 +26,23 @@ class ProcessHandle:
     @property
     def pid(self) -> int:
         return self.process.pid
+
+
+class CancellationStep(str, Enum):
+    INTERRUPT = "interrupt"
+    TERMINATE = "terminate"
+    KILL_TREE = "kill_tree"
+
+
+@dataclass(frozen=True)
+class CancellationPolicy:
+    interrupt_grace_ms: int = 1000
+    terminate_grace_ms: int = 1000
+    skip_interrupt: bool = False
+
+    def validate(self) -> None:
+        if self.interrupt_grace_ms < 0 or self.terminate_grace_ms < 0:
+            raise ValueError("cancellation grace periods must be non-negative")
 
 
 class ExecutionBackend(ABC):
@@ -136,3 +154,32 @@ async def wait_for_exit(handle: ProcessHandle, timeout: Optional[float] = None) 
     except asyncio.TimeoutError:
         return False
     return True
+
+
+async def cancel_process(
+    backend: ExecutionBackend,
+    handle: ProcessHandle,
+    policy: Optional[CancellationPolicy] = None,
+) -> tuple[CancellationStep, ...]:
+    """Apply portable interrupt -> terminate -> kill-tree escalation."""
+    policy = policy or CancellationPolicy()
+    policy.validate()
+    steps: list[CancellationStep] = []
+    if handle.process.returncode is not None:
+        return ()
+
+    if not policy.skip_interrupt:
+        steps.append(CancellationStep.INTERRUPT)
+        await backend.interrupt(handle)
+        if await wait_for_exit(handle, policy.interrupt_grace_ms / 1000):
+            return tuple(steps)
+
+    steps.append(CancellationStep.TERMINATE)
+    await backend.terminate(handle)
+    if await wait_for_exit(handle, policy.terminate_grace_ms / 1000):
+        return tuple(steps)
+
+    steps.append(CancellationStep.KILL_TREE)
+    await backend.kill_tree(handle)
+    await wait_for_exit(handle)
+    return tuple(steps)
