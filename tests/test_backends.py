@@ -26,7 +26,13 @@ def test_pipe_backend_supports_stdin_and_eof():
         )
         await backend.write(handle, b"hello")
         await backend.close_stdin(handle)
-        stdout, stderr = await handle.process.communicate()
+        assert handle.process.stdout is not None
+        assert handle.process.stderr is not None
+        stdout, stderr = await asyncio.gather(
+            handle.process.stdout.read(),
+            handle.process.stderr.read(),
+        )
+        await handle.process.wait()
 
         assert stdout == b"HELLO\n"
         assert stderr == b""
