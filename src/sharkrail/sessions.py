@@ -34,7 +34,7 @@ from .executor import (
 from .lifecycle import SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec
 from .output import capture_output
-from .telemetry import log_event
+from .telemetry import log_event, observe_session
 
 
 @dataclass
@@ -830,6 +830,13 @@ class SessionManager:
             duration_ms=self._duration_ms(session),
             drain_duration_ms=self._drain_duration_ms(session),
             error_code=monitor_error.code.value if monitor_error is not None else None,
+        )
+        observe_session(
+            reason=reason.value,
+            duration_ms=self._duration_ms(session),
+            drain_duration_ms=self._drain_duration_ms(session),
+            output_bytes=session.total_output_bytes,
+            dropped_bytes=session.truncated_output_bytes,
         )
         self._prune_completed_sessions()
 

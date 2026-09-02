@@ -15,6 +15,7 @@ from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec, ResourceLimits
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import Session, SessionManager
+from .telemetry import configure_logging, configure_opentelemetry
 
 __all__ = [
     "CancellationPolicy",
@@ -40,6 +41,8 @@ __all__ = [
     "Target",
     "WslOptions",
     "collect",
+    "configure_logging",
+    "configure_opentelemetry",
     "direct_command",
     "shell_command",
 ]
