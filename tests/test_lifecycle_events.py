@@ -12,8 +12,7 @@ def test_lifecycle_events_order():
 
         assert [e.kind for e in events] == [
             LifecycleEventType.ACCEPTED,
-            LifecycleEventType.RUNNING,
-            LifecycleEventType.COMPLETED,
+            LifecycleEventType.SESSION_COMPLETED,
         ]
         assert events[0].seq == 0
 
@@ -28,10 +27,10 @@ def test_lifecycle_events_for_timeout_reason():
             timeout_ms=200,
         )
 
-        assert any(e.kind == LifecycleEventType.OUTPUT for e in events)
-        assert any(e.kind == LifecycleEventType.EXITED for e in events)
+        assert any(e.kind == LifecycleEventType.PROCESS_EXITED for e in events)
         assert any(
-            e.kind == LifecycleEventType.COMPLETED and e.payload.get("reason") == "timeout"
+            e.kind == LifecycleEventType.SESSION_COMPLETED
+            and e.payload.get("reason") == "timeout"
             for e in events
         )
 

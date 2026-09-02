@@ -121,6 +121,7 @@ class SessionManager:
         max_active_sessions: int = 64,
         max_input_bytes: int = 1024 * 1024,
         max_output_events: int = 10000,
+        backend: Optional[ExecutionBackend] = None,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
@@ -130,6 +131,7 @@ class SessionManager:
         self._max_active_sessions = max_active_sessions
         self._max_input_bytes = max_input_bytes
         self._max_output_events = max_output_events
+        self._backend = backend
         self._sessions: dict[str, Session] = {}
 
     async def start(
@@ -157,7 +159,9 @@ class SessionManager:
             raise self._request_error("timeout_ms must be non-negative")
         if max_output_bytes is not None and max_output_bytes < 0:
             raise self._request_error("max_output_bytes must be non-negative")
-        backend: ExecutionBackend = pty_backend() if spec.mode == CommandMode.PTY else pipe_backend()
+        backend = self._backend or (
+            pty_backend() if spec.mode == CommandMode.PTY else pipe_backend()
+        )
         try:
             handle = await backend.start(spec)
         except FileNotFoundError as err:

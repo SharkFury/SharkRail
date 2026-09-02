@@ -45,8 +45,8 @@ def test_command_runner_missing_executable_is_failed():
         assert result.reason.value == "failed"
         assert result.stdout == ""
         assert result.stderr
-        assert any(event.kind == LifecycleEventType.COMPLETED for event in events)
-        assert events[-1].kind == LifecycleEventType.COMPLETED
+        assert any(event.kind == LifecycleEventType.SESSION_ERROR for event in events)
+        assert events[-1].kind == LifecycleEventType.SESSION_COMPLETED
         assert events[-1].payload["reason"] == "failed"
 
     asyncio.run(_run())
