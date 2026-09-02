@@ -1,6 +1,6 @@
 import asyncio
 
-from sharkrail.executor import LifecycleEventType, CommandRunner
+from sharkrail.executor import CommandRunner, LifecycleEventType
 from sharkrail.models import CommandSpec
 
 

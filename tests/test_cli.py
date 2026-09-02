@@ -1,7 +1,7 @@
-import subprocess
-import sys
 import json
 import os
+import subprocess
+import sys
 
 
 def test_sharkrail_run_dry_run():
@@ -11,6 +11,7 @@ def test_sharkrail_run_dry_run():
         [sys.executable, "-m", "sharkrail", "run", "echo", "hello", "--dry-run"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     assert result.returncode == 0
@@ -23,6 +24,7 @@ def test_sharkrail_no_subcommand_prints_help():
         [sys.executable, "-m", "sharkrail"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     assert result.returncode != 0
@@ -37,6 +39,7 @@ def test_sharkrail_run_json_output():
         [sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "echo", "hello"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     assert result.returncode == 0
@@ -53,6 +56,7 @@ def test_sharkrail_run_timeout_json_exit_code():
         [sys.executable, "-m", "sharkrail", "run", "--json", "--timeout-ms", "200", "python3", "--", "-c", "import time; time.sleep(10)"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     payload = json.loads(result.stdout.strip())
@@ -68,6 +72,7 @@ def test_sharkrail_version():
         [sys.executable, "-m", "sharkrail", "--version"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     assert result.returncode == 0
@@ -81,6 +86,7 @@ def test_sharkrail_capabilities_json():
         [sys.executable, "-m", "sharkrail", "capabilities", "--json"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     payload = json.loads(result.stdout.strip())
@@ -99,6 +105,7 @@ def test_sharkrail_run_json_with_events():
         [sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "--events", "echo", "hello"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     payload = json.loads(result.stdout.strip())
@@ -114,6 +121,7 @@ def test_sharkrail_run_json_nonzero_exit_is_failed():
         [sys.executable, "-m", "sharkrail", "run", "--json", "--", sys.executable, "-c", "import sys; sys.exit(5)"],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     payload = json.loads(result.stdout.strip())
@@ -141,6 +149,7 @@ def test_sharkrail_run_json_with_max_output_bytes_truncation():
         ],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
     payload = json.loads(result.stdout.strip())
