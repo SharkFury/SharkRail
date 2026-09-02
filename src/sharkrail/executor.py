@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from enum import Enum
+from typing import Optional
 
 from .models import CommandMode, CommandSpec
+
+
+class CompletionReason(str, Enum):
+    SUCCESS = "success"
+    TIMEOUT = "timeout"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -14,6 +21,7 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    reason: CompletionReason = CompletionReason.SUCCESS
     timed_out: bool = False
 
 
@@ -56,12 +64,25 @@ class CommandRunner:
         except asyncio.TimeoutError:
             proc.kill()
             out, err = await proc.communicate()
-            return CommandResult(exit_code=124, stdout=out.decode(errors="ignore"), stderr=err.decode(errors="ignore"), timed_out=True)
+            return CommandResult(
+                exit_code=124,
+                stdout=out.decode(errors="ignore"),
+                stderr=err.decode(errors="ignore"),
+                reason=CompletionReason.TIMEOUT,
+                timed_out=True,
+            )
+
+        if proc.returncode == 0:
+            reason = CompletionReason.SUCCESS
+        elif proc.returncode is None:
+            reason = CompletionReason.FAILED
+        else:
+            reason = CompletionReason.FAILED
 
         return CommandResult(
             exit_code=proc.returncode if proc.returncode is not None else 1,
             stdout=out.decode(errors="ignore"),
             stderr=err.decode(errors="ignore"),
+            reason=reason,
             timed_out=False,
         )
-

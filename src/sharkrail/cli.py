@@ -46,13 +46,18 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                 {
                     "exit_code": result.exit_code,
                     "timed_out": result.timed_out,
+                    "reason": result.reason.value,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
                 },
                 ensure_ascii=False,
             )
         )
-        return result.exit_code
+        if result.reason.value == "timeout":
+            return 124
+        if result.exit_code != 0:
+            return result.exit_code
+        return 0
 
     if result.stdout:
         print(result.stdout, end="")
