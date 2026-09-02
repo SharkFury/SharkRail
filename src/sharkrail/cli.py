@@ -10,6 +10,7 @@ from . import __version__
 from .capabilities import collect
 from .executor import CommandRunner
 from .models import CommandMode, CommandSpec
+from .protocol import serve_stdio
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
+
+    subparsers.add_parser("serve", help="Serve newline-delimited JSON-RPC 2.0 over stdio")
 
     return parser
 
@@ -130,6 +133,10 @@ def main() -> int:
             + ", features: "
             + ", ".join(capability.features)
         )
+        return 0
+
+    if ns.command == "serve":
+        asyncio.run(serve_stdio())
         return 0
 
     parser.print_help()

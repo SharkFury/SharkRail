@@ -156,3 +156,23 @@ def test_sharkrail_run_json_with_max_output_bytes_truncation():
     assert result.returncode == 0
     assert payload["output_truncated"] is True
     assert len(payload["stdout"]) <= 6
+
+
+def test_sharkrail_serve_stdio_json_rpc():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    message = json.dumps(
+        {"jsonrpc": "2.0", "id": 7, "method": "runtime.hello", "params": {}}
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "serve"],
+        input=message + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    payload = json.loads(result.stdout.strip())
+    assert result.returncode == 0
+    assert payload["id"] == 7
+    assert payload["result"]["runtime"] == "SharkRail"
