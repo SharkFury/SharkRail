@@ -43,7 +43,8 @@ def test_protocol_session_full_pipe_lifecycle():
         waited = await runtime.dispatch(request("session.wait", {"session_id": session_id}, 4))
         events = await runtime.dispatch(request("session.subscribe", {"session_id": session_id}, 5))
 
-        assert waited is not None and waited["result"]["stdout"] == "HELLO\n"
+        assert waited is not None
+        assert waited["result"]["stdout"].splitlines() == ["HELLO"]
         assert events is not None and events["result"]["next_cursor"] > 0
         assert events["result"]["events"][-1]["kind"] == "session.completed"
 

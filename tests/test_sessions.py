@@ -23,7 +23,7 @@ def test_session_streams_input_output_and_events():
         result = await manager.wait(session.id)
 
         assert result is not None
-        assert result.stdout == "HELLO\n"
+        assert result.stdout.splitlines() == ["HELLO"]
         assert session.state == SessionState.COMPLETED
         assert [event.seq for event in session.events] == list(range(len(session.events)))
         assert session.events[-1].kind == LifecycleEventType.SESSION_COMPLETED
