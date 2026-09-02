@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Callable, Optional
 from enum import Enum
-
+from typing import Callable, Optional
 
 from .models import CommandMode, CommandSpec
 

@@ -13,15 +13,15 @@ from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec
 
 __all__ = [
+    "Capability",
     "CommandMode",
-    "CommandSpec",
     "CommandResult",
     "CommandRunner",
+    "CommandSpec",
+    "InvalidTransition",
     "LifecycleEvent",
     "LifecycleEventType",
-    "Capability",
-    "collect",
-    "InvalidTransition",
     "SessionLifecycle",
     "SessionState",
+    "collect",
 ]

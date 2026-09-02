@@ -7,9 +7,9 @@ import asyncio
 import json
 
 from . import __version__
+from .capabilities import collect
 from .executor import CommandRunner
 from .models import CommandMode, CommandSpec
-from .capabilities import collect
 
 
 def build_parser() -> argparse.ArgumentParser:

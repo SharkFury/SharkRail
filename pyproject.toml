@@ -19,6 +19,7 @@ Source = "https://github.com/imlarrychen/SharkRail"
 
 [tool.ruff]
 target-version = "py39"
+lint.ignore = ["UP045"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
