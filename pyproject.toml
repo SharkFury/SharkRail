@@ -13,6 +13,14 @@ dependencies = [
     "pywinpty>=3.0.0; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-cov>=6",
+    "pytest-timeout>=2.3",
+    "ruff>=0.11",
+]
+
 [project.scripts]
 sharkrail = "sharkrail.cli:main"
 
