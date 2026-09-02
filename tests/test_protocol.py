@@ -258,3 +258,15 @@ def test_protocol_preserves_non_utf8_output_as_base64():
         assert base64.b64decode(output["payload"]["data_base64"]) == b"\xff"
 
     asyncio.run(_run())
+
+
+def test_runtime_health_reports_liveness_and_readiness():
+    async def _run() -> None:
+        response = await JsonRpcRuntime().dispatch(request("runtime.health", {}))
+
+        assert response is not None
+        assert response["result"]["live"] is True
+        assert response["result"]["ready"] is True
+        assert response["result"]["status"] in {"ok", "degraded"}
+
+    asyncio.run(_run())

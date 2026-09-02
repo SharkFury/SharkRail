@@ -113,6 +113,16 @@ class JsonRpcRuntime:
                     ),
                 },
             }
+        if method == "runtime.health":
+            capability = collect()
+            ready = "pipe" in capability.modes
+            return {
+                "status": "degraded" if capability.degraded_reasons else "ok",
+                "live": True,
+                "ready": ready,
+                "degraded_reasons": capability.degraded_reasons,
+                "active_sessions": self.manager.stats()["sessions"]["active"],
+            }
         if method == "session.start":
             trace_id = params.get("trace_id")
             if trace_id is not None and (not isinstance(trace_id, str) or not trace_id):

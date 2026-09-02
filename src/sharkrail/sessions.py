@@ -34,7 +34,7 @@ from .executor import (
 from .lifecycle import SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec
 from .output import capture_output
-from .telemetry import log_event, observe_session
+from .telemetry import EventRecorder, log_event, observe_session
 
 
 @dataclass
@@ -78,6 +78,7 @@ class Session:
     last_output_monotonic: Optional[float] = None
     input_bytes: int = 0
     stream_decoders: dict[str, object] = field(default_factory=dict)
+    event_recorder: Optional[EventRecorder] = None
 
     @property
     def state(self) -> SessionState:
@@ -90,16 +91,25 @@ class Session:
         async with self.condition:
             if len(self.events) >= self.max_retained_events:
                 self.events.popleft()
-            self.events.append(
-                LifecycleEvent(
+            event = LifecycleEvent(
                     self.next_event_seq,
                     kind,
                     payload or {},
                     trace_id=self.trace_id,
                 )
-            )
+            self.events.append(event)
             self.next_event_seq += 1
             self.condition.notify_all()
+        if self.event_recorder is not None:
+            await asyncio.to_thread(
+                self.event_recorder.record,
+                session_id=self.id,
+                trace_id=self.trace_id,
+                seq=event.seq,
+                kind=event.kind.value,
+                timestamp=event.timestamp,
+                payload=event.payload,
+            )
 
     @property
     def first_event_seq(self) -> int:
@@ -183,6 +193,7 @@ class SessionManager:
         completed_session_ttl_ms: int = 5 * 60 * 1000,
         max_event_page_size: int = 100,
         max_event_page_bytes: int = 256 * 1024,
+        event_recorder: Optional[EventRecorder] = None,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
@@ -215,6 +226,7 @@ class SessionManager:
         self._completed_session_ttl_ms = completed_session_ttl_ms
         self._max_event_page_size = max_event_page_size
         self._max_event_page_bytes = max_event_page_bytes
+        self._event_recorder = event_recorder
         self._sessions: dict[str, Session] = {}
         self._disposed_session_ids: deque[str] = deque(maxlen=1024)
         self._expired_session_ids: deque[str] = deque(maxlen=1024)
@@ -300,6 +312,7 @@ class SessionManager:
             request_id=request_id,
             created_monotonic=requested_monotonic,
             started_monotonic=time.monotonic(),
+            event_recorder=self._event_recorder,
         )
         self._sessions[session.id] = session
         self._started_sessions += 1

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from sharkrail.telemetry import (
+    EventRecorder,
     configure_logging,
     configure_opentelemetry,
     observe_session,
@@ -57,3 +58,31 @@ def test_optional_opentelemetry_uses_host_providers() -> None:
     histogram.record.assert_any_call(12.5, {"sharkrail.completion.reason": "success"})
     span.end.assert_called_once_with()
     configure_opentelemetry(False)
+
+
+def test_event_recorder_redacts_output_and_enforces_file_budget(tmp_path) -> None:
+    destination = tmp_path / "events.jsonl"
+    recorder = EventRecorder(destination, max_bytes=500)
+    recorder.record(
+        session_id="session-1",
+        trace_id="trace-1",
+        seq=1,
+        kind="stdout",
+        timestamp="2026-01-01T00:00:00+00:00",
+        payload={"text": "secret", "data_base64": "c2VjcmV0", "bytes": 6},
+    )
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert payload["payload"]["output_redacted"] is True
+    assert "text" not in payload["payload"]
+    assert "data_base64" not in payload["payload"]
+
+    recorder.record(
+        session_id="session-1",
+        trace_id="trace-1",
+        seq=2,
+        kind="session.completed",
+        timestamp="2026-01-01T00:00:01+00:00",
+        payload={"large": "x" * 1000},
+    )
+    assert recorder.truncated is True

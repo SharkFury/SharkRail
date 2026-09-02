@@ -6,10 +6,69 @@ import json
 import logging
 import os
 import sys
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, TextIO
 
 _OTEL: Optional[dict[str, Any]] = None
+
+
+class EventRecorder:
+    """Append bounded, redacted lifecycle records to a local JSONL file."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        max_bytes: int = 16 * 1024 * 1024,
+        include_output: bool = False,
+    ) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        self.path = path
+        self.max_bytes = max_bytes
+        self.include_output = include_output
+        self.truncated = False
+        self.last_error: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def record(
+        self,
+        *,
+        session_id: str,
+        trace_id: str,
+        seq: int,
+        kind: str,
+        timestamp: str,
+        payload: dict[str, object],
+    ) -> None:
+        safe_payload = dict(payload)
+        if not self.include_output and kind in {"stdout", "stderr", "pty.output"}:
+            safe_payload.pop("text", None)
+            safe_payload.pop("data_base64", None)
+            safe_payload["output_redacted"] = True
+        record = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "seq": seq,
+            "kind": kind,
+            "timestamp": timestamp,
+            "payload": safe_payload,
+        }
+        encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        with self._lock:
+            try:
+                current_size = self.path.stat().st_size if self.path.exists() else 0
+                if current_size + len(encoded) > self.max_bytes:
+                    self.truncated = True
+                    return
+                with self.path.open("ab") as destination:
+                    destination.write(encoded)
+            except OSError as error:
+                self.last_error = f"{type(error).__name__}: {error}"
 
 
 class _JsonFormatter(logging.Formatter):
