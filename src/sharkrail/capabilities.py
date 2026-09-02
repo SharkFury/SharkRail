@@ -26,10 +26,10 @@ def collect() -> Capability:
             contract_version="1.0.0",
             platform_name="windows",
             process_tree="job_object",
-            modes=("pipe",),
+            modes=("pipe", "pty"),
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
-            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill"),
+            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
             targets=("native", "wsl"),
             shells=("cmd", "powershell", "pwsh"),
         )

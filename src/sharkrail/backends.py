@@ -13,7 +13,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from .models import CommandSpec
 from .windows import WindowsJob
@@ -43,6 +43,12 @@ class PtyProcessHandle(ProcessHandle):
 
 @dataclass
 class WindowsProcessHandle(ProcessHandle):
+    job: WindowsJob | None = None
+
+
+@dataclass
+class WindowsPtyProcessHandle(PtyProcessHandle):
+    native_pty: Any = None
     job: WindowsJob | None = None
 
 
@@ -279,13 +285,128 @@ class PtyBackend(ExecutionBackend):
         os.close(handle.master_fd)
 
 
+class _WinPtyAsyncProcess:
+    """Small asyncio-compatible facade around pywinpty's blocking process."""
+
+    stdin = None
+    stdout = None
+    stderr = None
+
+    def __init__(self, native: Any) -> None:
+        self.native = native
+        self.pid = native.pid
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        if self._returncode is None and not self.native.isalive():
+            self._returncode = self.native.exitstatus or 0
+        return self._returncode
+
+    async def wait(self) -> int:
+        self._returncode = await asyncio.to_thread(self.native.wait)
+        return self._returncode
+
+
+class WindowsPtyBackend(ExecutionBackend):
+    """ConPTY backend powered by pywinpty on supported Windows systems."""
+
+    async def start(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
+        if os.name != "nt":
+            raise NotImplementedError("ConPTY is only available on Windows")
+        try:
+            from winpty import PtyProcess
+        except ImportError as err:
+            raise RuntimeError("Windows PTY support requires pywinpty") from err
+        environment = os.environ.copy()
+        if spec.env is not None:
+            environment.update(spec.env)
+        native = await asyncio.to_thread(
+            PtyProcess.spawn,
+            spec.argv_list,
+            cwd=spec.cwd,
+            env=environment,
+            dimensions=(24, 80),
+        )
+        process = _WinPtyAsyncProcess(native)
+        job = WindowsJob()
+        try:
+            job.assign(process.pid)
+        except BaseException:
+            native.close(force=True)
+            job.close()
+            raise
+        return WindowsPtyProcessHandle(process=process, native_pty=native, job=job)
+
+    async def write(self, handle: ProcessHandle, data: bytes) -> None:
+        pty_handle = _as_windows_pty(handle)
+        if pty_handle.stdin_closed:
+            raise RuntimeError("stdin is closed")
+        await asyncio.to_thread(pty_handle.native_pty.write, data.decode("utf-8", errors="replace"))
+
+    async def close_stdin(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_windows_pty(handle)
+        if not pty_handle.stdin_closed:
+            pty_handle.stdin_closed = True
+            await asyncio.to_thread(pty_handle.native_pty.sendeof)
+
+    async def interrupt(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_windows_pty(handle)
+        if pty_handle.process.returncode is None:
+            await asyncio.to_thread(pty_handle.native_pty.sendintr)
+
+    async def terminate(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_windows_pty(handle)
+        if pty_handle.process.returncode is None:
+            await asyncio.to_thread(pty_handle.native_pty.terminate, False)
+
+    async def kill_tree(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_windows_pty(handle)
+        if pty_handle.job is not None:
+            pty_handle.job.terminate()
+        elif pty_handle.process.returncode is None:
+            await asyncio.to_thread(pty_handle.native_pty.terminate, True)
+
+    async def read(self, handle: WindowsPtyProcessHandle, size: int = 65536) -> bytes:
+        del size  # pywinpty 3.x returns all currently available characters.
+        if handle.output_closed:
+            return b""
+        try:
+            text = await asyncio.to_thread(handle.native_pty.read)
+        except EOFError:
+            return b""
+        return text.encode("utf-8")
+
+    async def resize(self, handle: WindowsPtyProcessHandle, cols: int, rows: int) -> None:
+        if cols <= 0 or rows <= 0:
+            raise ValueError("terminal dimensions must be positive")
+        await asyncio.to_thread(handle.native_pty.setwinsize, rows, cols)
+
+    async def dispose(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_windows_pty(handle)
+        if pty_handle.output_closed:
+            return
+        pty_handle.output_closed = True
+        if pty_handle.native_pty.isalive():
+            await asyncio.to_thread(pty_handle.native_pty.close, True)
+        if pty_handle.job is not None:
+            pty_handle.job.close()
+            pty_handle.job = None
+
+
 def _as_pty(handle: ProcessHandle) -> PtyProcessHandle:
     if not isinstance(handle, PtyProcessHandle):
         raise TypeError("PTY operation requires a PtyProcessHandle")
     return handle
 
 
-async def read_pty_output(backend: PtyBackend, handle: PtyProcessHandle) -> bytes:
+def _as_windows_pty(handle: ProcessHandle) -> WindowsPtyProcessHandle:
+    if not isinstance(handle, WindowsPtyProcessHandle):
+        raise TypeError("ConPTY operation requires a WindowsPtyProcessHandle")
+    return handle
+
+
+async def read_pty_output(backend: Any, handle: PtyProcessHandle) -> bytes:
     chunks: list[bytes] = []
     while True:
         chunk = await backend.read(handle)
@@ -293,6 +414,10 @@ async def read_pty_output(backend: PtyBackend, handle: PtyProcessHandle) -> byte
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def pty_backend() -> ExecutionBackend:
+    return WindowsPtyBackend() if os.name == "nt" else PtyBackend()
 
 
 async def wait_for_exit(handle: ProcessHandle, timeout: Optional[float] = None) -> bool:

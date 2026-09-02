@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -13,10 +12,10 @@ from .backends import (
     CancellationPolicy,
     ExecutionBackend,
     ProcessHandle,
-    PtyBackend,
     PtyProcessHandle,
     cancel_process,
     pipe_backend,
+    pty_backend,
 )
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .executor import (
@@ -126,16 +125,7 @@ class SessionManager:
             raise self._request_error("timeout_ms must be non-negative")
         if max_output_bytes is not None and max_output_bytes < 0:
             raise self._request_error("max_output_bytes must be non-negative")
-        if spec.mode == CommandMode.PTY and os.name == "nt":
-            raise SharkRailError(
-                ExecutionError(
-                    code=ErrorCode.CAPABILITY_NOT_SUPPORTED,
-                    stage=ErrorStage.START,
-                    message="PTY requires a ConPTY-enabled SharkRail build on Windows",
-                )
-            )
-
-        backend: ExecutionBackend = PtyBackend() if spec.mode == CommandMode.PTY else pipe_backend()
+        backend: ExecutionBackend = pty_backend() if spec.mode == CommandMode.PTY else pipe_backend()
         try:
             handle = await backend.start(spec)
         except FileNotFoundError as err:
@@ -200,7 +190,7 @@ class SessionManager:
 
     async def resize(self, session_id: str, cols: int, rows: int) -> None:
         session = self._require_active(session_id)
-        if not isinstance(session.backend, PtyBackend) or not isinstance(session.handle, PtyProcessHandle):
+        if not hasattr(session.backend, "resize") or not isinstance(session.handle, PtyProcessHandle):
             raise SharkRailError(
                 ExecutionError(
                     code=ErrorCode.CAPABILITY_NOT_SUPPORTED,
@@ -269,7 +259,7 @@ class SessionManager:
 
     async def _monitor(self, session: Session) -> None:
         readers: list[asyncio.Task[None]] = []
-        if isinstance(session.backend, PtyBackend) and isinstance(session.handle, PtyProcessHandle):
+        if hasattr(session.backend, "read") and isinstance(session.handle, PtyProcessHandle):
             readers.append(asyncio.create_task(self._read_pty(session, session.backend, session.handle)))
         else:
             if session.handle.process.stdout is not None:
@@ -339,7 +329,7 @@ class SessionManager:
     async def _read_pty(
         self,
         session: Session,
-        backend: PtyBackend,
+        backend: object,
         handle: PtyProcessHandle,
     ) -> None:
         while True:

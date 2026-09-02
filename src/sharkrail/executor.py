@@ -9,9 +9,9 @@ from typing import Callable, Optional
 
 from .backends import (
     ExecutionBackend,
-    PtyBackend,
     PtyProcessHandle,
     pipe_backend,
+    pty_backend,
     read_pty_output,
 )
 from .errors import ErrorCode, ErrorStage, ExecutionError
@@ -128,7 +128,7 @@ class CommandRunner:
 
         seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"mode": spec.mode.value})
 
-        backend = self._backend or (PtyBackend() if spec.mode == CommandMode.PTY else pipe_backend())
+        backend = self._backend or (pty_backend() if spec.mode == CommandMode.PTY else pipe_backend())
 
         try:
             handle = await backend.start(spec)
