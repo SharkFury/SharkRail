@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Optional
 from uuid import uuid4
 
@@ -24,17 +23,9 @@ from .executor import (
     LifecycleEvent,
     LifecycleEventType,
 )
+from .lifecycle import SessionState
 from .models import CommandMode, CommandSpec
 from .output import capture_output
-
-
-class SessionState(str, Enum):
-    ACCEPTED = "accepted"
-    RUNNING = "running"
-    CANCELLING = "cancelling"
-    DRAINING = "draining"
-    COMPLETED = "completed"
-    DISPOSED = "disposed"
 
 
 @dataclass

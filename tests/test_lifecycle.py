@@ -26,3 +26,33 @@ def test_lifecycle_invalid_transition_raises():
     with pytest.raises(InvalidTransition):
         session.start()
 
+
+def test_lifecycle_full_runtime_path():
+    session = SessionLifecycle()
+    session.accept()
+    session.begin_start()
+    session.start()
+    session.begin_exit()
+    session.begin_drain()
+    session.complete()
+    session.dispose()
+
+    assert session.history == [
+        SessionState.CREATED,
+        SessionState.ACCEPTED,
+        SessionState.STARTING,
+        SessionState.RUNNING,
+        SessionState.EXITING,
+        SessionState.DRAINING,
+        SessionState.COMPLETED,
+        SessionState.DISPOSED,
+    ]
+
+
+def test_lifecycle_cancellation_completes_after_drain():
+    session = SessionLifecycle()
+    session.start()
+    session.begin_cancel()
+    session.begin_drain()
+    session.complete()
+    assert session.state == SessionState.COMPLETED
