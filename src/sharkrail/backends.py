@@ -17,6 +17,12 @@ from typing import Optional
 
 from .models import CommandSpec
 
+if os.name != "nt":
+    import fcntl
+    import pty
+    import struct
+    import termios
+
 
 @dataclass
 class ProcessHandle:
@@ -26,6 +32,12 @@ class ProcessHandle:
     @property
     def pid(self) -> int:
         return self.process.pid
+
+
+@dataclass
+class PtyProcessHandle(ProcessHandle):
+    master_fd: int = -1
+    output_closed: bool = False
 
 
 class CancellationStep(str, Enum):
@@ -142,6 +154,101 @@ class PipeBackend(ExecutionBackend):
                 os.killpg(handle.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+class PtyBackend(ExecutionBackend):
+    """Native POSIX PTY backend with a merged terminal stream."""
+
+    async def start(self, spec: CommandSpec) -> PtyProcessHandle:
+        if os.name == "nt":
+            raise NotImplementedError("ConPTY backend is not available in this build")
+        master_fd, slave_fd = pty.openpty()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *spec.argv_list,
+                cwd=spec.cwd,
+                env=dict(spec.env) if spec.env is not None else None,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                start_new_session=True,
+            )
+        except BaseException:
+            os.close(master_fd)
+            raise
+        finally:
+            os.close(slave_fd)
+        return PtyProcessHandle(process=process, master_fd=master_fd)
+
+    async def write(self, handle: ProcessHandle, data: bytes) -> None:
+        pty_handle = _as_pty(handle)
+        if pty_handle.stdin_closed:
+            raise RuntimeError("stdin is closed")
+        await asyncio.to_thread(os.write, pty_handle.master_fd, data)
+
+    async def close_stdin(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_pty(handle)
+        if pty_handle.stdin_closed:
+            return
+        pty_handle.stdin_closed = True
+        # POSIX terminal EOF (VEOF) preserves the output side of the PTY.
+        await asyncio.to_thread(os.write, pty_handle.master_fd, b"\x04")
+
+    async def interrupt(self, handle: ProcessHandle) -> None:
+        if handle.process.returncode is None:
+            os.killpg(handle.pid, signal.SIGINT)
+
+    async def terminate(self, handle: ProcessHandle) -> None:
+        if handle.process.returncode is None:
+            os.killpg(handle.pid, signal.SIGTERM)
+
+    async def kill_tree(self, handle: ProcessHandle) -> None:
+        if handle.process.returncode is not None:
+            return
+        try:
+            os.killpg(handle.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    async def read(self, handle: PtyProcessHandle, size: int = 65536) -> bytes:
+        if handle.output_closed:
+            return b""
+        try:
+            return await asyncio.to_thread(os.read, handle.master_fd, size)
+        except OSError as err:
+            # Linux returns EIO after the PTY slave closes; macOS commonly
+            # returns an empty read. Both represent terminal EOF.
+            if err.errno == 5:
+                return b""
+            raise
+
+    async def resize(self, handle: PtyProcessHandle, cols: int, rows: int) -> None:
+        if cols <= 0 or rows <= 0:
+            raise ValueError("terminal dimensions must be positive")
+        dimensions = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(handle.master_fd, termios.TIOCSWINSZ, dimensions)
+
+    async def dispose(self, handle: PtyProcessHandle) -> None:
+        if handle.output_closed:
+            return
+        handle.output_closed = True
+        os.close(handle.master_fd)
+
+
+def _as_pty(handle: ProcessHandle) -> PtyProcessHandle:
+    if not isinstance(handle, PtyProcessHandle):
+        raise TypeError("PTY operation requires a PtyProcessHandle")
+    return handle
+
+
+async def read_pty_output(backend: PtyBackend, handle: PtyProcessHandle) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = await backend.read(handle)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def wait_for_exit(handle: ProcessHandle, timeout: Optional[float] = None) -> bool:

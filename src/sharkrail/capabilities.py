@@ -24,10 +24,10 @@ def collect() -> Capability:
             contract_version="1.0.0",
             platform_name="windows",
             process_tree="job_object",
-            modes=("pipe", "pty"),
+            modes=("pipe",),
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
-            features=("session_lifecycle", "exit_reasons", "capabilities"),
+            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill"),
         )
 
     if current == "darwin":
@@ -38,7 +38,7 @@ def collect() -> Capability:
             modes=("pipe", "pty"),
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
-            features=("session_lifecycle", "exit_reasons", "capabilities"),
+            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
         )
 
     return Capability(
@@ -48,5 +48,5 @@ def collect() -> Capability:
         modes=("pipe", "pty"),
         max_output_bytes=16 * 1024 * 1024,
         supports_timeout=True,
-        features=("session_lifecycle", "exit_reasons", "capabilities"),
+        features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
     )

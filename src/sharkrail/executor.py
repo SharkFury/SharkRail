@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
-from .backends import ExecutionBackend, PipeBackend
+from .backends import (
+    ExecutionBackend,
+    PipeBackend,
+    PtyBackend,
+    PtyProcessHandle,
+    read_pty_output,
+)
 from .errors import ErrorCode, ErrorStage, ExecutionError
 from .models import CommandMode, CommandSpec
 from .output import capture_output
@@ -59,7 +65,7 @@ class CommandRunner:
     ) -> None:
         self._dry_run = dry_run
         self._max_output_bytes = max_output_bytes
-        self._backend = backend or PipeBackend()
+        self._backend = backend
 
     async def _emit(
         self,
@@ -109,15 +115,10 @@ class CommandRunner:
 
         seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"mode": spec.mode.value})
 
-        # PTY support is part of the roadmap. Foundation layer keeps a single,
-        # portable execution path while exposing explicit mode for callers.
-        if spec.mode == CommandMode.PTY:
-            # Keep PTY explicit for compatibility. At this stage we run with
-            # normal pipes and clearly expose the mode in command handling.
-            pass
+        backend = self._backend or (PtyBackend() if spec.mode == CommandMode.PTY else PipeBackend())
 
         try:
-            handle = await self._backend.start(spec)
+            handle = await backend.start(spec)
         except FileNotFoundError as err:
             stderr = str(err)
             execution_error = ExecutionError(
@@ -164,7 +165,15 @@ class CommandRunner:
             return result, events
 
         try:
-            if timeout_ms is None:
+            if isinstance(handle, PtyProcessHandle):
+                output_task = asyncio.create_task(read_pty_output(backend, handle))
+                if timeout_ms is None:
+                    await handle.process.wait()
+                else:
+                    await asyncio.wait_for(handle.process.wait(), timeout=timeout_ms / 1000)
+                out, err = await output_task, b""
+                await backend.dispose(handle)
+            elif timeout_ms is None:
                 out, err = await handle.process.communicate()
             else:
                 out, err = await asyncio.wait_for(
@@ -172,8 +181,13 @@ class CommandRunner:
                     timeout=timeout_ms / 1000,
                 )
         except asyncio.TimeoutError:
-            await self._backend.kill_tree(handle)
-            out, err = await handle.process.communicate()
+            await backend.kill_tree(handle)
+            if isinstance(handle, PtyProcessHandle):
+                await handle.process.wait()
+                out, err = await output_task, b""
+                await backend.dispose(handle)
+            else:
+                out, err = await handle.process.communicate()
             captured = capture_output(out, err, self._max_output_bytes)
             result = CommandResult(
                 exit_code=124,
