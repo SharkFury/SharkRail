@@ -37,8 +37,26 @@ jobs:
           pip install -e .
           pip install pytest build
       - name: Run tests
-        run: |
-          pytest
+        if: runner.os != 'Windows'
+        run: pytest
+      - name: Test Windows core contracts
+        if: runner.os == 'Windows'
+        run: pytest tests/test_capabilities.py tests/test_doctor.py tests/test_lifecycle.py tests/test_models.py tests/test_output.py tests/test_public_api.py tests/test_routing.py tests/test_windows.py
+      - name: Test Windows pipe execution
+        if: runner.os == 'Windows'
+        run: pytest tests/test_backends.py tests/test_executor.py tests/test_lifecycle_events.py
+      - name: Test Windows session core
+        if: runner.os == 'Windows'
+        run: pytest tests/test_sessions.py -k "not persistent_pty"
+      - name: Test Windows protocol
+        if: runner.os == 'Windows'
+        run: pytest tests/test_protocol.py
+      - name: Test Windows ConPTY
+        if: runner.os == 'Windows'
+        run: pytest tests/test_sessions.py -k persistent_pty
+      - name: Test Windows CLI
+        if: runner.os == 'Windows'
+        run: pytest tests/test_cli.py tests/test_pty_backend.py
       - name: Run compatibility smoke checks
         run: |
           python -m compileall src tests
