@@ -121,6 +121,6 @@ def test_pipe_backend_environment_is_an_overlay():
             )
         )
         stdout, _ = await handle.process.communicate()
-        assert stdout == b"present\nTrue\n"
+        assert stdout.splitlines() == [b"present", b"True"]
 
     asyncio.run(_run())
