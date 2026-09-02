@@ -3,6 +3,7 @@ import base64
 import io
 import sys
 
+from sharkrail.models import CommandSpec
 from sharkrail.protocol import JsonRpcRuntime, serve_stdio
 
 
@@ -98,6 +99,28 @@ def test_stdio_eof_disposes_started_sessions():
         )
         destination = io.StringIO()
         await serve_stdio(runtime=runtime, stdin=io.StringIO(message), stdout=destination)
+        assert runtime.manager.session_count == 0
+
+    asyncio.run(_run())
+
+
+def test_stdio_eof_unblocks_pending_session_wait():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime()
+        session = await runtime.manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import time; time.sleep(10)"),
+            )
+        )
+        message = request("session.wait", {"session_id": session.id})
+        source = io.StringIO(__import__("json").dumps(message) + "\n")
+
+        await asyncio.wait_for(
+            serve_stdio(runtime=runtime, stdin=source, stdout=io.StringIO()),
+            timeout=2,
+        )
+
         assert runtime.manager.session_count == 0
 
     asyncio.run(_run())

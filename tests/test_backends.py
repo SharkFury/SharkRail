@@ -124,3 +124,21 @@ def test_pipe_backend_environment_is_an_overlay():
         assert stdout.splitlines() == [b"present", b"True"]
 
     asyncio.run(_run())
+
+
+def test_cancellation_reports_steps_before_attempting_them():
+    async def _run() -> None:
+        backend = PipeBackend()
+        handle = await backend.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        reported: list[CancellationStep] = []
+
+        async def report(step: CancellationStep) -> None:
+            reported.append(step)
+
+        steps = await cancel_process(backend, handle, step_handler=report)
+
+        assert reported == list(steps)
+
+    asyncio.run(_run())

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
 
 from .backends import (
     CancellationPolicy,
+    CancellationStep,
     ExecutionBackend,
     ProcessHandle,
     PtyProcessHandle,
@@ -50,6 +52,8 @@ class Session:
     output_event_limit_reported: bool = False
     monitor_task: Optional[asyncio.Task[None]] = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    cancellation_steps: tuple[str, ...] = ()
 
     @property
     def state(self) -> SessionState:
@@ -124,6 +128,7 @@ class SessionManager:
         backend: Optional[ExecutionBackend] = None,
         drain_timeout_ms: int = 2000,
         termination_timeout_ms: int = 2000,
+        shutdown_timeout_ms: int = 5000,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
@@ -133,6 +138,7 @@ class SessionManager:
             or max_output_events <= 0
             or drain_timeout_ms < 0
             or termination_timeout_ms <= 0
+            or shutdown_timeout_ms <= 0
         ):
             raise ValueError("session resource limits must be positive")
         self._default_max_output_bytes = default_max_output_bytes
@@ -142,7 +148,9 @@ class SessionManager:
         self._backend = backend
         self._drain_timeout_ms = drain_timeout_ms
         self._termination_timeout_ms = termination_timeout_ms
+        self._shutdown_timeout_ms = shutdown_timeout_ms
         self._sessions: dict[str, Session] = {}
+        self._disposed_session_ids: deque[str] = deque(maxlen=1024)
 
     async def start(
         self,
@@ -230,51 +238,97 @@ class SessionManager:
             ) from err
 
     async def write(self, session_id: str, data: bytes) -> None:
-        session = self._require_active(session_id)
-        if len(data) > self._max_input_bytes:
-            raise SharkRailError(
-                ExecutionError(
-                    code=ErrorCode.RESOURCE_LIMITED,
-                    stage=ErrorStage.RUN,
-                    message=f"input exceeds per-write limit ({self._max_input_bytes} bytes)",
+        session = self.get(session_id)
+        async with session.operation_lock:
+            self._require_active(session_id)
+            if len(data) > self._max_input_bytes:
+                raise SharkRailError(
+                    ExecutionError(
+                        code=ErrorCode.RESOURCE_LIMITED,
+                        stage=ErrorStage.RUN,
+                        message=f"input exceeds per-write limit ({self._max_input_bytes} bytes)",
+                    )
                 )
+            await asyncio.wait_for(
+                session.backend.write(session.handle, data),
+                self._termination_timeout_ms / 1000,
             )
-        await session.backend.write(session.handle, data)
 
     async def close_stdin(self, session_id: str) -> None:
-        session = self._require_active(session_id)
-        await session.backend.close_stdin(session.handle)
+        session = self.get(session_id)
+        async with session.operation_lock:
+            self._require_active(session_id)
+            await asyncio.wait_for(
+                session.backend.close_stdin(session.handle),
+                self._termination_timeout_ms / 1000,
+            )
 
     async def resize(self, session_id: str, cols: int, rows: int) -> None:
-        session = self._require_active(session_id)
-        if not hasattr(session.backend, "resize") or not isinstance(session.handle, PtyProcessHandle):
-            raise SharkRailError(
-                ExecutionError(
-                    code=ErrorCode.CAPABILITY_NOT_SUPPORTED,
-                    stage=ErrorStage.RUN,
-                    message="resize is only supported for PTY sessions",
+        session = self.get(session_id)
+        async with session.operation_lock:
+            self._require_active(session_id)
+            if not hasattr(session.backend, "resize") or not isinstance(session.handle, PtyProcessHandle):
+                raise SharkRailError(
+                    ExecutionError(
+                        code=ErrorCode.CAPABILITY_NOT_SUPPORTED,
+                        stage=ErrorStage.RUN,
+                        message="resize is only supported for PTY sessions",
+                    )
                 )
+            await asyncio.wait_for(
+                session.backend.resize(session.handle, cols, rows),
+                self._termination_timeout_ms / 1000,
             )
-        await session.backend.resize(session.handle, cols, rows)
 
     async def interrupt(self, session_id: str) -> None:
-        session = self._require_active(session_id)
-        await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": "interrupt"})
-        await session.backend.interrupt(session.handle)
+        session = self.get(session_id)
+        async with session.operation_lock:
+            self._require_active(session_id)
+            await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": "interrupt"})
+            await asyncio.wait_for(
+                session.backend.interrupt(session.handle),
+                self._termination_timeout_ms / 1000,
+            )
 
     async def cancel(
         self,
         session_id: str,
         policy: Optional[CancellationPolicy] = None,
     ) -> tuple[str, ...]:
-        session = self._require_active(session_id)
-        if session.state == SessionState.RUNNING:
-            session.transition(SessionState.CANCELLING)
-        session.completion_reason = CompletionReason.CANCELLED
-        steps = await cancel_process(session.backend, session.handle, policy)
-        for step in steps:
-            await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": step.value})
-        return tuple(step.value for step in steps)
+        session = self.get(session_id)
+        async with session.operation_lock:
+            if session.cancellation_steps or session.state in {
+                SessionState.COMPLETED,
+                SessionState.FAILED,
+            }:
+                return session.cancellation_steps
+            self._require_active(session_id)
+            if session.state == SessionState.RUNNING:
+                session.transition(SessionState.CANCELLING)
+            session.completion_reason = CompletionReason.CANCELLED
+
+            async def report_step(step: CancellationStep) -> None:
+                value = step.value
+                session.cancellation_steps = (*session.cancellation_steps, value)
+                await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": value})
+
+            try:
+                await cancel_process(
+                    session.backend,
+                    session.handle,
+                    policy,
+                    step_handler=report_step,
+                )
+            except TimeoutError as err:
+                raise SharkRailError(
+                    ExecutionError(
+                        code=ErrorCode.TERMINATION_FAILED,
+                        stage=ErrorStage.RUN,
+                        message=str(err),
+                    ),
+                    err,
+                ) from err
+            return session.cancellation_steps
 
     async def wait(self, session_id: str, timeout_ms: Optional[int] = None) -> Optional[CommandResult]:
         session = self.get(session_id)
@@ -307,24 +361,56 @@ class SessionManager:
         return tuple(session.events[cursor:])
 
     async def dispose(self, session_id: str) -> None:
+        if session_id in self._disposed_session_ids:
+            return
         session = self.get(session_id)
-        if session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}:
+        if session.state not in {
+            SessionState.COMPLETED,
+            SessionState.FAILED,
+            SessionState.DISPOSED,
+        }:
             try:
                 await self.cancel(session_id, CancellationPolicy(skip_interrupt=True))
             except SharkRailError as err:
                 if err.error.code != ErrorCode.INVALID_SESSION_STATE:
                     raise
-            await self.wait(session_id)
-        await session.backend.dispose(session.handle)
-        session.transition(SessionState.DISPOSED)
+            await self.wait(session_id, timeout_ms=self._shutdown_timeout_ms)
+        try:
+            await asyncio.wait_for(
+                session.backend.dispose(session.handle),
+                self._termination_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError as err:
+            raise SharkRailError(
+                ExecutionError(
+                    code=ErrorCode.TERMINATION_FAILED,
+                    stage=ErrorStage.DISPOSE,
+                    message="backend disposal exceeded its deadline",
+                ),
+                err,
+            ) from err
+        if session.state != SessionState.DISPOSED:
+            session.transition(SessionState.DISPOSED)
         self._sessions.pop(session_id, None)
+        self._disposed_session_ids.append(session_id)
 
     async def shutdown(self) -> None:
         """Dispose every session when the owning transport shuts down."""
-        await asyncio.gather(
-            *(self.dispose(session_id) for session_id in tuple(self._sessions)),
-            return_exceptions=False,
-        )
+        tasks = [
+            asyncio.create_task(self.dispose(session_id))
+            for session_id in tuple(self._sessions)
+        ]
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                self._shutdown_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     def session_count(self) -> int:

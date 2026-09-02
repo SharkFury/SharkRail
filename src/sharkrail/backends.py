@@ -11,9 +11,10 @@ import os
 import signal
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .models import CommandSpec
 from .windows import WindowsJob
@@ -62,11 +63,19 @@ class CancellationStep(str, Enum):
 class CancellationPolicy:
     interrupt_grace_ms: int = 1000
     terminate_grace_ms: int = 1000
+    kill_tree_grace_ms: int = 2000
     skip_interrupt: bool = False
 
     def validate(self) -> None:
-        if self.interrupt_grace_ms < 0 or self.terminate_grace_ms < 0:
-            raise ValueError("cancellation grace periods must be non-negative")
+        if (
+            self.interrupt_grace_ms < 0
+            or self.terminate_grace_ms < 0
+            or self.kill_tree_grace_ms <= 0
+        ):
+            raise ValueError(
+                "interrupt and terminate grace periods must be non-negative; "
+                "kill-tree grace period must be positive"
+            )
 
 
 class ExecutionBackend(ABC):
@@ -448,6 +457,7 @@ async def cancel_process(
     backend: ExecutionBackend,
     handle: ProcessHandle,
     policy: Optional[CancellationPolicy] = None,
+    step_handler: Optional[Callable[[CancellationStep], Awaitable[None]]] = None,
 ) -> tuple[CancellationStep, ...]:
     """Apply portable interrupt -> terminate -> kill-tree escalation."""
     policy = policy or CancellationPolicy()
@@ -458,16 +468,23 @@ async def cancel_process(
 
     if not policy.skip_interrupt:
         steps.append(CancellationStep.INTERRUPT)
+        if step_handler is not None:
+            await step_handler(CancellationStep.INTERRUPT)
         await backend.interrupt(handle)
         if await wait_for_exit(handle, policy.interrupt_grace_ms / 1000):
             return tuple(steps)
 
     steps.append(CancellationStep.TERMINATE)
+    if step_handler is not None:
+        await step_handler(CancellationStep.TERMINATE)
     await backend.terminate(handle)
     if await wait_for_exit(handle, policy.terminate_grace_ms / 1000):
         return tuple(steps)
 
     steps.append(CancellationStep.KILL_TREE)
+    if step_handler is not None:
+        await step_handler(CancellationStep.KILL_TREE)
     await backend.kill_tree(handle)
-    await wait_for_exit(handle)
+    if not await wait_for_exit(handle, policy.kill_tree_grace_ms / 1000):
+        raise TimeoutError("process tree did not exit after forced termination")
     return tuple(steps)

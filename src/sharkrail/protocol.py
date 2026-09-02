@@ -126,6 +126,7 @@ class JsonRpcRuntime:
                 CancellationPolicy(
                     interrupt_grace_ms=int(params.get("interrupt_grace_ms", 1000)),
                     terminate_grace_ms=int(params.get("terminate_grace_ms", 1000)),
+                    kill_tree_grace_ms=int(params.get("kill_tree_grace_ms", 2000)),
                     skip_interrupt=bool(params.get("force", False)),
                 ),
             )
@@ -159,6 +160,7 @@ async def serve_stdio(
     stdin: Optional[TextIO] = None,
     stdout: Optional[TextIO] = None,
     max_request_bytes: int = MAX_REQUEST_BYTES,
+    shutdown_timeout_ms: int = 5000,
 ) -> None:
     """Serve concurrent newline-delimited JSON-RPC requests until stdin EOF."""
     runtime = runtime or JsonRpcRuntime()
@@ -197,8 +199,21 @@ async def serve_stdio(
         task = asyncio.create_task(respond(line))
         pending.add(task)
         task.add_done_callback(pending.discard)
+    # Let requests accepted immediately before EOF register their sessions,
+    # then stop processes before awaiting requests such as session.wait.
+    await asyncio.sleep(0)
+    await runtime.manager.shutdown()
     if pending:
-        await asyncio.gather(*pending)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                shutdown_timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+    # A session.start request may have completed after the first snapshot.
     await runtime.manager.shutdown()
 
 

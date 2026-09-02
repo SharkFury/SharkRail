@@ -211,3 +211,24 @@ def test_drain_timeout_kills_descendants_holding_output_open():
         await manager.dispose(session.id)
 
     asyncio.run(_run())
+
+
+def test_cancel_and_dispose_are_idempotent():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        first, second = await asyncio.gather(
+            manager.cancel(session.id),
+            manager.cancel(session.id),
+        )
+
+        assert first
+        assert second == first
+        assert len(session.cancellation_steps) == len(set(session.cancellation_steps))
+        await manager.wait(session.id)
+        await manager.dispose(session.id)
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
