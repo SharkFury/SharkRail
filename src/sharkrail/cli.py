@@ -8,6 +8,7 @@ import json
 
 from . import __version__
 from .capabilities import collect
+from .doctor import diagnose, format_report
 from .executor import CommandRunner
 from .models import CommandMode
 from .protocol import serve_stdio
@@ -57,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
 
     subparsers.add_parser("serve", help="Serve newline-delimited JSON-RPC 2.0 over stdio")
+
+    doctor = subparsers.add_parser("doctor", help="Diagnose local runtime capabilities")
+    doctor.add_argument("--json", action="store_true", help="Print machine-readable output")
 
     return parser
 
@@ -177,6 +181,14 @@ def main() -> int:
     if ns.command == "serve":
         asyncio.run(serve_stdio())
         return 0
+
+    if ns.command == "doctor":
+        report = diagnose()
+        if ns.json:
+            print(json.dumps(report.to_dict(), ensure_ascii=False))
+        else:
+            print(format_report(report))
+        return 0 if report.healthy else 1
 
     parser.print_help()
     return 1

@@ -194,3 +194,19 @@ def test_sharkrail_explicit_shell_command():
     payload = json.loads(result.stdout)
     assert result.returncode == 0
     assert payload["stdout"] == "shell-ok"
+
+
+def test_sharkrail_doctor_json():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "doctor", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["healthy"] is True
+    assert payload["checks"]
