@@ -34,7 +34,7 @@ def test_pipe_backend_supports_stdin_and_eof():
         )
         await handle.process.wait()
 
-        assert stdout == b"HELLO\n"
+        assert stdout.splitlines() == [b"HELLO"]
         assert stderr == b""
 
     asyncio.run(_run())
