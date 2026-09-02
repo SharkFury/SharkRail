@@ -69,6 +69,8 @@ def test_protocol_notifications_have_no_response():
         runtime = JsonRpcRuntime()
         response = await runtime.dispatch({"jsonrpc": "2.0", "method": "runtime.hello"})
         assert response is None
+        error = await runtime.dispatch({"jsonrpc": "2.0", "method": "missing.method"})
+        assert error is None
 
     asyncio.run(_run())
 
@@ -80,5 +82,21 @@ def test_stdio_server_rejects_oversized_request():
         await serve_stdio(stdin=source, stdout=destination, max_request_bytes=10)
         response = __import__("json").loads(destination.getvalue())
         assert response["error"]["data"]["code"] == "RESOURCE_LIMITED"
+
+    asyncio.run(_run())
+
+
+def test_stdio_eof_disposes_started_sessions():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime()
+        message = (
+            '{"jsonrpc":"2.0","id":1,"method":"session.start","params":'
+            '{"spec":{"executable":"'
+            + sys.executable.replace("\\", "\\\\")
+            + '","argv":["-c","import time; time.sleep(10)"]}}}\n'
+        )
+        destination = io.StringIO()
+        await serve_stdio(runtime=runtime, stdin=io.StringIO(message), stdout=destination)
+        assert runtime.manager.session_count == 0
 
     asyncio.run(_run())

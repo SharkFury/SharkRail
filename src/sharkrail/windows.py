@@ -37,7 +37,10 @@ class WindowsJob:
 
     def __del__(self) -> None:
         if hasattr(self, "_closed"):
-            self.close()
+            try:
+                self.close()
+            except OSError:
+                pass
 
 
 if os.name == "nt":

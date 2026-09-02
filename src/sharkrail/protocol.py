@@ -33,6 +33,7 @@ class JsonRpcRuntime:
 
     async def dispatch(self, request: object) -> Optional[dict[str, Any]]:
         request_id: object = None
+        is_notification = isinstance(request, dict) and "id" not in request
         try:
             if not isinstance(request, dict):
                 raise JsonRpcError(-32600, "Invalid Request")
@@ -47,10 +48,16 @@ class JsonRpcRuntime:
                 return None
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except JsonRpcError as err:
+            if is_notification:
+                return None
             return self._error_response(request_id, err.code, err.message, err.data)
         except SharkRailError as err:
-            return self._error_response(-1 if request_id is None else request_id, -32000, err.error.message, err.error.to_dict())
+            if is_notification:
+                return None
+            return self._error_response(request_id, -32000, err.error.message, err.error.to_dict())
         except (TypeError, ValueError, KeyError) as err:
+            if is_notification:
+                return None
             error = ExecutionError(
                 code=ErrorCode.INVALID_REQUEST,
                 stage=ErrorStage.VALIDATE,
@@ -58,6 +65,8 @@ class JsonRpcRuntime:
             )
             return self._error_response(request_id, -32602, "Invalid params", error.to_dict())
         except Exception as err:  # noqa: BLE001  # pragma: no cover - protocol boundary
+            if is_notification:
+                return None
             error = ExecutionError(
                 code=ErrorCode.INTERNAL_ERROR,
                 stage=ErrorStage.RUN,
@@ -190,6 +199,7 @@ async def serve_stdio(
         task.add_done_callback(pending.discard)
     if pending:
         await asyncio.gather(*pending)
+    await runtime.manager.shutdown()
 
 
 def _parse_spec(params: dict[str, Any]) -> CommandSpec:

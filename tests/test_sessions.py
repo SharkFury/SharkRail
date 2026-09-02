@@ -138,3 +138,18 @@ def test_session_manager_limits_output_event_count():
         assert any(event.kind == LifecycleEventType.RESOURCE_LIMIT_HIT for event in session.events)
 
     asyncio.run(_run())
+
+
+def test_session_manager_shutdown_disposes_all_sessions():
+    async def _run() -> None:
+        manager = SessionManager()
+        await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        await manager.shutdown()
+        assert manager.session_count == 0
+
+    asyncio.run(_run())

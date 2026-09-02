@@ -285,11 +285,26 @@ class SessionManager:
     async def dispose(self, session_id: str) -> None:
         session = self.get(session_id)
         if session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}:
-            await self.cancel(session_id, CancellationPolicy(skip_interrupt=True))
+            try:
+                await self.cancel(session_id, CancellationPolicy(skip_interrupt=True))
+            except SharkRailError as err:
+                if err.error.code != ErrorCode.INVALID_SESSION_STATE:
+                    raise
             await self.wait(session_id)
         await session.backend.dispose(session.handle)
         session.state = SessionState.DISPOSED
         self._sessions.pop(session_id, None)
+
+    async def shutdown(self) -> None:
+        """Dispose every session when the owning transport shuts down."""
+        await asyncio.gather(
+            *(self.dispose(session_id) for session_id in tuple(self._sessions)),
+            return_exceptions=False,
+        )
+
+    @property
+    def session_count(self) -> int:
+        return len(self._sessions)
 
     async def _monitor(self, session: Session) -> None:
         readers: list[asyncio.Task[None]] = []
