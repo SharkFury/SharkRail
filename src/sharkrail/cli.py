@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 
+from . import __version__
 from .executor import CommandRunner
 from .models import CommandMode, CommandSpec
 
@@ -15,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="sharkrail",
         description="SharkRail: Native execution rails for AI agents.",
     )
+    parser.add_argument("--version", action="version", version=f"sharkrail {__version__}")
 
     subparsers = parser.add_subparsers(dest="command")
 

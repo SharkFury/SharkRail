@@ -42,3 +42,16 @@ def test_sharkrail_run_json_output():
     payload = json.loads(result.stdout.strip())
     assert payload["timed_out"] is False
     assert payload["exit_code"] == 0
+
+
+def test_sharkrail_version():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "--version"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert result.stdout.startswith("sharkrail ")
