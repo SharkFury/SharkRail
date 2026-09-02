@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Optional
 
 from .models import CommandSpec
+from .windows import WindowsJob
 
 if os.name != "nt":
     import fcntl
@@ -38,6 +39,11 @@ class ProcessHandle:
 class PtyProcessHandle(ProcessHandle):
     master_fd: int = -1
     output_closed: bool = False
+
+
+@dataclass
+class WindowsProcessHandle(ProcessHandle):
+    job: WindowsJob | None = None
 
 
 class CancellationStep(str, Enum):
@@ -80,6 +86,10 @@ class ExecutionBackend(ABC):
 
     @abstractmethod
     async def kill_tree(self, handle: ProcessHandle) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def dispose(self, handle: ProcessHandle) -> None:
         raise NotImplementedError
 
 
@@ -154,6 +164,40 @@ class PipeBackend(ExecutionBackend):
                 os.killpg(handle.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+    async def dispose(self, handle: ProcessHandle) -> None:
+        return None
+
+
+class WindowsPipeBackend(PipeBackend):
+    """Windows pipe backend backed by a kill-on-close Job Object."""
+
+    async def start(self, spec: CommandSpec) -> WindowsProcessHandle:
+        handle = await super().start(spec)
+        job = WindowsJob()
+        try:
+            job.assign(handle.pid)
+        except BaseException:
+            job.close()
+            handle.process.kill()
+            await handle.process.wait()
+            raise
+        return WindowsProcessHandle(process=handle.process, job=job)
+
+    async def kill_tree(self, handle: ProcessHandle) -> None:
+        if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
+            handle.job.terminate()
+            return
+        await super().kill_tree(handle)
+
+    async def dispose(self, handle: ProcessHandle) -> None:
+        if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
+            handle.job.close()
+            handle.job = None
+
+
+def pipe_backend() -> PipeBackend:
+    return WindowsPipeBackend() if os.name == "nt" else PipeBackend()
 
 
 class PtyBackend(ExecutionBackend):

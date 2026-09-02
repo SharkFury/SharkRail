@@ -9,9 +9,9 @@ from typing import Callable, Optional
 
 from .backends import (
     ExecutionBackend,
-    PipeBackend,
     PtyBackend,
     PtyProcessHandle,
+    pipe_backend,
     read_pty_output,
 )
 from .errors import ErrorCode, ErrorStage, ExecutionError
@@ -128,7 +128,7 @@ class CommandRunner:
 
         seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"mode": spec.mode.value})
 
-        backend = self._backend or (PtyBackend() if spec.mode == CommandMode.PTY else PipeBackend())
+        backend = self._backend or (PtyBackend() if spec.mode == CommandMode.PTY else pipe_backend())
 
         try:
             handle = await backend.start(spec)
@@ -198,9 +198,9 @@ class CommandRunner:
             if isinstance(handle, PtyProcessHandle):
                 await handle.process.wait()
                 out, err = await output_task, b""
-                await backend.dispose(handle)
             else:
                 out, err = await handle.process.communicate()
+            await backend.dispose(handle)
             captured = capture_output(out, err, self._max_output_bytes)
             result = CommandResult(
                 exit_code=124,
@@ -246,5 +246,7 @@ class CommandRunner:
         seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
         seq = await self._emit(event_handler, seq, LifecycleEventType.DRAINED, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
         seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"reason": result.reason.value, "timed_out": result.timed_out})
+
+        await backend.dispose(handle)
 
         return result, events

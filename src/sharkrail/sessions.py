@@ -12,11 +12,11 @@ from uuid import uuid4
 from .backends import (
     CancellationPolicy,
     ExecutionBackend,
-    PipeBackend,
     ProcessHandle,
     PtyBackend,
     PtyProcessHandle,
     cancel_process,
+    pipe_backend,
 )
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .executor import (
@@ -135,7 +135,7 @@ class SessionManager:
                 )
             )
 
-        backend: ExecutionBackend = PtyBackend() if spec.mode == CommandMode.PTY else PipeBackend()
+        backend: ExecutionBackend = PtyBackend() if spec.mode == CommandMode.PTY else pipe_backend()
         try:
             handle = await backend.start(spec)
         except FileNotFoundError as err:
@@ -263,8 +263,7 @@ class SessionManager:
         if session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}:
             await self.cancel(session_id, CancellationPolicy(skip_interrupt=True))
             await self.wait(session_id)
-        if isinstance(session.backend, PtyBackend) and isinstance(session.handle, PtyProcessHandle):
-            await session.backend.dispose(session.handle)
+        await session.backend.dispose(session.handle)
         session.state = SessionState.DISPOSED
         self._sessions.pop(session_id, None)
 
@@ -298,8 +297,7 @@ class SessionManager:
             LifecycleEventType.SESSION_DRAINED,
             {"output_bytes": session.total_output_bytes},
         )
-        if isinstance(session.backend, PtyBackend) and isinstance(session.handle, PtyProcessHandle):
-            await session.backend.dispose(session.handle)
+        await session.backend.dispose(session.handle)
 
         reason = session.completion_reason
         if reason is None:
