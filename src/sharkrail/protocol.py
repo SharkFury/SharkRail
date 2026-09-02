@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, TextIO
 
@@ -31,8 +32,13 @@ class JsonRpcError(Exception):
 class JsonRpcRuntime:
     def __init__(self, manager: Optional[SessionManager] = None) -> None:
         self.manager = manager or SessionManager()
+        self._rpc_requests = 0
+        self._rpc_errors = 0
+        self._rpc_duration_ms = 0.0
 
     async def dispatch(self, request: object) -> Optional[dict[str, Any]]:
+        started = time.monotonic()
+        self._rpc_requests += 1
         request_id: object = None
         is_notification = isinstance(request, dict) and "id" not in request
         try:
@@ -44,19 +50,22 @@ class JsonRpcRuntime:
             params = request.get("params", {})
             if not isinstance(params, dict):
                 raise JsonRpcError(-32602, "Invalid params")
-            result = await self._call(request["method"], params)
+            result = await self._call(request["method"], params, request_id=request_id)
             if "id" not in request:
                 return None
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except JsonRpcError as err:
+            self._rpc_errors += 1
             if is_notification:
                 return None
             return self._error_response(request_id, err.code, err.message, err.data)
         except SharkRailError as err:
+            self._rpc_errors += 1
             if is_notification:
                 return None
             return self._error_response(request_id, -32000, err.error.message, err.error.to_dict())
         except (TypeError, ValueError, KeyError) as err:
+            self._rpc_errors += 1
             if is_notification:
                 return None
             error = ExecutionError(
@@ -66,6 +75,7 @@ class JsonRpcRuntime:
             )
             return self._error_response(request_id, -32602, "Invalid params", error.to_dict())
         except Exception as err:  # noqa: BLE001  # pragma: no cover - protocol boundary
+            self._rpc_errors += 1
             if is_notification:
                 return None
             error = ExecutionError(
@@ -74,8 +84,15 @@ class JsonRpcRuntime:
                 message=str(err),
             )
             return self._error_response(request_id, -32603, "Internal error", error.to_dict())
+        finally:
+            self._rpc_duration_ms += (time.monotonic() - started) * 1000
 
-    async def _call(self, method: str, params: dict[str, Any]) -> object:
+    async def _call(
+        self,
+        method: str,
+        params: dict[str, Any],
+        request_id: object = None,
+    ) -> object:
         if method == "runtime.hello":
             return {
                 "runtime": "SharkRail",
@@ -84,13 +101,34 @@ class JsonRpcRuntime:
             }
         if method == "runtime.capabilities":
             return _capability_dict(collect())
+        if method == "runtime.stats":
+            return {
+                **self.manager.stats(),
+                "rpc": {
+                    "requests": self._rpc_requests,
+                    "errors": self._rpc_errors,
+                    "average_duration_ms": round(
+                        self._rpc_duration_ms / max(1, self._rpc_requests),
+                        3,
+                    ),
+                },
+            }
         if method == "session.start":
+            trace_id = params.get("trace_id")
+            if trace_id is not None and (not isinstance(trace_id, str) or not trace_id):
+                raise TypeError("trace_id must be a non-empty string")
             session = await self.manager.start(
                 _parse_spec(params),
                 timeout_ms=_optional_int(params, "timeout_ms"),
                 max_output_bytes=_optional_int(params, "max_output_bytes"),
+                trace_id=trace_id,
+                request_id=None if request_id is None else str(request_id),
             )
             return _session_dict(session)
+        if method == "session.list":
+            return {"sessions": self.manager.list_sessions()}
+        if method == "session.inspect":
+            return self.manager.inspect(_required_str(params, "session_id"))
         if method == "session.get":
             return _session_dict(self.manager.get(_required_str(params, "session_id")))
         if method in {"session.subscribe", "session.events"}:
@@ -301,6 +339,9 @@ def _session_dict(session: Session) -> dict[str, Any]:
         "state": session.state.value,
         "pid": session.handle.pid,
         "mode": session.spec.mode.value,
+        "trace_id": session.trace_id,
+        "request_id": session.request_id,
+        "created_at": session.created_at,
         "first_cursor": session.first_event_seq,
         "next_cursor": session.next_event_seq,
     }
@@ -311,6 +352,9 @@ def _event_dict(event: object) -> dict[str, Any]:
         "seq": event.seq,
         "kind": event.kind.value,
         "payload": event.payload,
+        "timestamp": event.timestamp,
+        "monotonic_ns": event.monotonic_ns,
+        "trace_id": event.trace_id,
     }
 
 
@@ -326,6 +370,8 @@ def _result_dict(result: object) -> dict[str, Any]:
         "truncated_output_bytes": result.truncated_output_bytes,
         "decoding_errors": result.decoding_errors,
         "error": result.error.to_dict() if result.error else None,
+        "duration_ms": result.duration_ms,
+        "drain_duration_ms": result.drain_duration_ms,
     }
 
 

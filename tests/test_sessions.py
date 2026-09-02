@@ -286,3 +286,28 @@ def test_completed_sessions_expire_with_structured_error():
         assert raised.value.error.code == ErrorCode.SESSION_EXPIRED
 
     asyncio.run(_run())
+
+
+def test_runtime_stats_and_session_inspection_are_bounded_metadata():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "print('metrics')")),
+            trace_id="trace-test",
+            request_id="request-test",
+        )
+        result = await manager.wait(session.id)
+        stats = manager.stats()
+        inspected = manager.inspect(session.id)
+
+        assert result is not None and result.duration_ms >= 0
+        assert stats["sessions"]["started"] == 1
+        assert stats["sessions"]["completed_by_reason"]["success"] == 1
+        assert stats["io"]["output_bytes"] >= len("metrics\n")
+        assert inspected["trace_id"] == "trace-test"
+        assert inspected["request_id"] == "request-test"
+        assert "argv" not in inspected
+        assert "env" not in inspected
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())

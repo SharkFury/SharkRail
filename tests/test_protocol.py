@@ -162,3 +162,40 @@ def test_stdio_server_applies_pending_request_backpressure():
         )
 
     asyncio.run(_run())
+
+
+def test_protocol_exposes_traces_stats_and_session_inspection():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime()
+        started = await runtime.dispatch(
+            request(
+                "session.start",
+                {
+                    "trace_id": "trace-protocol",
+                    "spec": {"executable": sys.executable, "argv": ["-c", "print('ok')"]},
+                },
+                41,
+            )
+        )
+        assert started is not None
+        session_id = started["result"]["session_id"]
+        await runtime.dispatch(request("session.wait", {"session_id": session_id}, 42))
+        inspected = await runtime.dispatch(
+            request("session.inspect", {"session_id": session_id}, 43)
+        )
+        listed = await runtime.dispatch(request("session.list", {}, 44))
+        stats = await runtime.dispatch(request("runtime.stats", {}, 45))
+        events = await runtime.dispatch(
+            request("session.subscribe", {"session_id": session_id}, 46)
+        )
+
+        assert inspected is not None
+        assert inspected["result"]["trace_id"] == "trace-protocol"
+        assert inspected["result"]["request_id"] == "41"
+        assert listed is not None and listed["result"]["sessions"]
+        assert stats is not None and stats["result"]["rpc"]["requests"] >= 5
+        assert events is not None
+        assert events["result"]["events"][0]["trace_id"] == "trace-protocol"
+        assert events["result"]["events"][0]["timestamp"].endswith("+00:00")
+
+    asyncio.run(_run())

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -30,6 +32,7 @@ from .executor import (
 from .lifecycle import SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec
 from .output import capture_output
+from .telemetry import log_event
 
 
 @dataclass
@@ -60,6 +63,16 @@ class Session:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancellation_steps: tuple[str, ...] = ()
+    trace_id: str = field(default_factory=lambda: str(uuid4()))
+    request_id: Optional[str] = None
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    created_monotonic: float = field(default_factory=time.monotonic)
+    started_monotonic: float = field(default_factory=time.monotonic)
+    exited_monotonic: Optional[float] = None
+    drain_started_monotonic: Optional[float] = None
+    last_output_monotonic: Optional[float] = None
 
     @property
     def state(self) -> SessionState:
@@ -72,7 +85,14 @@ class Session:
         async with self.condition:
             if len(self.events) >= self.max_retained_events:
                 self.events.popleft()
-            self.events.append(LifecycleEvent(self.next_event_seq, kind, payload or {}))
+            self.events.append(
+                LifecycleEvent(
+                    self.next_event_seq,
+                    kind,
+                    payload or {},
+                    trace_id=self.trace_id,
+                )
+            )
             self.next_event_seq += 1
             self.condition.notify_all()
 
@@ -81,6 +101,7 @@ class Session:
         return self.events[0].seq if self.events else self.next_event_seq
 
     async def append_output(self, stream: str, data: bytes) -> None:
+        self.last_output_monotonic = time.monotonic()
         offset = self.stream_offsets.get(stream, 0)
         self.stream_offsets[stream] = offset + len(data)
         self.total_output_bytes += len(data)
@@ -184,6 +205,15 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._disposed_session_ids: deque[str] = deque(maxlen=1024)
         self._expired_session_ids: deque[str] = deque(maxlen=1024)
+        self._started_sessions = 0
+        self._completion_counts: Counter[str] = Counter()
+        self._error_counts: Counter[str] = Counter()
+        self._total_input_bytes = 0
+        self._total_output_bytes = 0
+        self._total_retained_output_bytes = 0
+        self._total_dropped_output_bytes = 0
+        self._cancellation_count = 0
+        self._created_monotonic = time.monotonic()
 
     async def start(
         self,
@@ -191,8 +221,11 @@ class SessionManager:
         *,
         timeout_ms: Optional[int] = None,
         max_output_bytes: Optional[int] = None,
+        trace_id: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> Session:
         self._prune_completed_sessions()
+        requested_monotonic = time.monotonic()
         spec.validate()
         active_count = sum(
             session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}
@@ -246,8 +279,13 @@ class SessionManager:
             timeout_ms=timeout_ms,
             max_output_events=self._max_output_events,
             max_retained_events=self._max_retained_events,
+            trace_id=trace_id or str(uuid4()),
+            request_id=request_id,
+            created_monotonic=requested_monotonic,
+            started_monotonic=time.monotonic(),
         )
         self._sessions[session.id] = session
+        self._started_sessions += 1
         session.transition(SessionState.ACCEPTED)
         await session.emit(LifecycleEventType.ACCEPTED, {"session_id": session.id})
         session.transition(SessionState.STARTING)
@@ -257,6 +295,14 @@ class SessionManager:
             {"pid": handle.pid, "mode": spec.mode.value},
         )
         session.monitor_task = asyncio.create_task(self._monitor(session))
+        log_event(
+            logging.INFO,
+            "session.started",
+            session_id=session.id,
+            trace_id=session.trace_id,
+            pid=handle.pid,
+            mode=spec.mode.value,
+        )
         return session
 
     def get(self, session_id: str) -> Session:
@@ -298,6 +344,7 @@ class SessionManager:
                 session.backend.write(session.handle, data),
                 self._termination_timeout_ms / 1000,
             )
+            self._total_input_bytes += len(data)
 
     async def close_stdin(self, session_id: str) -> None:
         session = self.get(session_id)
@@ -351,6 +398,7 @@ class SessionManager:
             if session.state == SessionState.RUNNING:
                 session.transition(SessionState.CANCELLING)
             session.completion_reason = CompletionReason.CANCELLED
+            self._cancellation_count += 1
 
             async def report_step(step: CancellationStep) -> None:
                 value = step.value
@@ -523,6 +571,63 @@ class SessionManager:
     def session_count(self) -> int:
         return len(self._sessions)
 
+    def stats(self) -> dict[str, object]:
+        self._prune_completed_sessions()
+        states = Counter(session.state.value for session in self._sessions.values())
+        active = sum(
+            count
+            for state, count in states.items()
+            if state not in {SessionState.COMPLETED.value, SessionState.FAILED.value}
+        )
+        return {
+            "uptime_ms": round((time.monotonic() - self._created_monotonic) * 1000, 3),
+            "sessions": {
+                "active": active,
+                "retained": len(self._sessions),
+                "started": self._started_sessions,
+                "states": dict(states),
+                "completed_by_reason": dict(self._completion_counts),
+            },
+            "errors_by_code": dict(self._error_counts),
+            "io": {
+                "input_bytes": self._total_input_bytes,
+                "output_bytes": self._total_output_bytes,
+                "retained_output_bytes": self._total_retained_output_bytes,
+                "dropped_output_bytes": self._total_dropped_output_bytes,
+            },
+            "cancellations": self._cancellation_count,
+        }
+
+    def list_sessions(self) -> tuple[dict[str, object], ...]:
+        self._prune_completed_sessions()
+        return tuple(self.inspect(session.id) for session in self._sessions.values())
+
+    def inspect(self, session_id: str) -> dict[str, object]:
+        session = self.get(session_id)
+        now = time.monotonic()
+        return {
+            "session_id": session.id,
+            "trace_id": session.trace_id,
+            "request_id": session.request_id,
+            "state": session.state.value,
+            "pid": session.handle.pid,
+            "mode": session.spec.mode.value,
+            "created_at": session.created_at,
+            "duration_ms": self._duration_ms(session, now),
+            "drain_duration_ms": self._drain_duration_ms(session, now),
+            "last_output_age_ms": (
+                None
+                if session.last_output_monotonic is None
+                else round((now - session.last_output_monotonic) * 1000, 3)
+            ),
+            "output_bytes": session.total_output_bytes,
+            "retained_output_bytes": len(session.stdout) + len(session.stderr),
+            "dropped_output_bytes": session.truncated_output_bytes,
+            "first_cursor": session.first_event_seq,
+            "next_cursor": session.next_event_seq,
+            "cancellation_steps": session.cancellation_steps,
+        }
+
     async def _monitor(self, session: Session) -> None:
         readers: list[asyncio.Task[None]] = []
         if hasattr(session.backend, "read") and isinstance(session.handle, PtyProcessHandle):
@@ -561,7 +666,9 @@ class SessionManager:
             try:
                 if session.state == SessionState.RUNNING:
                     session.transition(SessionState.EXITING)
+                session.exited_monotonic = time.monotonic()
                 session.transition(SessionState.DRAINING)
+                session.drain_started_monotonic = time.monotonic()
                 await session.emit(
                     LifecycleEventType.PROCESS_EXITED,
                     {"exit_code": session.handle.process.returncode},
@@ -649,6 +756,8 @@ class SessionManager:
             reason=reason,
             timed_out=reason == CompletionReason.TIMEOUT,
             error=monitor_error,
+            duration_ms=self._duration_ms(session),
+            drain_duration_ms=self._drain_duration_ms(session),
         )
         if monitor_error is None:
             session.transition(SessionState.COMPLETED)
@@ -660,6 +769,23 @@ class SessionManager:
                 "exit_code": session.result.exit_code,
                 "resources_disposed": disposed,
             },
+        )
+        self._completion_counts[reason.value] += 1
+        if monitor_error is not None:
+            self._error_counts[monitor_error.code.value] += 1
+        self._total_output_bytes += session.total_output_bytes
+        self._total_retained_output_bytes += captured.retained_bytes
+        self._total_dropped_output_bytes += session.truncated_output_bytes
+        log_event(
+            logging.ERROR if monitor_error is not None else logging.INFO,
+            "session.completed",
+            session_id=session.id,
+            trace_id=session.trace_id,
+            reason=reason.value,
+            exit_code=session.result.exit_code,
+            duration_ms=self._duration_ms(session),
+            drain_duration_ms=self._drain_duration_ms(session),
+            error_code=monitor_error.code.value if monitor_error is not None else None,
         )
         self._prune_completed_sessions()
 
@@ -710,6 +836,18 @@ class SessionManager:
             message=str(error) or type(error).__name__,
             native=native,
         )
+
+    @staticmethod
+    def _duration_ms(session: Session, now: Optional[float] = None) -> float:
+        end = session.exited_monotonic or session.completed_at_monotonic or now or time.monotonic()
+        return round(max(0.0, end - session.started_monotonic) * 1000, 3)
+
+    @staticmethod
+    def _drain_duration_ms(session: Session, now: Optional[float] = None) -> float:
+        if session.drain_started_monotonic is None:
+            return 0.0
+        end = session.completed_at_monotonic or now or time.monotonic()
+        return round(max(0.0, end - session.drain_started_monotonic) * 1000, 3)
 
     def _prune_completed_sessions(self) -> None:
         now = time.monotonic()

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import datetime, timezone
 from enum import Enum
+from time import monotonic_ns
 from typing import Callable, Optional
 
 from .backends import ExecutionBackend
@@ -45,6 +48,11 @@ class LifecycleEvent:
     seq: int
     kind: LifecycleEventType
     payload: dict[str, object]
+    timestamp: str = dataclass_field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    monotonic_ns: int = dataclass_field(default_factory=monotonic_ns)
+    trace_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,8 @@ class CommandResult:
     reason: CompletionReason = CompletionReason.SUCCESS
     timed_out: bool = False
     error: ExecutionError | None = None
+    duration_ms: float = 0.0
+    drain_duration_ms: float = 0.0
 
 
 class CommandRunner:

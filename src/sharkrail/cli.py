@@ -119,6 +119,8 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                     "truncated_output_bytes": result.truncated_output_bytes,
                     "decoding_errors": result.decoding_errors,
                     "error": result.error.to_dict() if result.error else None,
+                    "duration_ms": result.duration_ms,
+                    "drain_duration_ms": result.drain_duration_ms,
                     **({"events": events} if ns.events else {}),
                 },
                 ensure_ascii=False,
