@@ -386,4 +386,5 @@ def _capability_dict(capability: Capability) -> dict[str, Any]:
         "features": capability.features,
         "targets": capability.targets,
         "shells": capability.shells,
+        "degraded_reasons": capability.degraded_reasons,
     }

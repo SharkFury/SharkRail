@@ -1,3 +1,6 @@
+from contextlib import ExitStack
+from unittest.mock import patch
+
 from sharkrail.capabilities import collect
 
 
@@ -11,3 +14,24 @@ def test_capabilities_contract_shape():
     assert c.max_output_bytes > 0
     assert "native" in c.targets
     assert c.shells
+
+
+def test_windows_capabilities_report_missing_optional_runtimes():
+    def executable(name: str):
+        return "C:/Windows/System32/cmd.exe" if name == "cmd.exe" else None
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch("sharkrail.capabilities.platform.system", return_value="Windows")
+        )
+        stack.enter_context(patch("sharkrail.capabilities.find_spec", return_value=None))
+        stack.enter_context(
+            patch("sharkrail.capabilities.shutil.which", side_effect=executable)
+        )
+        capability = collect()
+
+    assert capability.modes == ("pipe",)
+    assert capability.targets == ("native",)
+    assert capability.shells == ("cmd",)
+    assert "pty" not in capability.features
+    assert capability.degraded_reasons

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import platform
+import shutil
 from dataclasses import dataclass
+from importlib.util import find_spec
 
 
 @dataclass(frozen=True)
@@ -17,24 +19,54 @@ class Capability:
     features: tuple[str, ...]
     targets: tuple[str, ...]
     shells: tuple[str, ...]
+    degraded_reasons: tuple[str, ...] = ()
 
 
 def collect() -> Capability:
     current = platform.system().lower()
     if current == "windows":
+        pty_available = find_spec("winpty") is not None
+        wsl_available = shutil.which("wsl.exe") is not None
+        shells = tuple(
+            shell
+            for shell, executable in (
+                ("cmd", "cmd.exe"),
+                ("powershell", "powershell.exe"),
+                ("pwsh", "pwsh.exe"),
+            )
+            if shutil.which(executable) is not None
+        )
+        modes = ("pipe", "pty") if pty_available else ("pipe",)
+        features = [
+            "session_lifecycle",
+            "exit_reasons",
+            "capabilities",
+            "process_tree_kill",
+        ]
+        degraded: list[str] = []
+        if pty_available:
+            features.extend(("pty", "resize"))
+        else:
+            degraded.append("pywinpty is unavailable; ConPTY is disabled")
+        if not wsl_available:
+            degraded.append("wsl.exe is unavailable; WSL target is disabled")
         return Capability(
             contract_version="1.0.0",
             platform_name="windows",
             process_tree="job_object",
-            modes=("pipe", "pty"),
+            modes=modes,
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
-            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
-            targets=("native", "wsl"),
-            shells=("cmd", "powershell", "pwsh"),
+            features=tuple(features),
+            targets=("native", "wsl") if wsl_available else ("native",),
+            shells=shells,
+            degraded_reasons=tuple(degraded),
         )
 
     if current == "darwin":
+        shells = tuple(
+            shell for shell in ("bash", "zsh", "pwsh") if shutil.which(shell)
+        )
         return Capability(
             contract_version="1.0.0",
             platform_name="macos",
@@ -44,9 +76,12 @@ def collect() -> Capability:
             supports_timeout=True,
             features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
             targets=("native",),
-            shells=("bash", "zsh", "pwsh"),
+            shells=shells,
         )
 
+    shells = tuple(
+        shell for shell in ("bash", "zsh", "pwsh") if shutil.which(shell)
+    )
     return Capability(
         contract_version="1.0.0",
         platform_name="linux",
@@ -56,5 +91,5 @@ def collect() -> Capability:
         supports_timeout=True,
         features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
         targets=("native",),
-        shells=("bash", "zsh", "pwsh"),
+        shells=shells,
     )

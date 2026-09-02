@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 
 from . import __version__
 from .capabilities import collect
-from .doctor import diagnose, format_report
+from .doctor import diagnose, format_report, write_diagnostic_bundle
 from .executor import CommandRunner
 from .models import CommandMode
 from .protocol import serve_stdio
@@ -61,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="Diagnose local runtime capabilities")
     doctor.add_argument("--json", action="store_true", help="Print machine-readable output")
+    doctor.add_argument("--bundle", metavar="PATH", help="Write a secret-free diagnostic bundle")
 
     return parser
 
@@ -161,6 +163,7 @@ def main() -> int:
                         "features": capability.features,
                         "targets": capability.targets,
                         "shells": capability.shells,
+                        "degraded_reasons": capability.degraded_reasons,
                     },
                     ensure_ascii=False,
                 )
@@ -186,6 +189,8 @@ def main() -> int:
 
     if ns.command == "doctor":
         report = diagnose()
+        if ns.bundle:
+            write_diagnostic_bundle(report, Path(ns.bundle))
         if ns.json:
             print(json.dumps(report.to_dict(), ensure_ascii=False))
         else:

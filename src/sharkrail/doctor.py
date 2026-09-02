@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import platform
 import shutil
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from time import monotonic
 
 from . import __version__
 from .capabilities import collect
+from .models import CommandMode, CommandSpec
+from .sessions import SessionManager
 
 
 @dataclass(frozen=True)
@@ -17,6 +24,7 @@ class Check:
     name: str
     status: str
     detail: str
+    duration_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -43,16 +51,54 @@ class DoctorReport:
         return result
 
 
-def diagnose() -> DoctorReport:
+async def _probe_execution(mode: CommandMode) -> Check:
+    started = monotonic()
+    manager = SessionManager(
+        default_max_output_bytes=4096,
+        drain_timeout_ms=1000,
+        termination_timeout_ms=1000,
+    )
+    try:
+        code = (
+            "import os; print('sharkrail-probe', os.isatty(1))"
+            if mode == CommandMode.PTY
+            else "print('sharkrail-probe')"
+        )
+        session = await manager.start(
+            CommandSpec(sys.executable, ("-c", code), mode=mode),
+            timeout_ms=2000,
+        )
+        result = await manager.wait(session.id, timeout_ms=3000)
+        healthy = result is not None and result.exit_code == 0 and "sharkrail-probe" in result.stdout
+        if mode == CommandMode.PTY:
+            healthy = healthy and result is not None and "True" in result.stdout
+        return Check(
+            mode.value,
+            "pass" if healthy else "fail",
+            "active start/write/drain/exit probe passed" if healthy else "active execution probe failed",
+            round((monotonic() - started) * 1000, 3),
+        )
+    except Exception as error:  # noqa: BLE001 - diagnostic boundary
+        return Check(
+            mode.value,
+            "fail",
+            f"{type(error).__name__}: {error}",
+            round((monotonic() - started) * 1000, 3),
+        )
+    finally:
+        await manager.shutdown()
+
+
+async def diagnose_async() -> DoctorReport:
     capability = collect()
     checks: list[Check] = [
         Check("python", "pass", sys.executable),
-        Check("pipe", "pass", "async subprocess pipes are available"),
+        await _probe_execution(CommandMode.PIPE),
     ]
     if "pty" in capability.modes:
-        checks.append(Check("pty", "pass", "native POSIX PTY backend is available"))
+        checks.append(await _probe_execution(CommandMode.PTY))
     else:
-        checks.append(Check("pty", "warn", "PTY backend is not available in this build"))
+        checks.append(Check("pty", "warn", "PTY backend is not available at runtime"))
 
     for shell in capability.shells:
         executable = "cmd.exe" if shell == "cmd" else (
@@ -83,6 +129,24 @@ def diagnose() -> DoctorReport:
         max_output_bytes=capability.max_output_bytes,
         checks=tuple(checks),
     )
+
+
+def diagnose() -> DoctorReport:
+    return asyncio.run(diagnose_async())
+
+
+def write_diagnostic_bundle(report: DoctorReport, destination: Path) -> Path:
+    """Write a secret-free diagnostic snapshot for issue reports."""
+    payload = {
+        "schema_version": "1.0.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "doctor": report.to_dict(),
+    }
+    destination.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return destination
 
 
 def format_report(report: DoctorReport) -> str:
