@@ -42,9 +42,15 @@ jobs:
       - name: Test Windows core contracts
         if: runner.os == 'Windows'
         run: pytest tests/test_capabilities.py tests/test_doctor.py tests/test_lifecycle.py tests/test_models.py tests/test_output.py tests/test_public_api.py tests/test_routing.py tests/test_windows.py
-      - name: Test Windows pipe execution
+      - name: Test Windows pipe backend
         if: runner.os == 'Windows'
-        run: pytest tests/test_backends.py tests/test_executor.py tests/test_lifecycle_events.py
+        run: pytest tests/test_backends.py
+      - name: Test Windows command runner
+        if: runner.os == 'Windows'
+        run: pytest tests/test_executor.py
+      - name: Test Windows lifecycle events
+        if: runner.os == 'Windows'
+        run: pytest tests/test_lifecycle_events.py
       - name: Test Windows session core
         if: runner.os == 'Windows'
         run: pytest tests/test_sessions.py -k "not persistent_pty"
