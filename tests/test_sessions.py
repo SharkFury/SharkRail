@@ -232,3 +232,57 @@ def test_cancel_and_dispose_are_idempotent():
         await manager.dispose(session.id)
 
     asyncio.run(_run())
+
+
+def test_event_history_is_bounded_and_reports_expired_cursor():
+    async def _run() -> None:
+        manager = SessionManager(max_retained_events=4, max_output_events=20)
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(.2)"))
+        )
+        for index in range(8):
+            await session.emit(LifecycleEventType.CANCELLATION_STEP, {"index": index})
+
+        assert len(session.events) == 4
+        with pytest.raises(SharkRailError) as raised:
+            await manager.events_after(session.id, cursor=0)
+        assert raised.value.error.code == ErrorCode.EVENT_CURSOR_EXPIRED
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_event_pages_have_absolute_cursors():
+    async def _run() -> None:
+        manager = SessionManager(max_event_page_size=2)
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "print('page')"))
+        )
+        await manager.wait(session.id)
+        events, next_cursor, has_more = await manager.event_page(
+            session.id,
+            cursor=session.first_event_seq,
+            limit=2,
+        )
+
+        assert len(events) == 2
+        assert next_cursor == events[-1].seq + 1
+        assert has_more is True
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_completed_sessions_expire_with_structured_error():
+    async def _run() -> None:
+        manager = SessionManager(completed_session_ttl_ms=0)
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "pass"))
+        )
+        await manager.wait(session.id)
+
+        with pytest.raises(SharkRailError) as raised:
+            manager.get(session.id)
+        assert raised.value.error.code == ErrorCode.SESSION_EXPIRED
+
+    asyncio.run(_run())

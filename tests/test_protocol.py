@@ -47,6 +47,7 @@ def test_protocol_session_full_pipe_lifecycle():
         assert waited is not None
         assert waited["result"]["stdout"].splitlines() == ["HELLO"]
         assert events is not None and events["result"]["next_cursor"] > 0
+        assert events["result"]["has_more"] is False
         assert events["result"]["events"][-1]["kind"] == "session.completed"
 
     asyncio.run(_run())
@@ -122,5 +123,42 @@ def test_stdio_eof_unblocks_pending_session_wait():
         )
 
         assert runtime.manager.session_count == 0
+
+    asyncio.run(_run())
+
+
+def test_stdio_server_applies_pending_request_backpressure():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime()
+        session = await runtime.manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import time; time.sleep(10)"),
+            )
+        )
+        messages = "\n".join(
+            __import__("json").dumps(
+                request("session.wait", {"session_id": session.id}, request_id)
+            )
+            for request_id in (1, 2)
+        )
+        destination = io.StringIO()
+
+        await serve_stdio(
+            runtime=runtime,
+            stdin=io.StringIO(messages + "\n"),
+            stdout=destination,
+            max_pending_requests=1,
+        )
+
+        responses = [
+            __import__("json").loads(line)
+            for line in destination.getvalue().splitlines()
+        ]
+        assert any(
+            response.get("error", {}).get("data", {}).get("code")
+            == "RESOURCE_LIMITED"
+            for response in responses
+        )
 
     asyncio.run(_run())

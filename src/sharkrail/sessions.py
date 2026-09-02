@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -39,7 +41,7 @@ class Session:
     max_output_bytes: Optional[int]
     timeout_ms: Optional[int]
     lifecycle: SessionLifecycle = field(default_factory=SessionLifecycle)
-    events: list[LifecycleEvent] = field(default_factory=list)
+    events: deque[LifecycleEvent] = field(default_factory=deque)
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     total_output_bytes: int = 0
@@ -48,8 +50,12 @@ class Session:
     result: Optional[CommandResult] = None
     completion_reason: Optional[CompletionReason] = None
     max_output_events: int = 10000
+    max_retained_events: int = 12000
     output_event_count: int = 0
     output_event_limit_reported: bool = False
+    truncation_reported_streams: set[str] = field(default_factory=set)
+    next_event_seq: int = 0
+    completed_at_monotonic: Optional[float] = None
     monitor_task: Optional[asyncio.Task[None]] = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -64,10 +70,15 @@ class Session:
 
     async def emit(self, kind: LifecycleEventType, payload: Optional[dict[str, object]] = None) -> None:
         async with self.condition:
-            self.events.append(
-                LifecycleEvent(seq=len(self.events), kind=kind, payload=payload or {})
-            )
+            if len(self.events) >= self.max_retained_events:
+                self.events.popleft()
+            self.events.append(LifecycleEvent(self.next_event_seq, kind, payload or {}))
+            self.next_event_seq += 1
             self.condition.notify_all()
+
+    @property
+    def first_event_seq(self) -> int:
+        return self.events[0].seq if self.events else self.next_event_seq
 
     async def append_output(self, stream: str, data: bytes) -> None:
         offset = self.stream_offsets.get(stream, 0)
@@ -112,10 +123,16 @@ class Session:
             )
         if dropped:
             self.truncated_output_bytes += dropped
-            await self.emit(
-                LifecycleEventType.OUTPUT_TRUNCATED,
-                {"stream": stream, "dropped_bytes": dropped, "total_dropped_bytes": self.truncated_output_bytes},
-            )
+            if stream not in self.truncation_reported_streams:
+                self.truncation_reported_streams.add(stream)
+                await self.emit(
+                    LifecycleEventType.OUTPUT_TRUNCATED,
+                    {
+                        "stream": stream,
+                        "dropped_bytes": dropped,
+                        "total_dropped_bytes": self.truncated_output_bytes,
+                    },
+                )
 
 
 class SessionManager:
@@ -129,6 +146,11 @@ class SessionManager:
         drain_timeout_ms: int = 2000,
         termination_timeout_ms: int = 2000,
         shutdown_timeout_ms: int = 5000,
+        max_retained_events: int = 12000,
+        max_completed_sessions: int = 256,
+        completed_session_ttl_ms: int = 5 * 60 * 1000,
+        max_event_page_size: int = 100,
+        max_event_page_bytes: int = 256 * 1024,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
@@ -139,6 +161,11 @@ class SessionManager:
             or drain_timeout_ms < 0
             or termination_timeout_ms <= 0
             or shutdown_timeout_ms <= 0
+            or max_retained_events <= 0
+            or max_completed_sessions <= 0
+            or completed_session_ttl_ms < 0
+            or max_event_page_size <= 0
+            or max_event_page_bytes <= 0
         ):
             raise ValueError("session resource limits must be positive")
         self._default_max_output_bytes = default_max_output_bytes
@@ -149,8 +176,14 @@ class SessionManager:
         self._drain_timeout_ms = drain_timeout_ms
         self._termination_timeout_ms = termination_timeout_ms
         self._shutdown_timeout_ms = shutdown_timeout_ms
+        self._max_retained_events = max_retained_events
+        self._max_completed_sessions = max_completed_sessions
+        self._completed_session_ttl_ms = completed_session_ttl_ms
+        self._max_event_page_size = max_event_page_size
+        self._max_event_page_bytes = max_event_page_bytes
         self._sessions: dict[str, Session] = {}
         self._disposed_session_ids: deque[str] = deque(maxlen=1024)
+        self._expired_session_ids: deque[str] = deque(maxlen=1024)
 
     async def start(
         self,
@@ -159,6 +192,7 @@ class SessionManager:
         timeout_ms: Optional[int] = None,
         max_output_bytes: Optional[int] = None,
     ) -> Session:
+        self._prune_completed_sessions()
         spec.validate()
         active_count = sum(
             session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}
@@ -211,6 +245,7 @@ class SessionManager:
             max_output_bytes=self._default_max_output_bytes if max_output_bytes is None else max_output_bytes,
             timeout_ms=timeout_ms,
             max_output_events=self._max_output_events,
+            max_retained_events=self._max_retained_events,
         )
         self._sessions[session.id] = session
         session.transition(SessionState.ACCEPTED)
@@ -225,9 +260,19 @@ class SessionManager:
         return session
 
     def get(self, session_id: str) -> Session:
+        self._prune_completed_sessions()
         try:
             return self._sessions[session_id]
         except KeyError as err:
+            if session_id in self._expired_session_ids:
+                raise SharkRailError(
+                    ExecutionError(
+                        code=ErrorCode.SESSION_EXPIRED,
+                        stage=ErrorStage.RUN,
+                        message=f"Session expired: {session_id}",
+                    ),
+                    err,
+                ) from err
             raise SharkRailError(
                 ExecutionError(
                     code=ErrorCode.SESSION_NOT_FOUND,
@@ -349,16 +394,78 @@ class SessionManager:
         cursor: int = 0,
         wait_ms: int = 0,
     ) -> tuple[LifecycleEvent, ...]:
+        events, _, _ = await self.event_page(
+            session_id,
+            cursor=cursor,
+            wait_ms=wait_ms,
+            limit=self._max_event_page_size,
+        )
+        return events
+
+    async def event_page(
+        self,
+        session_id: str,
+        *,
+        cursor: int = 0,
+        wait_ms: int = 0,
+        limit: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+    ) -> tuple[tuple[LifecycleEvent, ...], int, bool]:
         session = self.get(session_id)
-        if cursor < 0 or cursor > len(session.events):
+        if cursor < session.first_event_seq:
+            raise SharkRailError(
+                ExecutionError(
+                    code=ErrorCode.EVENT_CURSOR_EXPIRED,
+                    stage=ErrorStage.RUN,
+                    message=(
+                        f"event cursor {cursor} is older than retained cursor "
+                        f"{session.first_event_seq}"
+                    ),
+                    retryable=False,
+                    native={"first_cursor": session.first_event_seq},
+                )
+            )
+        if cursor < 0 or cursor > session.next_event_seq:
             raise self._request_error("event cursor is out of range")
-        if cursor == len(session.events) and wait_ms > 0 and session.state != SessionState.COMPLETED:
+        if cursor == session.next_event_seq and wait_ms > 0 and session.state not in {
+            SessionState.COMPLETED,
+            SessionState.FAILED,
+        }:
             async with session.condition:
                 try:
-                    await asyncio.wait_for(session.condition.wait(), wait_ms / 1000)
+                    await asyncio.wait_for(
+                        session.condition.wait_for(
+                            lambda: session.next_event_seq > cursor
+                            or session.state in {SessionState.COMPLETED, SessionState.FAILED}
+                        ),
+                        wait_ms / 1000,
+                    )
                 except asyncio.TimeoutError:
                     pass
-        return tuple(session.events[cursor:])
+        page_limit = self._max_event_page_size if limit is None else limit
+        if page_limit <= 0 or page_limit > self._max_event_page_size:
+            raise self._request_error(
+                f"event page limit must be between 1 and {self._max_event_page_size}"
+            )
+        byte_limit = self._max_event_page_bytes if max_bytes is None else max_bytes
+        selected: list[LifecycleEvent] = []
+        selected_bytes = 0
+        for event in session.events:
+            if event.seq < cursor:
+                continue
+            event_bytes = len(
+                json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            if selected and byte_limit is not None and selected_bytes + event_bytes > byte_limit:
+                break
+            selected.append(event)
+            selected_bytes += event_bytes
+            if len(selected) >= page_limit:
+                break
+        next_cursor = selected[-1].seq + 1 if selected else cursor
+        return tuple(selected), next_cursor, next_cursor < session.next_event_seq
 
     async def dispose(self, session_id: str) -> None:
         if session_id in self._disposed_session_ids:
@@ -545,6 +652,7 @@ class SessionManager:
         )
         if monitor_error is None:
             session.transition(SessionState.COMPLETED)
+        session.completed_at_monotonic = time.monotonic()
         await session.emit(
             LifecycleEventType.SESSION_COMPLETED,
             {
@@ -553,6 +661,7 @@ class SessionManager:
                 "resources_disposed": disposed,
             },
         )
+        self._prune_completed_sessions()
 
     async def _read_pipe(
         self,
@@ -601,6 +710,32 @@ class SessionManager:
             message=str(error) or type(error).__name__,
             native=native,
         )
+
+    def _prune_completed_sessions(self) -> None:
+        now = time.monotonic()
+        completed = sorted(
+            (
+                session
+                for session in self._sessions.values()
+                if session.state in {SessionState.COMPLETED, SessionState.FAILED}
+                and session.completed_at_monotonic is not None
+            ),
+            key=lambda session: session.completed_at_monotonic or 0,
+        )
+        expired = [
+            session
+            for session in completed
+            if (now - (session.completed_at_monotonic or now)) * 1000
+            >= self._completed_session_ttl_ms
+        ]
+        retained = [session for session in completed if session not in expired]
+        overflow = max(0, len(retained) - self._max_completed_sessions)
+        for session in [*expired, *retained[:overflow]]:
+            if session.id not in self._sessions:
+                continue
+            session.transition(SessionState.DISPOSED)
+            self._sessions.pop(session.id, None)
+            self._expired_session_ids.append(session.id)
 
     @staticmethod
     def _request_error(message: str) -> SharkRailError:

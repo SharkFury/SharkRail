@@ -18,6 +18,7 @@ from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import Session, SessionManager
 
 MAX_REQUEST_BYTES = 1024 * 1024
+MAX_PENDING_REQUESTS = 256
 
 
 @dataclass(frozen=True)
@@ -95,14 +96,16 @@ class JsonRpcRuntime:
         if method in {"session.subscribe", "session.events"}:
             session_id = _required_str(params, "session_id")
             cursor = int(params.get("cursor", 0))
-            events = await self.manager.events_after(
+            events, next_cursor, has_more = await self.manager.event_page(
                 session_id,
                 cursor=cursor,
                 wait_ms=int(params.get("wait_ms", 0)),
+                limit=int(params.get("limit", 100)),
             )
             return {
                 "events": [_event_dict(event) for event in events],
-                "next_cursor": cursor + len(events),
+                "next_cursor": next_cursor,
+                "has_more": has_more,
             }
         if method == "session.write":
             await self.manager.write(_required_str(params, "session_id"), _parse_input(params))
@@ -161,6 +164,7 @@ async def serve_stdio(
     stdout: Optional[TextIO] = None,
     max_request_bytes: int = MAX_REQUEST_BYTES,
     shutdown_timeout_ms: int = 5000,
+    max_pending_requests: int = MAX_PENDING_REQUESTS,
 ) -> None:
     """Serve concurrent newline-delimited JSON-RPC requests until stdin EOF."""
     runtime = runtime or JsonRpcRuntime()
@@ -168,6 +172,12 @@ async def serve_stdio(
     stdout = stdout or sys.stdout
     write_lock = asyncio.Lock()
     pending: set[asyncio.Task[None]] = set()
+
+    async def write_response(response: dict[str, Any]) -> None:
+        encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        async with write_lock:
+            stdout.write(encoded + "\n")
+            stdout.flush()
 
     async def respond(line: str) -> None:
         if len(line.encode("utf-8")) > max_request_bytes:
@@ -177,9 +187,7 @@ async def serve_stdio(
                 message=f"request exceeds {max_request_bytes} byte limit",
             )
             response = runtime._error_response(None, -32000, error.message, error.to_dict())
-            async with write_lock:
-                stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
-                stdout.flush()
+            await write_response(response)
             return
         try:
             request = json.loads(line)
@@ -187,15 +195,23 @@ async def serve_stdio(
         except json.JSONDecodeError as err:
             response = runtime._error_response(None, -32700, "Parse error", {"message": str(err)})
         if response is not None:
-            encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
-            async with write_lock:
-                stdout.write(encoded + "\n")
-                stdout.flush()
+            await write_response(response)
 
     while True:
         line = await asyncio.to_thread(stdin.readline)
         if line == "":
             break
+        if len(pending) >= max_pending_requests:
+            error = ExecutionError(
+                code=ErrorCode.RESOURCE_LIMITED,
+                stage=ErrorStage.RUN,
+                message=f"pending request limit reached ({max_pending_requests})",
+                retryable=True,
+            )
+            await write_response(
+                runtime._error_response(None, -32000, error.message, error.to_dict())
+            )
+            continue
         task = asyncio.create_task(respond(line))
         pending.add(task)
         task.add_done_callback(pending.discard)
@@ -285,7 +301,8 @@ def _session_dict(session: Session) -> dict[str, Any]:
         "state": session.state.value,
         "pid": session.handle.pid,
         "mode": session.spec.mode.value,
-        "next_cursor": len(session.events),
+        "first_cursor": session.first_event_seq,
+        "next_cursor": session.next_event_seq,
     }
 
 
