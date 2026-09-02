@@ -3,7 +3,12 @@
 __version__ = "0.0.1"
 
 from .models import CommandMode, CommandSpec
-from .executor import CommandResult, CommandRunner
+from .executor import (
+    CommandResult,
+    CommandRunner,
+    LifecycleEvent,
+    LifecycleEventType,
+)
 from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
 
 __all__ = [
@@ -11,6 +16,8 @@ __all__ = [
     "CommandSpec",
     "CommandResult",
     "CommandRunner",
+    "LifecycleEvent",
+    "LifecycleEventType",
     "InvalidTransition",
     "SessionLifecycle",
     "SessionState",

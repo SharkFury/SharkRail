@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Callable, Optional
 from enum import Enum
-from typing import Optional
+
 
 from .models import CommandMode, CommandSpec
 
@@ -14,6 +15,22 @@ class CompletionReason(str, Enum):
     SUCCESS = "success"
     TIMEOUT = "timeout"
     FAILED = "failed"
+
+
+class LifecycleEventType(str, Enum):
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    OUTPUT = "output"
+    EXITED = "exited"
+    DRAINED = "drained"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True)
+class LifecycleEvent:
+    seq: int
+    kind: LifecycleEventType
+    payload: dict[str, str | int | bool]
 
 
 @dataclass(frozen=True)
@@ -29,15 +46,47 @@ class CommandRunner:
     def __init__(self, dry_run: bool = False) -> None:
         self._dry_run = dry_run
 
+    async def _emit(
+        self,
+        handler: Optional[Callable[[LifecycleEvent], None]],
+        seq: int,
+        kind: LifecycleEventType,
+        payload: Optional[dict[str, str | int | bool]] = None,
+    ) -> int:
+        if handler is None:
+            return seq + 1
+        event = LifecycleEvent(seq=seq, kind=kind, payload=payload or {})
+        handler(event)
+        return seq + 1
+
     async def run(
         self,
         spec: CommandSpec,
         timeout_ms: Optional[int] = None,
     ) -> CommandResult:
+        result, _ = await self.run_events(spec, timeout_ms=timeout_ms)
+        return result
+
+    async def run_events(
+        self,
+        spec: CommandSpec,
+        timeout_ms: Optional[int] = None,
+        event_handler: Optional[Callable[[LifecycleEvent], None]] = None,
+    ) -> tuple[CommandResult, list[LifecycleEvent]]:
         spec.validate()
 
+        events: list[LifecycleEvent] = []
+        if event_handler is None:
+            event_handler = events.append
+        seq = 0
+        seq = await self._emit(event_handler, seq, LifecycleEventType.ACCEPTED, {"executable": spec.executable})
+
         if self._dry_run:
-            return CommandResult(exit_code=0, stdout="", stderr="")
+            seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"dry_run": True})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"exit_code": 0, "reason": CompletionReason.SUCCESS})
+            return CommandResult(exit_code=0, stdout="", stderr=""), events
+
+        seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"mode": spec.mode.value})
 
         # PTY support is part of the roadmap. Foundation layer keeps a single,
         # portable execution path while exposing explicit mode for callers.
@@ -64,13 +113,18 @@ class CommandRunner:
         except asyncio.TimeoutError:
             proc.kill()
             out, err = await proc.communicate()
-            return CommandResult(
+            result = CommandResult(
                 exit_code=124,
                 stdout=out.decode(errors="ignore"),
                 stderr=err.decode(errors="ignore"),
                 reason=CompletionReason.TIMEOUT,
                 timed_out=True,
             )
+            seq = await self._emit(event_handler, seq, LifecycleEventType.OUTPUT, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.DRAINED, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"reason": result.reason.value, "timed_out": True})
+            return result, events
 
         if proc.returncode == 0:
             reason = CompletionReason.SUCCESS
@@ -79,10 +133,17 @@ class CommandRunner:
         else:
             reason = CompletionReason.FAILED
 
-        return CommandResult(
+        result = CommandResult(
             exit_code=proc.returncode if proc.returncode is not None else 1,
             stdout=out.decode(errors="ignore"),
             stderr=err.decode(errors="ignore"),
             reason=reason,
             timed_out=False,
         )
+
+        seq = await self._emit(event_handler, seq, LifecycleEventType.OUTPUT, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
+        seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
+        seq = await self._emit(event_handler, seq, LifecycleEventType.DRAINED, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
+        seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"reason": result.reason.value, "timed_out": result.timed_out})
+
+        return result, events
