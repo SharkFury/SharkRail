@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
+from .errors import ErrorCode, ErrorStage, ExecutionError
 from .models import CommandMode, CommandSpec
+from .output import capture_output
 
 
 class CompletionReason(str, Enum):
@@ -38,33 +40,19 @@ class CommandResult:
     stdout: str
     stderr: str
     output_truncated: bool = False
+    retained_output_bytes: int = 0
+    truncated_output_bytes: int = 0
+    decoding_errors: bool = False
     max_output_bytes: int | None = None
     reason: CompletionReason = CompletionReason.SUCCESS
     timed_out: bool = False
+    error: ExecutionError | None = None
 
 
 class CommandRunner:
     def __init__(self, dry_run: bool = False, max_output_bytes: int | None = None) -> None:
         self._dry_run = dry_run
         self._max_output_bytes = max_output_bytes
-
-    def _truncate_output(self, stdout: str, stderr: str) -> tuple[str, str, bool]:
-        if self._max_output_bytes is None:
-            return stdout, stderr, False
-        if self._max_output_bytes <= 0:
-            return "", "", True
-
-        max_bytes = self._max_output_bytes
-        if len(stdout) + len(stderr) <= max_bytes:
-            return stdout, stderr, False
-
-        if len(stdout) >= max_bytes:
-            return stdout[:max_bytes], "", True
-
-        truncated_stdout = stdout
-        stderr_available = max_bytes - len(stdout)
-        truncated_stderr = stderr[:stderr_available]
-        return truncated_stdout, truncated_stderr, True
 
     async def _emit(
         self,
@@ -130,6 +118,12 @@ class CommandRunner:
             )
         except FileNotFoundError as err:
             stderr = str(err)
+            execution_error = ExecutionError(
+                code=ErrorCode.EXECUTABLE_NOT_FOUND,
+                stage=ErrorStage.START,
+                message=stderr,
+                native={"errno": err.errno} if err.errno is not None else {},
+            )
             result = CommandResult(
                 exit_code=127,
                 stdout="",
@@ -137,6 +131,7 @@ class CommandRunner:
                 max_output_bytes=self._max_output_bytes,
                 reason=CompletionReason.FAILED,
                 timed_out=False,
+                error=execution_error,
             )
             seq = await self._emit(event_handler, seq, LifecycleEventType.OUTPUT, {"stderr": stderr})
             seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
@@ -145,6 +140,12 @@ class CommandRunner:
             return result, events
         except OSError as err:
             stderr = str(err)
+            execution_error = ExecutionError(
+                code=ErrorCode.START_FAILED,
+                stage=ErrorStage.START,
+                message=stderr,
+                native={"errno": err.errno} if err.errno is not None else {},
+            )
             result = CommandResult(
                 exit_code=1,
                 stdout="",
@@ -152,6 +153,7 @@ class CommandRunner:
                 max_output_bytes=self._max_output_bytes,
                 reason=CompletionReason.FAILED,
                 timed_out=False,
+                error=execution_error,
             )
             seq = await self._emit(event_handler, seq, LifecycleEventType.OUTPUT, {"stderr": stderr})
             seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
@@ -170,14 +172,15 @@ class CommandRunner:
         except asyncio.TimeoutError:
             proc.kill()
             out, err = await proc.communicate()
-            stdout_data = out.decode(errors="ignore")
-            stderr_data = err.decode(errors="ignore")
-            truncated_stdout, truncated_stderr, output_truncated = self._truncate_output(stdout_data, stderr_data)
+            captured = capture_output(out, err, self._max_output_bytes)
             result = CommandResult(
                 exit_code=124,
-                stdout=truncated_stdout,
-                stderr=truncated_stderr,
-                output_truncated=output_truncated,
+                stdout=captured.stdout,
+                stderr=captured.stderr,
+                output_truncated=captured.truncated,
+                retained_output_bytes=captured.retained_bytes,
+                truncated_output_bytes=captured.truncated_bytes,
+                decoding_errors=captured.decoding_errors,
                 max_output_bytes=self._max_output_bytes,
                 reason=CompletionReason.TIMEOUT,
                 timed_out=True,
@@ -195,15 +198,16 @@ class CommandRunner:
         else:
             reason = CompletionReason.FAILED
 
-        stdout_data = out.decode(errors="ignore")
-        stderr_data = err.decode(errors="ignore")
-        truncated_stdout, truncated_stderr, output_truncated = self._truncate_output(stdout_data, stderr_data)
+        captured = capture_output(out, err, self._max_output_bytes)
 
         result = CommandResult(
             exit_code=proc.returncode if proc.returncode is not None else 1,
-            stdout=truncated_stdout,
-            stderr=truncated_stderr,
-            output_truncated=output_truncated,
+            stdout=captured.stdout,
+            stderr=captured.stderr,
+            output_truncated=captured.truncated,
+            retained_output_bytes=captured.retained_bytes,
+            truncated_output_bytes=captured.truncated_bytes,
+            decoding_errors=captured.decoding_errors,
             max_output_bytes=self._max_output_bytes,
             reason=reason,
             timed_out=False,

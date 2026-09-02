@@ -64,5 +64,19 @@ def test_command_runner_output_is_truncated():
         assert result.stdout
         assert len(result.stdout) <= 10
         assert result.output_truncated is True
+        assert result.retained_output_bytes == 10
+        assert result.truncated_output_bytes > 0
+
+    asyncio.run(_run())
+
+
+def test_command_runner_reports_structured_start_error():
+    async def _run() -> None:
+        runner = CommandRunner()
+        result = await runner.run(CommandSpec(executable="__missing_executable__", argv=()))
+
+        assert result.error is not None
+        assert result.error.to_dict()["code"] == "EXECUTABLE_NOT_FOUND"
+        assert result.error.to_dict()["stage"] == "start"
 
     asyncio.run(_run())
