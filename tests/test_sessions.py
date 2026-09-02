@@ -94,3 +94,49 @@ def test_persistent_pty_session_supports_resize_and_write():
         assert "SHARKRAIL" in result.stdout
 
     asyncio.run(_run())
+
+
+def test_session_manager_enforces_concurrency_limit():
+    async def _run() -> None:
+        manager = SessionManager(max_active_sessions=1)
+        first = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        with pytest.raises(SharkRailError) as raised:
+            await manager.start(CommandSpec(executable=sys.executable, argv=("-c", "pass")))
+        assert raised.value.error.code == ErrorCode.RESOURCE_LIMITED
+        assert raised.value.error.retryable is True
+        await manager.dispose(first.id)
+
+    asyncio.run(_run())
+
+
+def test_session_manager_enforces_input_limit():
+    async def _run() -> None:
+        manager = SessionManager(max_input_bytes=4)
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import sys; sys.stdin.read()"))
+        )
+        with pytest.raises(SharkRailError) as raised:
+            await manager.write(session.id, b"12345")
+        assert raised.value.error.code == ErrorCode.RESOURCE_LIMITED
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_session_manager_limits_output_event_count():
+    async def _run() -> None:
+        manager = SessionManager(max_output_events=1)
+        session = await manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import sys; sys.stdout.write('a'*200000); sys.stdout.flush()"),
+            )
+        )
+        await manager.wait(session.id)
+        output_events = [event for event in session.events if event.kind == LifecycleEventType.STDOUT]
+        assert len(output_events) == 1
+        assert any(event.kind == LifecycleEventType.RESOURCE_LIMIT_HIT for event in session.events)
+
+    asyncio.run(_run())

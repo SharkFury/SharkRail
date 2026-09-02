@@ -54,6 +54,9 @@ class Session:
     stream_offsets: dict[str, int] = field(default_factory=dict)
     result: Optional[CommandResult] = None
     completion_reason: Optional[CompletionReason] = None
+    max_output_events: int = 10000
+    output_event_count: int = 0
+    output_event_limit_reported: bool = False
     monitor_task: Optional[asyncio.Task[None]] = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
@@ -85,7 +88,7 @@ class Session:
             self.stdout.extend(kept)
             kind = LifecycleEventType.STDOUT
 
-        if kept:
+        if kept and self.output_event_count < self.max_output_events:
             text = kept.decode("utf-8", errors="replace")
             await self.emit(
                 kind,
@@ -98,6 +101,13 @@ class Session:
                     "decoding_errors": "\ufffd" in text,
                 },
             )
+            self.output_event_count += 1
+        elif kept and not self.output_event_limit_reported:
+            self.output_event_limit_reported = True
+            await self.emit(
+                LifecycleEventType.RESOURCE_LIMIT_HIT,
+                {"resource": "output_events", "limit": self.max_output_events},
+            )
         if dropped:
             self.truncated_output_bytes += dropped
             await self.emit(
@@ -107,10 +117,21 @@ class Session:
 
 
 class SessionManager:
-    def __init__(self, default_max_output_bytes: int = 16 * 1024 * 1024) -> None:
+    def __init__(
+        self,
+        default_max_output_bytes: int = 16 * 1024 * 1024,
+        max_active_sessions: int = 64,
+        max_input_bytes: int = 1024 * 1024,
+        max_output_events: int = 10000,
+    ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
+        if max_active_sessions <= 0 or max_input_bytes <= 0 or max_output_events <= 0:
+            raise ValueError("session resource limits must be positive")
         self._default_max_output_bytes = default_max_output_bytes
+        self._max_active_sessions = max_active_sessions
+        self._max_input_bytes = max_input_bytes
+        self._max_output_events = max_output_events
         self._sessions: dict[str, Session] = {}
 
     async def start(
@@ -121,6 +142,19 @@ class SessionManager:
         max_output_bytes: Optional[int] = None,
     ) -> Session:
         spec.validate()
+        active_count = sum(
+            session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}
+            for session in self._sessions.values()
+        )
+        if active_count >= self._max_active_sessions:
+            raise SharkRailError(
+                ExecutionError(
+                    code=ErrorCode.RESOURCE_LIMITED,
+                    stage=ErrorStage.START,
+                    message=f"active session limit reached ({self._max_active_sessions})",
+                    retryable=True,
+                )
+            )
         if timeout_ms is not None and timeout_ms < 0:
             raise self._request_error("timeout_ms must be non-negative")
         if max_output_bytes is not None and max_output_bytes < 0:
@@ -156,6 +190,7 @@ class SessionManager:
             handle=handle,
             max_output_bytes=self._default_max_output_bytes if max_output_bytes is None else max_output_bytes,
             timeout_ms=timeout_ms,
+            max_output_events=self._max_output_events,
         )
         self._sessions[session.id] = session
         await session.emit(LifecycleEventType.ACCEPTED, {"session_id": session.id})
@@ -182,6 +217,14 @@ class SessionManager:
 
     async def write(self, session_id: str, data: bytes) -> None:
         session = self._require_active(session_id)
+        if len(data) > self._max_input_bytes:
+            raise SharkRailError(
+                ExecutionError(
+                    code=ErrorCode.RESOURCE_LIMITED,
+                    stage=ErrorStage.RUN,
+                    message=f"input exceeds per-write limit ({self._max_input_bytes} bytes)",
+                )
+            )
         await session.backend.write(session.handle, data)
 
     async def close_stdin(self, session_id: str) -> None:
