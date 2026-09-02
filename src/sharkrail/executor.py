@@ -95,12 +95,41 @@ class CommandRunner:
             # normal pipes and clearly expose the mode in command handling.
             pass
 
-        proc = await asyncio.create_subprocess_exec(
-            *spec.argv_list,
-            cwd=spec.cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *spec.argv_list,
+                cwd=spec.cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as err:
+            stderr = str(err)
+            result = CommandResult(
+                exit_code=127,
+                stdout="",
+                stderr=stderr,
+                reason=CompletionReason.FAILED,
+                timed_out=False,
+            )
+            seq = await self._emit(event_handler, seq, LifecycleEventType.OUTPUT, {"stderr": stderr})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.DRAINED, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"reason": result.reason.value, "timed_out": result.timed_out})
+            return result, events
+        except OSError as err:
+            stderr = str(err)
+            result = CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr=stderr,
+                reason=CompletionReason.FAILED,
+                timed_out=False,
+            )
+            seq = await self._emit(event_handler, seq, LifecycleEventType.OUTPUT, {"stderr": stderr})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.EXITED, {"exit_code": result.exit_code})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.DRAINED, {"stdout_len": len(result.stdout), "stderr_len": len(result.stderr)})
+            seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"reason": result.reason.value, "timed_out": result.timed_out})
+            return result, events
 
         try:
             if timeout_ms is None:
