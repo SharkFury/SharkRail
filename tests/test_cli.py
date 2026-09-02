@@ -90,3 +90,18 @@ def test_sharkrail_capabilities_json():
     assert "contract_version" in payload
     assert "features" in payload and isinstance(payload["features"], list)
     assert payload["supports_timeout"] is True
+
+
+def test_sharkrail_run_json_with_events():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "--events", "echo", "hello"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    payload = json.loads(result.stdout.strip())
+    assert result.returncode == 0
+    assert "events" in payload
+    assert payload["events"][0]["kind"] == "accepted"

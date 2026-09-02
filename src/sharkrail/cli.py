@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--cwd", default=None)
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--json", action="store_true", help="Print machine-readable output")
+    run.add_argument("--events", action="store_true", help="Emit lifecycle events")
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -43,7 +44,22 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
         cwd=ns.cwd,
         mode=CommandMode(ns.mode),
     )
-    result = await CommandRunner(dry_run=ns.dry_run).run(spec, timeout_ms=ns.timeout_ms)
+    runner = CommandRunner(dry_run=ns.dry_run)
+
+    events: list[dict[str, object]] = []
+    if ns.events:
+        result, raw_events = await runner.run_events(spec, timeout_ms=ns.timeout_ms)
+        events = [
+            {
+                "seq": event.seq,
+                "kind": event.kind.value,
+                "payload": event.payload,
+            }
+            for event in raw_events
+        ]
+    else:
+        result = await runner.run(spec, timeout_ms=ns.timeout_ms)
+
     if ns.json:
         print(
             json.dumps(
@@ -53,6 +69,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                     "reason": result.reason.value,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
+                    **({"events": events} if ns.events else {}),
                 },
                 ensure_ascii=False,
             )
