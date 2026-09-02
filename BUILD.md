@@ -12,7 +12,7 @@ This repository uses a standard Python package layout.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[test]"
 ```
 
 ## Setup (Windows PowerShell)
@@ -36,8 +36,8 @@ python -m build
 ## Test
 
 ```bash
-python -m pip install pytest ruff
-pytest
+python -m pip install -e ".[test]"
+pytest --timeout=20 --cov=sharkrail --cov-fail-under=70
 ruff check src tests .github/scripts
 ```
 
@@ -58,7 +58,7 @@ sharkrail serve
 
 ## Supported CI matrix
 
-Every push and pull request is verified on Ubuntu, macOS, and Windows with Python 3.9 and 3.11. CI runs unit/integration tests, Ruff, compatibility smoke checks, capability checks, and distribution builds.
+Every push and pull request is verified on Ubuntu, macOS, and Windows with Python 3.9, 3.11, and 3.14. CI runs unit/integration tests, reliability stress tests, Ruff, dependency checks, compatibility smoke checks, capability checks, distribution builds, per-job deadlines, and a 70% coverage gate.
 
 Tagged releases use PyPI trusted publishing and attach the verified Python distributions to a GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md) for repository setup and release instructions.
 
