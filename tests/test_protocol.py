@@ -1,8 +1,9 @@
 import asyncio
 import base64
+import io
 import sys
 
-from sharkrail.protocol import JsonRpcRuntime
+from sharkrail.protocol import JsonRpcRuntime, serve_stdio
 
 
 def request(method: str, params: dict[str, object], request_id: int = 1) -> dict[str, object]:
@@ -68,5 +69,16 @@ def test_protocol_notifications_have_no_response():
         runtime = JsonRpcRuntime()
         response = await runtime.dispatch({"jsonrpc": "2.0", "method": "runtime.hello"})
         assert response is None
+
+    asyncio.run(_run())
+
+
+def test_stdio_server_rejects_oversized_request():
+    async def _run() -> None:
+        source = io.StringIO('{"jsonrpc":"2.0","id":1,"method":"runtime.hello"}\n')
+        destination = io.StringIO()
+        await serve_stdio(stdin=source, stdout=destination, max_request_bytes=10)
+        response = __import__("json").loads(destination.getvalue())
+        assert response["error"]["data"]["code"] == "RESOURCE_LIMITED"
 
     asyncio.run(_run())

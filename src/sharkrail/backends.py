@@ -103,9 +103,13 @@ class PipeBackend(ExecutionBackend):
     """Pipe execution using a dedicated process group for tree operations."""
 
     async def start(self, spec: CommandSpec) -> ProcessHandle:
+        environment = None
+        if spec.env is not None:
+            environment = os.environ.copy()
+            environment.update(spec.env)
         kwargs: dict[str, object] = {
             "cwd": spec.cwd,
-            "env": dict(spec.env) if spec.env is not None else None,
+            "env": environment,
             "stdin": asyncio.subprocess.PIPE,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
@@ -212,12 +216,16 @@ class PtyBackend(ExecutionBackend):
     async def start(self, spec: CommandSpec) -> PtyProcessHandle:
         if os.name == "nt":
             raise NotImplementedError("ConPTY backend is not available in this build")
+        environment = None
+        if spec.env is not None:
+            environment = os.environ.copy()
+            environment.update(spec.env)
         master_fd, slave_fd = pty.openpty()
         try:
             process = await asyncio.create_subprocess_exec(
                 *spec.argv_list,
                 cwd=spec.cwd,
-                env=dict(spec.env) if spec.env is not None else None,
+                env=environment,
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,

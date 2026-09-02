@@ -102,3 +102,19 @@ def test_cancel_process_can_skip_soft_interrupt():
         assert CancellationStep.INTERRUPT not in steps
 
     asyncio.run(_run())
+
+
+def test_pipe_backend_environment_is_an_overlay():
+    async def _run() -> None:
+        backend = PipeBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import os; print(os.environ['SHARKRAIL_TEST']); print(bool(os.environ.get('PATH')))"),
+                env={"SHARKRAIL_TEST": "present"},
+            )
+        )
+        stdout, _ = await handle.process.communicate()
+        assert stdout == b"present\nTrue\n"
+
+    asyncio.run(_run())

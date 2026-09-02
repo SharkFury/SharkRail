@@ -17,6 +17,8 @@ from .models import CommandMode, CommandSpec
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import Session, SessionManager
 
+MAX_REQUEST_BYTES = 1024 * 1024
+
 
 @dataclass(frozen=True)
 class JsonRpcError(Exception):
@@ -147,6 +149,7 @@ async def serve_stdio(
     runtime: Optional[JsonRpcRuntime] = None,
     stdin: Optional[TextIO] = None,
     stdout: Optional[TextIO] = None,
+    max_request_bytes: int = MAX_REQUEST_BYTES,
 ) -> None:
     """Serve concurrent newline-delimited JSON-RPC requests until stdin EOF."""
     runtime = runtime or JsonRpcRuntime()
@@ -156,6 +159,17 @@ async def serve_stdio(
     pending: set[asyncio.Task[None]] = set()
 
     async def respond(line: str) -> None:
+        if len(line.encode("utf-8")) > max_request_bytes:
+            error = ExecutionError(
+                code=ErrorCode.RESOURCE_LIMITED,
+                stage=ErrorStage.VALIDATE,
+                message=f"request exceeds {max_request_bytes} byte limit",
+            )
+            response = runtime._error_response(None, -32000, error.message, error.to_dict())
+            async with write_lock:
+                stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
+                stdout.flush()
+            return
         try:
             request = json.loads(line)
             response = await runtime.dispatch(request)
