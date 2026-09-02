@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 
 from .executor import CommandRunner
 from .models import CommandMode, CommandSpec
@@ -24,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-ms", type=int, default=None)
     run.add_argument("--cwd", default=None)
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--json", action="store_true", help="Print machine-readable output")
 
     return parser
 
@@ -36,6 +38,20 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
         mode=CommandMode(ns.mode),
     )
     result = await CommandRunner(dry_run=ns.dry_run).run(spec, timeout_ms=ns.timeout_ms)
+    if ns.json:
+        print(
+            json.dumps(
+                {
+                    "exit_code": result.exit_code,
+                    "timed_out": result.timed_out,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return result.exit_code
+
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
@@ -56,4 +72,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
