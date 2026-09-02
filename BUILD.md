@@ -4,7 +4,7 @@ This repository uses a standard Python package layout.
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.9+
 - No extra OS dependencies required for the current foundation layer
 
 ## Setup
@@ -41,4 +41,3 @@ ruff format .
 ```bash
 sharkrail run echo hi
 ```
-
