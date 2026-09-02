@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -160,5 +161,53 @@ def test_session_manager_shutdown_disposes_all_sessions():
         )
         await manager.shutdown()
         assert manager.session_count == 0
+
+    asyncio.run(_run())
+
+
+def test_monitor_failure_reaches_failed_terminal_state():
+    async def _run() -> None:
+        manager = SessionManager()
+        with patch(
+            "sharkrail.sessions.Session.append_output",
+            side_effect=OSError("simulated output failure"),
+        ):
+            session = await manager.start(
+                CommandSpec(executable=sys.executable, argv=("-c", "print('output')"))
+            )
+            result = await manager.wait(session.id)
+
+        assert result is not None
+        assert result.reason == CompletionReason.FAILED
+        assert result.error is not None
+        assert result.error.stage.value == "drain"
+        assert session.state == SessionState.FAILED
+        assert session.events[-2].kind == LifecycleEventType.SESSION_ERROR
+        assert session.events[-1].kind == LifecycleEventType.SESSION_COMPLETED
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX inherited pipe fixture")
+def test_drain_timeout_kills_descendants_holding_output_open():
+    async def _run() -> None:
+        manager = SessionManager(drain_timeout_ms=50)
+        code = (
+            "import subprocess,sys; "
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(5)']); "
+            "print('parent exited')"
+        )
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", code))
+        )
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=2)
+
+        assert result is not None
+        assert result.reason == CompletionReason.RESOURCE_LIMITED
+        assert result.error is not None
+        assert result.error.code == ErrorCode.DRAIN_TIMEOUT
+        assert session.state == SessionState.FAILED
+        await manager.dispose(session.id)
 
     asyncio.run(_run())

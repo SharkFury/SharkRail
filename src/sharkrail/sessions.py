@@ -122,16 +122,26 @@ class SessionManager:
         max_input_bytes: int = 1024 * 1024,
         max_output_events: int = 10000,
         backend: Optional[ExecutionBackend] = None,
+        drain_timeout_ms: int = 2000,
+        termination_timeout_ms: int = 2000,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
-        if max_active_sessions <= 0 or max_input_bytes <= 0 or max_output_events <= 0:
+        if (
+            max_active_sessions <= 0
+            or max_input_bytes <= 0
+            or max_output_events <= 0
+            or drain_timeout_ms < 0
+            or termination_timeout_ms <= 0
+        ):
             raise ValueError("session resource limits must be positive")
         self._default_max_output_bytes = default_max_output_bytes
         self._max_active_sessions = max_active_sessions
         self._max_input_bytes = max_input_bytes
         self._max_output_events = max_output_events
         self._backend = backend
+        self._drain_timeout_ms = drain_timeout_ms
+        self._termination_timeout_ms = termination_timeout_ms
         self._sessions: dict[str, Session] = {}
 
     async def start(
@@ -330,37 +340,110 @@ class SessionManager:
             if session.handle.process.stderr is not None:
                 readers.append(asyncio.create_task(self._read_pipe(session, "stderr", session.handle.process.stderr)))
 
+        monitor_error: Optional[ExecutionError] = None
+        disposed = False
         try:
             if session.timeout_ms is None:
                 await session.handle.process.wait()
             else:
                 await asyncio.wait_for(session.handle.process.wait(), session.timeout_ms / 1000)
         except asyncio.TimeoutError:
-            session.completion_reason = CompletionReason.TIMEOUT
-            await session.backend.kill_tree(session.handle)
-            await session.handle.process.wait()
+            try:
+                session.completion_reason = CompletionReason.TIMEOUT
+                await session.backend.kill_tree(session.handle)
+                await asyncio.wait_for(
+                    session.handle.process.wait(),
+                    self._termination_timeout_ms / 1000,
+                )
+            except asyncio.TimeoutError:
+                monitor_error = ExecutionError(
+                    code=ErrorCode.TERMINATION_FAILED,
+                    stage=ErrorStage.RUN,
+                    message="process did not exit after forced termination",
+                )
+            except Exception as err:  # noqa: BLE001 - backend boundary
+                monitor_error = self._backend_error(err, ErrorStage.RUN)
 
-        if session.state == SessionState.RUNNING:
-            session.transition(SessionState.EXITING)
-        session.transition(SessionState.DRAINING)
-        await session.emit(
-            LifecycleEventType.PROCESS_EXITED,
-            {"exit_code": session.handle.process.returncode},
-        )
-        await asyncio.gather(*readers)
-        await session.emit(
-            LifecycleEventType.SESSION_DRAINED,
-            {"output_bytes": session.total_output_bytes},
-        )
-        await session.backend.dispose(session.handle)
+        if monitor_error is None:
+            try:
+                if session.state == SessionState.RUNNING:
+                    session.transition(SessionState.EXITING)
+                session.transition(SessionState.DRAINING)
+                await session.emit(
+                    LifecycleEventType.PROCESS_EXITED,
+                    {"exit_code": session.handle.process.returncode},
+                )
+                reader_wait = asyncio.gather(*readers)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(reader_wait),
+                        self._drain_timeout_ms / 1000,
+                    )
+                except asyncio.TimeoutError:
+                    await session.emit(
+                        LifecycleEventType.RESOURCE_LIMIT_HIT,
+                        {"resource": "drain_time", "limit_ms": self._drain_timeout_ms},
+                    )
+                    await session.backend.kill_tree(session.handle)
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(reader_wait),
+                            self._termination_timeout_ms / 1000,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    raise SharkRailError(
+                        ExecutionError(
+                            code=ErrorCode.DRAIN_TIMEOUT,
+                            stage=ErrorStage.DRAIN,
+                            message=f"output did not drain within {self._drain_timeout_ms} ms",
+                        )
+                    )
+                await session.emit(
+                    LifecycleEventType.SESSION_DRAINED,
+                    {"output_bytes": session.total_output_bytes},
+                )
+            except SharkRailError as err:
+                monitor_error = err.error
+            except Exception as err:  # noqa: BLE001 - backend boundary
+                monitor_error = self._backend_error(err, ErrorStage.DRAIN)
 
-        reason = session.completion_reason
-        if reason is None:
-            reason = CompletionReason.SUCCESS if session.handle.process.returncode == 0 else CompletionReason.FAILED
+        try:
+            await session.backend.dispose(session.handle)
+            disposed = True
+        except Exception as err:  # noqa: BLE001 - backend boundary
+            if monitor_error is None:
+                monitor_error = self._backend_error(err, ErrorStage.DISPOSE)
+        finally:
+            for reader in readers:
+                if not reader.done():
+                    reader.cancel()
+            if readers:
+                await asyncio.gather(*readers, return_exceptions=True)
+
         captured = capture_output(bytes(session.stdout), bytes(session.stderr), None)
+        reason = session.completion_reason
+        if monitor_error is not None:
+            reason = (
+                CompletionReason.RESOURCE_LIMITED
+                if monitor_error.code == ErrorCode.DRAIN_TIMEOUT
+                else CompletionReason.FAILED
+            )
+            if session.state not in {SessionState.FAILED, SessionState.COMPLETED}:
+                session.transition(SessionState.FAILED)
+            await session.emit(LifecycleEventType.SESSION_ERROR, monitor_error.to_dict())
+        elif reason is None:
+            reason = (
+                CompletionReason.SUCCESS
+                if session.handle.process.returncode == 0
+                else CompletionReason.FAILED
+            )
+
         exit_code = session.handle.process.returncode
         if reason == CompletionReason.TIMEOUT:
             exit_code = 124
+        elif monitor_error is not None and (exit_code is None or exit_code == 0):
+            exit_code = 1
         session.result = CommandResult(
             exit_code=exit_code if exit_code is not None else 1,
             stdout=captured.stdout,
@@ -372,11 +455,17 @@ class SessionManager:
             max_output_bytes=session.max_output_bytes,
             reason=reason,
             timed_out=reason == CompletionReason.TIMEOUT,
+            error=monitor_error,
         )
-        session.transition(SessionState.COMPLETED)
+        if monitor_error is None:
+            session.transition(SessionState.COMPLETED)
         await session.emit(
             LifecycleEventType.SESSION_COMPLETED,
-            {"reason": reason.value, "exit_code": session.result.exit_code},
+            {
+                "reason": reason.value,
+                "exit_code": session.result.exit_code,
+                "resources_disposed": disposed,
+            },
         )
 
     async def _read_pipe(
@@ -414,6 +503,18 @@ class SessionManager:
                 )
             )
         return session
+
+    @staticmethod
+    def _backend_error(error: Exception, stage: ErrorStage) -> ExecutionError:
+        native: dict[str, object] = {"exception": type(error).__name__}
+        if isinstance(error, OSError) and error.errno is not None:
+            native["errno"] = error.errno
+        return ExecutionError(
+            code=ErrorCode.INTERNAL_ERROR,
+            stage=stage,
+            message=str(error) or type(error).__name__,
+            native=native,
+        )
 
     @staticmethod
     def _request_error(message: str) -> SharkRailError:

@@ -152,9 +152,9 @@ class PipeBackend(ExecutionBackend):
             os.killpg(handle.pid, signal.SIGTERM)
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
-        if handle.process.returncode is not None:
-            return
         if os.name == "nt":
+            if handle.process.returncode is not None:
+                return
             # taskkill is available on supported Windows versions and provides
             # tree semantics until the native Job Object backend lands.
             killer = await asyncio.create_subprocess_exec(
@@ -176,7 +176,13 @@ class PipeBackend(ExecutionBackend):
                 pass
 
     async def dispose(self, handle: ProcessHandle) -> None:
-        return None
+        if not handle.stdin_closed and handle.process.stdin is not None:
+            handle.stdin_closed = True
+            handle.process.stdin.close()
+            try:
+                await handle.process.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
 
 class WindowsPipeBackend(PipeBackend):
@@ -261,8 +267,6 @@ class PtyBackend(ExecutionBackend):
             os.killpg(handle.pid, signal.SIGTERM)
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
-        if handle.process.returncode is not None:
-            return
         try:
             os.killpg(handle.pid, signal.SIGKILL)
         except ProcessLookupError:
