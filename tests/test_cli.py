@@ -27,6 +27,7 @@ def test_sharkrail_no_subcommand_prints_help():
     )
     assert result.returncode != 0
     assert "usage" in result.stdout.lower() or "usage" in result.stderr.lower()
+    assert "capabilities" in result.stdout.lower() or "capabilities" in result.stderr.lower()
 
 
 def test_sharkrail_run_json_output():
