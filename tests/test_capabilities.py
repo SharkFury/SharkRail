@@ -9,3 +9,5 @@ def test_capabilities_contract_shape():
     assert "session_lifecycle" in c.features
     assert "pipe" in c.modes
     assert c.max_output_bytes > 0
+    assert "native" in c.targets
+    assert c.shells

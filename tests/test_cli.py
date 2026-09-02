@@ -3,6 +3,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 def test_sharkrail_run_dry_run():
     env = os.environ.copy()
@@ -176,3 +178,19 @@ def test_sharkrail_serve_stdio_json_rpc():
     assert result.returncode == 0
     assert payload["id"] == 7
     assert payload["result"]["runtime"] == "SharkRail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="bash CLI smoke test")
+def test_sharkrail_explicit_shell_command():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [sys.executable, "-m", "sharkrail", "shell", "bash", "printf shell-ok", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["stdout"] == "shell-ok"

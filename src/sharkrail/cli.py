@@ -9,8 +9,9 @@ import json
 from . import __version__
 from .capabilities import collect
 from .executor import CommandRunner
-from .models import CommandMode, CommandSpec
+from .models import CommandMode
 from .protocol import serve_stdio
+from .routing import Shell, Target, WslOptions, direct_command, shell_command
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +33,25 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="Print machine-readable output")
     run.add_argument("--events", action="store_true", help="Emit lifecycle events")
     run.add_argument("--max-output-bytes", type=int, default=None, help="Trim stdout/stderr to this byte budget")
+    run.add_argument("--target", choices=["native", "wsl"], default="native")
+    run.add_argument("--wsl-distribution", default=None)
+    run.add_argument("--wsl-user", default=None)
+    run.add_argument("--wsl-cwd", default=None)
+
+    shell = subparsers.add_parser("shell", help="Run an explicit shell script")
+    shell.add_argument("shell", choices=[item.value for item in Shell])
+    shell.add_argument("script")
+    shell.add_argument("--mode", choices=["pipe", "pty"], default="pipe")
+    shell.add_argument("--timeout-ms", type=int, default=None)
+    shell.add_argument("--cwd", default=None)
+    shell.add_argument("--dry-run", action="store_true")
+    shell.add_argument("--json", action="store_true")
+    shell.add_argument("--events", action="store_true")
+    shell.add_argument("--max-output-bytes", type=int, default=None)
+    shell.add_argument("--target", choices=["native", "wsl"], default="native")
+    shell.add_argument("--wsl-distribution", default=None)
+    shell.add_argument("--wsl-user", default=None)
+    shell.add_argument("--wsl-cwd", default=None)
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -42,12 +62,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_cmd(ns: argparse.Namespace) -> int:
-    spec = CommandSpec(
-        executable=ns.executable,
-        argv=tuple(ns.args),
-        cwd=ns.cwd,
-        mode=CommandMode(ns.mode),
+    wsl = WslOptions(
+        distribution=ns.wsl_distribution,
+        user=ns.wsl_user,
+        cwd=ns.wsl_cwd,
     )
+    if ns.command == "shell":
+        spec = shell_command(
+            Shell(ns.shell),
+            ns.script,
+            cwd=ns.cwd,
+            mode=CommandMode(ns.mode),
+            target=Target(ns.target),
+            wsl=wsl,
+        )
+    else:
+        spec = direct_command(
+            ns.executable,
+            tuple(ns.args),
+            cwd=ns.cwd,
+            mode=CommandMode(ns.mode),
+            target=Target(ns.target),
+            wsl=wsl,
+        )
     runner = CommandRunner(dry_run=ns.dry_run, max_output_bytes=ns.max_output_bytes)
 
     events: list[dict[str, object]] = []
@@ -100,7 +137,7 @@ def main() -> int:
     parser = build_parser()
     ns = parser.parse_args()
 
-    if ns.command == "run":
+    if ns.command in {"run", "shell"}:
         return asyncio.run(_run_cmd(ns))
 
     if ns.command == "capabilities":
@@ -116,6 +153,8 @@ def main() -> int:
                         "supports_timeout": capability.supports_timeout,
                         "max_output_bytes": capability.max_output_bytes,
                         "features": capability.features,
+                        "targets": capability.targets,
+                        "shells": capability.shells,
                     },
                     ensure_ascii=False,
                 )

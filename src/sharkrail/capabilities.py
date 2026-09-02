@@ -15,6 +15,8 @@ class Capability:
     max_output_bytes: int
     supports_timeout: bool
     features: tuple[str, ...]
+    targets: tuple[str, ...]
+    shells: tuple[str, ...]
 
 
 def collect() -> Capability:
@@ -28,6 +30,8 @@ def collect() -> Capability:
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
             features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill"),
+            targets=("native", "wsl"),
+            shells=("cmd", "powershell", "pwsh"),
         )
 
     if current == "darwin":
@@ -39,6 +43,8 @@ def collect() -> Capability:
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
             features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
+            targets=("native",),
+            shells=("bash", "zsh", "pwsh"),
         )
 
     return Capability(
@@ -49,4 +55,6 @@ def collect() -> Capability:
         max_output_bytes=16 * 1024 * 1024,
         supports_timeout=True,
         features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize"),
+        targets=("native",),
+        shells=("bash", "zsh", "pwsh"),
     )

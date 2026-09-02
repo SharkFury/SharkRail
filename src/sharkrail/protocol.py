@@ -14,6 +14,7 @@ from .backends import CancellationPolicy
 from .capabilities import Capability, collect
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .models import CommandMode, CommandSpec
+from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import Session, SessionManager
 
 
@@ -190,13 +191,29 @@ def _parse_spec(params: dict[str, Any]) -> CommandSpec:
         or not all(isinstance(key, str) and isinstance(value, str) for key, value in env.items())
     ):
         raise TypeError("env must be an object containing string values")
-    return CommandSpec(
-        executable=_required_str(spec, "executable"),
-        argv=tuple(argv),
-        cwd=spec.get("cwd"),
-        env=env,
-        mode=CommandMode(spec.get("mode", "pipe")),
+    target = Target(spec.get("target", "native"))
+    wsl_data = spec.get("wsl", {})
+    if not isinstance(wsl_data, dict):
+        raise TypeError("wsl must be an object")
+    wsl = WslOptions(
+        distribution=wsl_data.get("distribution"),
+        user=wsl_data.get("user"),
+        cwd=wsl_data.get("cwd"),
     )
+    common = {
+        "cwd": spec.get("cwd"),
+        "env": env,
+        "mode": CommandMode(spec.get("mode", "pipe")),
+        "target": target,
+        "wsl": wsl,
+    }
+    if "shell" in spec:
+        return shell_command(
+            Shell(spec["shell"]),
+            _required_str(spec, "script"),
+            **common,
+        )
+    return direct_command(_required_str(spec, "executable"), tuple(argv), **common)
 
 
 def _parse_input(params: dict[str, Any]) -> bytes:
@@ -265,4 +282,6 @@ def _capability_dict(capability: Capability) -> dict[str, Any]:
         "supports_timeout": capability.supports_timeout,
         "max_output_bytes": capability.max_output_bytes,
         "features": capability.features,
+        "targets": capability.targets,
+        "shells": capability.shells,
     }
