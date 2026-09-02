@@ -227,6 +227,11 @@ def test_cancel_and_dispose_are_idempotent():
         assert first
         assert second == first
         assert len(session.cancellation_steps) == len(set(session.cancellation_steps))
+        assert any(
+            event.kind == LifecycleEventType.CANCELLATION_COMPLETED
+            and event.payload["success"] is True
+            for event in session.events
+        )
         await manager.wait(session.id)
         await manager.dispose(session.id)
         await manager.dispose(session.id)

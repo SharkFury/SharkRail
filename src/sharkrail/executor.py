@@ -41,6 +41,7 @@ class LifecycleEventType(str, Enum):
     SESSION_COMPLETED = "session.completed"
     SESSION_ERROR = "session.error"
     CANCELLATION_STEP = "cancellation.step"
+    CANCELLATION_COMPLETED = "cancellation.completed"
     RESOURCE_LIMIT_HIT = "resource.limit_hit"
 
 

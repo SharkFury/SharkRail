@@ -254,7 +254,8 @@ class SessionManager:
         requested_monotonic = time.monotonic()
         spec.validate()
         active_count = sum(
-            session.state not in {SessionState.COMPLETED, SessionState.DISPOSED}
+            session.state
+            not in {SessionState.COMPLETED, SessionState.FAILED, SessionState.DISPOSED}
             for session in self._sessions.values()
         )
         if active_count >= self._max_active_sessions:
@@ -448,6 +449,7 @@ class SessionManager:
                 session.transition(SessionState.CANCELLING)
             session.completion_reason = CompletionReason.CANCELLED
             self._cancellation_count += 1
+            cancellation_started = time.monotonic()
 
             async def report_step(step: CancellationStep) -> None:
                 value = step.value
@@ -462,6 +464,17 @@ class SessionManager:
                     step_handler=report_step,
                 )
             except TimeoutError as err:
+                await session.emit(
+                    LifecycleEventType.CANCELLATION_COMPLETED,
+                    {
+                        "success": False,
+                        "steps": session.cancellation_steps,
+                        "duration_ms": round(
+                            (time.monotonic() - cancellation_started) * 1000,
+                            3,
+                        ),
+                    },
+                )
                 raise SharkRailError(
                     ExecutionError(
                         code=ErrorCode.TERMINATION_FAILED,
@@ -470,6 +483,17 @@ class SessionManager:
                     ),
                     err,
                 ) from err
+            await session.emit(
+                LifecycleEventType.CANCELLATION_COMPLETED,
+                {
+                    "success": True,
+                    "steps": session.cancellation_steps,
+                    "duration_ms": round(
+                        (time.monotonic() - cancellation_started) * 1000,
+                        3,
+                    ),
+                },
+            )
             return session.cancellation_steps
 
     async def wait(self, session_id: str, timeout_ms: Optional[int] = None) -> Optional[CommandResult]:
@@ -645,6 +669,14 @@ class SessionManager:
                 "dropped_output_bytes": self._total_dropped_output_bytes,
             },
             "cancellations": self._cancellation_count,
+            "event_recorder": (
+                None
+                if self._event_recorder is None
+                else {
+                    "truncated": self._event_recorder.truncated,
+                    "last_error": self._event_recorder.last_error,
+                }
+            ),
         }
 
     def list_sessions(self) -> tuple[dict[str, object], ...]:
@@ -825,6 +857,8 @@ class SessionManager:
                 "reason": reason.value,
                 "exit_code": session.result.exit_code,
                 "resources_disposed": disposed,
+                "duration_ms": self._duration_ms(session),
+                "drain_duration_ms": self._drain_duration_ms(session),
             },
         )
         self._completion_counts[reason.value] += 1

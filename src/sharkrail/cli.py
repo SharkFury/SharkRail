@@ -123,6 +123,9 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                 "seq": event.seq,
                 "kind": event.kind.value,
                 "payload": event.payload,
+                "timestamp": event.timestamp,
+                "monotonic_ns": event.monotonic_ns,
+                "trace_id": event.trace_id,
             }
             for event in raw_events
         ]
