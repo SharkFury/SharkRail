@@ -50,3 +50,19 @@ def test_command_runner_missing_executable_is_failed():
         assert events[-1].payload["reason"] == "failed"
 
     asyncio.run(_run())
+
+
+def test_command_runner_output_is_truncated():
+    async def _run() -> None:
+        runner = CommandRunner(max_output_bytes=10)
+        result = await runner.run(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "print('aaaaaaaaaaaaaaaaaaaaaaaaaaaa')"),
+            )
+        )
+        assert result.stdout
+        assert len(result.stdout) <= 10
+        assert result.output_truncated is True
+
+    asyncio.run(_run())

@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--json", action="store_true", help="Print machine-readable output")
     run.add_argument("--events", action="store_true", help="Emit lifecycle events")
+    run.add_argument("--max-output-bytes", type=int, default=None, help="Trim stdout/stderr to this byte budget")
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -44,7 +45,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
         cwd=ns.cwd,
         mode=CommandMode(ns.mode),
     )
-    runner = CommandRunner(dry_run=ns.dry_run)
+    runner = CommandRunner(dry_run=ns.dry_run, max_output_bytes=ns.max_output_bytes)
 
     events: list[dict[str, object]] = []
     if ns.events:
@@ -69,6 +70,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                     "reason": result.reason.value,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
+                    "output_truncated": result.output_truncated,
                     **({"events": events} if ns.events else {}),
                 },
                 ensure_ascii=False,

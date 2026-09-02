@@ -38,13 +38,34 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    output_truncated: bool = False
+    max_output_bytes: int | None = None
     reason: CompletionReason = CompletionReason.SUCCESS
     timed_out: bool = False
 
 
 class CommandRunner:
-    def __init__(self, dry_run: bool = False) -> None:
+    def __init__(self, dry_run: bool = False, max_output_bytes: int | None = None) -> None:
         self._dry_run = dry_run
+        self._max_output_bytes = max_output_bytes
+
+    def _truncate_output(self, stdout: str, stderr: str) -> tuple[str, str, bool]:
+        if self._max_output_bytes is None:
+            return stdout, stderr, False
+        if self._max_output_bytes <= 0:
+            return "", "", True
+
+        max_bytes = self._max_output_bytes
+        if len(stdout) + len(stderr) <= max_bytes:
+            return stdout, stderr, False
+
+        if len(stdout) >= max_bytes:
+            return stdout[:max_bytes], "", True
+
+        truncated_stdout = stdout
+        stderr_available = max_bytes - len(stdout)
+        truncated_stderr = stderr[:stderr_available]
+        return truncated_stdout, truncated_stderr, True
 
     async def _emit(
         self,
@@ -84,7 +105,13 @@ class CommandRunner:
         if self._dry_run:
             seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"dry_run": True})
             seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"exit_code": 0, "reason": CompletionReason.SUCCESS})
-            return CommandResult(exit_code=0, stdout="", stderr=""), events
+            return CommandResult(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                output_truncated=False,
+                max_output_bytes=self._max_output_bytes,
+            ), events
 
         seq = await self._emit(event_handler, seq, LifecycleEventType.RUNNING, {"mode": spec.mode.value})
 
@@ -108,6 +135,7 @@ class CommandRunner:
                 exit_code=127,
                 stdout="",
                 stderr=stderr,
+                max_output_bytes=self._max_output_bytes,
                 reason=CompletionReason.FAILED,
                 timed_out=False,
             )
@@ -122,6 +150,7 @@ class CommandRunner:
                 exit_code=1,
                 stdout="",
                 stderr=stderr,
+                max_output_bytes=self._max_output_bytes,
                 reason=CompletionReason.FAILED,
                 timed_out=False,
             )
@@ -142,10 +171,15 @@ class CommandRunner:
         except asyncio.TimeoutError:
             proc.kill()
             out, err = await proc.communicate()
+            stdout_data = out.decode(errors="ignore")
+            stderr_data = err.decode(errors="ignore")
+            truncated_stdout, truncated_stderr, output_truncated = self._truncate_output(stdout_data, stderr_data)
             result = CommandResult(
                 exit_code=124,
-                stdout=out.decode(errors="ignore"),
-                stderr=err.decode(errors="ignore"),
+                stdout=truncated_stdout,
+                stderr=truncated_stderr,
+                output_truncated=output_truncated,
+                max_output_bytes=self._max_output_bytes,
                 reason=CompletionReason.TIMEOUT,
                 timed_out=True,
             )
@@ -162,10 +196,16 @@ class CommandRunner:
         else:
             reason = CompletionReason.FAILED
 
+        stdout_data = out.decode(errors="ignore")
+        stderr_data = err.decode(errors="ignore")
+        truncated_stdout, truncated_stderr, output_truncated = self._truncate_output(stdout_data, stderr_data)
+
         result = CommandResult(
             exit_code=proc.returncode if proc.returncode is not None else 1,
-            stdout=out.decode(errors="ignore"),
-            stderr=err.decode(errors="ignore"),
+            stdout=truncated_stdout,
+            stderr=truncated_stderr,
+            output_truncated=output_truncated,
+            max_output_bytes=self._max_output_bytes,
             reason=reason,
             timed_out=False,
         )

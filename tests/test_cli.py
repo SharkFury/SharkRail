@@ -120,3 +120,30 @@ def test_sharkrail_run_json_nonzero_exit_is_failed():
     assert result.returncode == 5
     assert payload["reason"] == "failed"
     assert payload["exit_code"] == 5
+
+
+def test_sharkrail_run_json_with_max_output_bytes_truncation():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--max-output-bytes",
+            "6",
+            "--",
+            sys.executable,
+            "-c",
+            "print('0123456789')",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    payload = json.loads(result.stdout.strip())
+    assert result.returncode == 0
+    assert payload["output_truncated"] is True
+    assert len(payload["stdout"]) <= 6
