@@ -22,3 +22,10 @@ def test_command_spec_reject_empty_arg():
     except ValueError:
         pass
 
+
+def test_command_spec_rejects_invalid_environment_name():
+    try:
+        CommandSpec(executable="echo", argv=(), env={"BAD=NAME": "value"}).validate()
+        assert False
+    except ValueError as err:
+        assert "environment" in str(err)

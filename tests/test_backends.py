@@ -1,0 +1,56 @@
+import asyncio
+import os
+import signal
+import sys
+
+import pytest
+
+from sharkrail.backends import PipeBackend, wait_for_exit
+from sharkrail.models import CommandSpec
+
+
+def test_pipe_backend_supports_stdin_and_eof():
+    async def _run() -> None:
+        backend = PipeBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import sys; print(sys.stdin.read().upper())"),
+            )
+        )
+        await backend.write(handle, b"hello")
+        await backend.close_stdin(handle)
+        stdout, stderr = await handle.process.communicate()
+
+        assert stdout == b"HELLO\n"
+        assert stderr == b""
+
+    asyncio.run(_run())
+
+
+def test_wait_for_exit_reports_deadline():
+    async def _run() -> None:
+        backend = PipeBackend()
+        handle = await backend.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        assert await wait_for_exit(handle, 0.01) is False
+        await backend.kill_tree(handle)
+        assert await wait_for_exit(handle, 2) is True
+
+    asyncio.run(_run())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process group assertion")
+def test_pipe_backend_creates_dedicated_process_group():
+    async def _run() -> None:
+        backend = PipeBackend()
+        handle = await backend.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+        )
+        assert os.getpgid(handle.pid) == handle.pid
+        await backend.interrupt(handle)
+        assert await wait_for_exit(handle, 2) is True
+        assert handle.process.returncode == -signal.SIGINT
+
+    asyncio.run(_run())

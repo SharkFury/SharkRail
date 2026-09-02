@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
+from .backends import ExecutionBackend, PipeBackend
 from .errors import ErrorCode, ErrorStage, ExecutionError
 from .models import CommandMode, CommandSpec
 from .output import capture_output
@@ -50,9 +51,15 @@ class CommandResult:
 
 
 class CommandRunner:
-    def __init__(self, dry_run: bool = False, max_output_bytes: int | None = None) -> None:
+    def __init__(
+        self,
+        dry_run: bool = False,
+        max_output_bytes: int | None = None,
+        backend: ExecutionBackend | None = None,
+    ) -> None:
         self._dry_run = dry_run
         self._max_output_bytes = max_output_bytes
+        self._backend = backend or PipeBackend()
 
     async def _emit(
         self,
@@ -110,12 +117,7 @@ class CommandRunner:
             pass
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *spec.argv_list,
-                cwd=spec.cwd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            handle = await self._backend.start(spec)
         except FileNotFoundError as err:
             stderr = str(err)
             execution_error = ExecutionError(
@@ -163,15 +165,15 @@ class CommandRunner:
 
         try:
             if timeout_ms is None:
-                out, err = await proc.communicate()
+                out, err = await handle.process.communicate()
             else:
                 out, err = await asyncio.wait_for(
-                    proc.communicate(),
+                    handle.process.communicate(),
                     timeout=timeout_ms / 1000,
                 )
         except asyncio.TimeoutError:
-            proc.kill()
-            out, err = await proc.communicate()
+            await self._backend.kill_tree(handle)
+            out, err = await handle.process.communicate()
             captured = capture_output(out, err, self._max_output_bytes)
             result = CommandResult(
                 exit_code=124,
@@ -191,9 +193,9 @@ class CommandRunner:
             seq = await self._emit(event_handler, seq, LifecycleEventType.COMPLETED, {"reason": result.reason.value, "timed_out": True})
             return result, events
 
-        if proc.returncode == 0:
+        if handle.process.returncode == 0:
             reason = CompletionReason.SUCCESS
-        elif proc.returncode is None:
+        elif handle.process.returncode is None:
             reason = CompletionReason.FAILED
         else:
             reason = CompletionReason.FAILED
@@ -201,7 +203,7 @@ class CommandRunner:
         captured = capture_output(out, err, self._max_output_bytes)
 
         result = CommandResult(
-            exit_code=proc.returncode if proc.returncode is not None else 1,
+            exit_code=handle.process.returncode if handle.process.returncode is not None else 1,
             stdout=captured.stdout,
             stderr=captured.stderr,
             output_truncated=captured.truncated,
