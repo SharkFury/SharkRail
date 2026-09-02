@@ -42,9 +42,18 @@ jobs:
       - name: Test Windows core contracts
         if: runner.os == 'Windows'
         run: pytest tests/test_capabilities.py tests/test_doctor.py tests/test_lifecycle.py tests/test_models.py tests/test_output.py tests/test_public_api.py tests/test_routing.py tests/test_windows.py
-      - name: Test Windows pipe backend
+      - name: Test Windows pipe stdin
         if: runner.os == 'Windows'
-        run: pytest tests/test_backends.py
+        run: pytest tests/test_backends.py -k supports_stdin
+      - name: Test Windows pipe wait and kill
+        if: runner.os == 'Windows'
+        run: pytest tests/test_backends.py -k wait_for_exit
+      - name: Test Windows pipe forced cancel
+        if: runner.os == 'Windows'
+        run: pytest tests/test_backends.py -k skip_soft_interrupt
+      - name: Test Windows pipe environment
+        if: runner.os == 'Windows'
+        run: pytest tests/test_backends.py -k environment_is_an_overlay
       - name: Test Windows command runner
         if: runner.os == 'Windows'
         run: pytest tests/test_executor.py
