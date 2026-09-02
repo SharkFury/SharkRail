@@ -23,6 +23,9 @@ class CompletionReason(str, Enum):
     SUCCESS = "success"
     TIMEOUT = "timeout"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    KILLED = "killed"
+    RESOURCE_LIMITED = "resource_limited"
 
 
 class LifecycleEventType(str, Enum):
@@ -32,13 +35,23 @@ class LifecycleEventType(str, Enum):
     EXITED = "exited"
     DRAINED = "drained"
     COMPLETED = "completed"
+    PROCESS_STARTED = "process.started"
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    PTY_OUTPUT = "pty.output"
+    OUTPUT_TRUNCATED = "output.truncated"
+    PROCESS_EXITED = "process.exited"
+    SESSION_DRAINED = "session.drained"
+    SESSION_COMPLETED = "session.completed"
+    SESSION_ERROR = "session.error"
+    CANCELLATION_STEP = "cancellation.step"
 
 
 @dataclass(frozen=True)
 class LifecycleEvent:
     seq: int
     kind: LifecycleEventType
-    payload: dict[str, str | int | bool]
+    payload: dict[str, object]
 
 
 @dataclass(frozen=True)
