@@ -24,7 +24,7 @@ from .telemetry import EventRecorder
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sharkrail",
-        description="SharkRail: Native execution rails for AI agents.",
+        description="SharkRail: Verifiable process execution for AI agents.",
     )
     parser.add_argument(
         "--version", action="version", version=f"sharkrail {__version__}"
@@ -275,6 +275,7 @@ def main() -> int:
                         "degraded_reasons": capability.degraded_reasons,
                         "process_tree_fallbacks": capability.process_tree_fallbacks,
                         "resource_limits": capability.resource_limits,
+                        "verification": capability.verification,
                     },
                     ensure_ascii=False,
                 )

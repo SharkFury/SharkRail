@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import platform
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.util import find_spec
 
 
@@ -22,6 +22,7 @@ class Capability:
     degraded_reasons: tuple[str, ...] = ()
     process_tree_fallbacks: tuple[str, ...] = ()
     resource_limits: tuple[str, ...] = ()
+    verification: dict[str, str] = field(default_factory=dict)
 
 
 def collect() -> Capability:
@@ -66,6 +67,17 @@ def collect() -> Capability:
             degraded_reasons=tuple(degraded),
             process_tree_fallbacks=("taskkill_fallback",),
             resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
+            verification={
+                "report": "discovery_only",
+                "pipe": "built_in_not_probed",
+                "pty": (
+                    "dependency_present_not_probed" if pty_available else "unavailable"
+                ),
+                "process_tree": "selected_at_session_start",
+                "wsl": (
+                    "executable_present_not_probed" if wsl_available else "unavailable"
+                ),
+            },
         )
 
     if current == "darwin":
@@ -91,6 +103,12 @@ def collect() -> Capability:
             targets=("native",),
             shells=shells,
             resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
+            verification={
+                "report": "discovery_only",
+                "pipe": "built_in_not_probed",
+                "pty": "platform_api_present_not_probed",
+                "process_tree": "configured_not_probed",
+            },
         )
 
     shells = tuple(shell for shell in ("bash", "zsh", "pwsh") if shutil.which(shell))
@@ -113,4 +131,10 @@ def collect() -> Capability:
         targets=("native",),
         shells=shells,
         resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
+        verification={
+            "report": "discovery_only",
+            "pipe": "built_in_not_probed",
+            "pty": "platform_api_present_not_probed",
+            "process_tree": "configured_not_probed",
+        },
     )

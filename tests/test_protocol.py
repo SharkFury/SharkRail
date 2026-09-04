@@ -24,6 +24,15 @@ def test_protocol_hello_and_method_not_found():
     asyncio.run(_run())
 
 
+def test_protocol_distinguishes_discovery_from_active_verification():
+    async def _run() -> None:
+        response = await JsonRpcRuntime().dispatch(request("runtime.capabilities", {}))
+        assert response is not None
+        assert response["result"]["verification"]["report"] == "discovery_only"
+
+    asyncio.run(_run())
+
+
 def test_protocol_session_full_pipe_lifecycle():
     async def _run() -> None:
         runtime = JsonRpcRuntime()

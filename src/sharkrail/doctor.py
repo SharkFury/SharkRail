@@ -40,6 +40,7 @@ class DoctorReport:
     targets: tuple[str, ...]
     max_output_bytes: int
     checks: tuple[Check, ...]
+    verification_level: str = "active_probe"
 
     @property
     def healthy(self) -> bool:

@@ -12,6 +12,11 @@ Returns the runtime name, package version, and protocol version.
 
 Returns runtime-probed platform, modes, targets, available shells, process-tree mechanisms and fallbacks, granular resource limits, output limit, feature flags, and degradation reasons. Clients must use this response rather than infer support from the OS name. A started session reports the mechanism it actually acquired; for example, Windows pipe execution can report `taskkill_fallback` when Job Object assignment is rejected by a parent job.
 
+The `verification` object marks this response as `discovery_only` and labels
+each capability as present-but-not-probed, selected at session start, or
+unavailable. `sharkrail doctor` is the active execution probe; a successful
+session reports its actual backend and any degradation separately.
+
 ### `runtime.schema`
 
 Returns the bundled JSON Schema for protocol 1.x. The same artifact ships at

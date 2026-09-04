@@ -23,6 +23,7 @@ def test_doctor_report_is_safe_and_structured():
     assert isinstance(payload["checks"], tuple)
     assert "environment" not in payload
     assert "healthy" in payload
+    assert payload["verification_level"] == "active_probe"
 
 
 def test_doctor_human_report_contains_core_diagnostics():

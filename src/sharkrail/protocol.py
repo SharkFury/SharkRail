@@ -498,4 +498,5 @@ def _capability_dict(capability: Capability) -> dict[str, Any]:
         "degraded_reasons": capability.degraded_reasons,
         "process_tree_fallbacks": capability.process_tree_fallbacks,
         "resource_limits": capability.resource_limits,
+        "verification": capability.verification,
     }

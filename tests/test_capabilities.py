@@ -15,6 +15,8 @@ def test_capabilities_contract_shape():
     assert "native" in c.targets
     assert c.shells
     assert c.resource_limits
+    assert c.verification["report"] == "discovery_only"
+    assert c.verification["pipe"].endswith("not_probed")
 
 
 def test_windows_capabilities_report_missing_optional_runtimes():
@@ -40,3 +42,4 @@ def test_windows_capabilities_report_missing_optional_runtimes():
     assert capability.degraded_reasons
     assert capability.process_tree == "job_object_or_taskkill"
     assert capability.process_tree_fallbacks == ("taskkill_fallback",)
+    assert capability.verification["pty"] == "unavailable"
