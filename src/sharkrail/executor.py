@@ -10,8 +10,9 @@ from time import monotonic_ns
 from typing import Callable, Optional
 
 from .backends import ExecutionBackend
-from .errors import ErrorCode, ExecutionError, SharkRailError
+from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .models import CommandSpec
+from .policy import ExecutionPolicy, PolicyViolation
 from .telemetry import EventRecorder
 
 
@@ -85,11 +86,13 @@ class CommandRunner:
         max_output_bytes: int | None = None,
         backend: ExecutionBackend | None = None,
         event_recorder: EventRecorder | None = None,
+        policy: ExecutionPolicy | None = None,
     ) -> None:
         self._dry_run = dry_run
         self._max_output_bytes = max_output_bytes
         self._backend = backend
         self._event_recorder = event_recorder
+        self._policy = policy
 
     async def run(
         self,
@@ -112,6 +115,45 @@ class CommandRunner:
         event_handler: Optional[Callable[[LifecycleEvent], None]] = None,
     ) -> tuple[CommandResult, list[LifecycleEvent]]:
         spec.validate()
+        if self._dry_run and self._policy is not None:
+            try:
+                self._policy.enforce(
+                    spec,
+                    timeout_ms=timeout_ms,
+                    max_output_bytes=self._max_output_bytes,
+                )
+            except PolicyViolation as err:
+                execution_error = ExecutionError(
+                    code=ErrorCode.POLICY_DENIED,
+                    stage=ErrorStage.VALIDATE,
+                    message=str(err),
+                    native={"rule": err.rule},
+                )
+                result = CommandResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr=execution_error.message,
+                    max_output_bytes=self._max_output_bytes,
+                    reason=CompletionReason.FAILED,
+                    error=execution_error,
+                )
+                denied_events = [
+                    LifecycleEvent(0, LifecycleEventType.ACCEPTED, {"dry_run": True}),
+                    LifecycleEvent(
+                        1,
+                        LifecycleEventType.SESSION_ERROR,
+                        execution_error.to_dict(),
+                    ),
+                    LifecycleEvent(
+                        2,
+                        LifecycleEventType.SESSION_COMPLETED,
+                        {"reason": CompletionReason.FAILED.value, "exit_code": 1},
+                    ),
+                ]
+                if event_handler is not None:
+                    for event in denied_events:
+                        event_handler(event)
+                return result, denied_events
 
         events: list[LifecycleEvent] = []
         if self._dry_run:
@@ -146,6 +188,7 @@ class CommandRunner:
         manager = SessionManager(
             backend=self._backend,
             event_recorder=self._event_recorder,
+            policy=self._policy,
         )
 
         try:

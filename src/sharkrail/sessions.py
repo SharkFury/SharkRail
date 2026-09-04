@@ -35,6 +35,7 @@ from .executor import (
 from .lifecycle import SessionLifecycle, SessionState
 from .models import CommandMode, CommandSpec
 from .output import capture_output
+from .policy import ExecutionPolicy, PolicyViolation
 from .telemetry import EventRecorder, log_event, observe_session
 
 
@@ -195,6 +196,7 @@ class SessionManager:
         max_event_page_size: int = 100,
         max_event_page_bytes: int = 256 * 1024,
         event_recorder: Optional[EventRecorder] = None,
+        policy: ExecutionPolicy | None = None,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
@@ -228,6 +230,7 @@ class SessionManager:
         self._max_event_page_size = max_event_page_size
         self._max_event_page_bytes = max_event_page_bytes
         self._event_recorder = event_recorder
+        self._policy = policy
         self._sessions: dict[str, Session] = {}
         self._disposed_session_ids: deque[str] = deque(maxlen=1024)
         self._expired_session_ids: deque[str] = deque(maxlen=1024)
@@ -254,6 +257,27 @@ class SessionManager:
         self._prune_completed_sessions()
         requested_monotonic = time.monotonic()
         spec.validate()
+        if self._policy is not None:
+            try:
+                self._policy.enforce(
+                    spec,
+                    timeout_ms=timeout_ms,
+                    max_output_bytes=(
+                        self._default_max_output_bytes
+                        if max_output_bytes is None
+                        else max_output_bytes
+                    ),
+                )
+            except PolicyViolation as err:
+                raise SharkRailError(
+                    ExecutionError(
+                        code=ErrorCode.POLICY_DENIED,
+                        stage=ErrorStage.VALIDATE,
+                        message=str(err),
+                        native={"rule": err.rule},
+                    ),
+                    err,
+                ) from err
         active_count = sum(
             session.state
             not in {SessionState.COMPLETED, SessionState.FAILED, SessionState.DISPOSED}

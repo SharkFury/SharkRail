@@ -116,9 +116,8 @@ class PipeBackend(ExecutionBackend):
     """Pipe execution using a dedicated process group for tree operations."""
 
     async def start(self, spec: CommandSpec) -> ProcessHandle:
-        environment = None
+        environment = os.environ.copy() if spec.inherit_env else {}
         if spec.env is not None:
-            environment = os.environ.copy()
             environment.update(spec.env)
         kwargs: dict[str, object] = {
             "cwd": spec.cwd,
@@ -266,9 +265,8 @@ class PtyBackend(ExecutionBackend):
     async def start(self, spec: CommandSpec) -> PtyProcessHandle:
         if os.name == "nt":
             raise NotImplementedError("ConPTY backend is not available in this build")
-        environment = None
+        environment = os.environ.copy() if spec.inherit_env else {}
         if spec.env is not None:
-            environment = os.environ.copy()
             environment.update(spec.env)
         master_fd, slave_fd = pty.openpty()
         try:
@@ -389,7 +387,7 @@ class WindowsPtyBackend(ExecutionBackend):
             from winpty import PtyProcess
         except ImportError as err:
             raise RuntimeError("Windows PTY support requires pywinpty") from err
-        environment = os.environ.copy()
+        environment = os.environ.copy() if spec.inherit_env else {}
         if spec.env is not None:
             environment.update(spec.env)
         native = await asyncio.to_thread(

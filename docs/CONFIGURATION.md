@@ -10,6 +10,7 @@ CLI, Python API, and JSON-RPC service observe the same core behavior.
 | --- | --- | --- | --- |
 | Execution mode | `--mode pipe\|pty` | `spec.mode` | Separate pipes or merged terminal stream |
 | Working directory | `--cwd PATH` | `spec.cwd` | Child working directory |
+| Parent environment | `--clean-env` | `spec.inherit_env` | Inherit all parent variables or start clean |
 | Total timeout | `--timeout-ms N` | `timeout_ms` | Wall-clock execution deadline |
 | Idle timeout | `--idle-timeout-ms N` | `idle_timeout_ms` | Deadline with no output activity |
 | Output budget | `--max-output-bytes N` | `max_output_bytes` | Combined retained output budget |
@@ -72,3 +73,26 @@ sharkrail serve \
 Output content is redacted by default. `--event-log-include-output` stores raw
 command output and should only be used with a protected destination. See
 [OBSERVABILITY.md](OBSERVABILITY.md).
+
+## Execution policy
+
+Hosts can reject unsafe requests before process creation by passing an
+`ExecutionPolicy` to `SessionManager` or `CommandRunner`. The CLI and stdio
+server accept the same policy as strict JSON:
+
+```bash
+sharkrail serve --policy ./examples/policy.json
+sharkrail run --policy ./examples/policy.json --clean-env \
+  --timeout-ms 30000 --max-output-bytes 1048576 -- python -V
+```
+
+Policies can allow or deny executable names, restrict working directories and
+environment overlays, prohibit parent-environment inheritance, require an
+absolute executable and deadline, and cap output, memory, CPU, process count,
+and runtime. Unknown policy fields fail closed. A rejection returns the stable
+`POLICY_DENIED` code and the rule name without starting a process.
+
+Name-based executable allowlists are convenient but still depend on `PATH`.
+Use `require_absolute_executable` together with a controlled clean environment
+when the executable identity is security-sensitive. SharkRail policy reduces
+accidental authority; it is not an isolation boundary.

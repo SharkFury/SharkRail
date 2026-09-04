@@ -1,0 +1,12 @@
+{
+  "allowed_executables": ["git", "python", "python3", "pytest", "ruff"],
+  "allowed_cwd_roots": ["."],
+  "allowed_env_keys": ["CI", "NO_COLOR", "PYTHONIOENCODING"],
+  "allow_parent_environment": false,
+  "require_timeout": true,
+  "max_timeout_ms": 300000,
+  "max_output_bytes": 16777216,
+  "max_memory_bytes": 2147483648,
+  "max_cpu_time_seconds": 300,
+  "max_process_count": 64
+}

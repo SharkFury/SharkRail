@@ -40,6 +40,7 @@ Direct request:
       "mode": "pipe",
       "cwd": null,
       "env": {"EXAMPLE": "value"},
+      "inherit_env": true,
       "target": "native"
     },
     "timeout_ms": 30000,
@@ -136,7 +137,7 @@ JSON-RPC framing errors use standard codes. Runtime errors use `-32000` with sta
 }
 ```
 
-Stable application codes include `EXECUTABLE_NOT_FOUND`, `START_FAILED`, `INVALID_REQUEST`, `CAPABILITY_NOT_SUPPORTED`, `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `INVALID_SESSION_STATE`, `EVENT_CURSOR_EXPIRED`, `RESOURCE_LIMITED`, `DRAIN_TIMEOUT`, `TERMINATION_FAILED`, `IDLE_TIMEOUT`, and `INTERNAL_ERROR`.
+Stable application codes include `EXECUTABLE_NOT_FOUND`, `START_FAILED`, `INVALID_REQUEST`, `POLICY_DENIED`, `CAPABILITY_NOT_SUPPORTED`, `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `INVALID_SESSION_STATE`, `EVENT_CURSOR_EXPIRED`, `RESOURCE_LIMITED`, `DRAIN_TIMEOUT`, `TERMINATION_FAILED`, `IDLE_TIMEOUT`, and `INTERNAL_ERROR`.
 
 ## Compatibility
 

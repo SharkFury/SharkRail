@@ -7,6 +7,8 @@ def test_v01_public_api_is_exported():
         "CommandRunner",
         "CommandSpec",
         "ExecutionError",
+        "ExecutionPolicy",
+        "PolicyViolation",
         "SessionManager",
         "SharkRailError",
         "Shell",

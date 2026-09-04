@@ -22,6 +22,7 @@ class ErrorCode(str, Enum):
     EVENT_CURSOR_EXPIRED = "EVENT_CURSOR_EXPIRED"
     SESSION_EXPIRED = "SESSION_EXPIRED"
     IDLE_TIMEOUT = "IDLE_TIMEOUT"
+    POLICY_DENIED = "POLICY_DENIED"
 
 
 class ErrorStage(str, Enum):

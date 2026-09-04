@@ -37,6 +37,7 @@ def shell_command(
     *,
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
+    inherit_env: bool = True,
     mode: CommandMode = CommandMode.PIPE,
     target: Target = Target.NATIVE,
     wsl: Optional[WslOptions] = None,
@@ -51,6 +52,7 @@ def shell_command(
             (shell.value, "-lc", script),
             mode=mode,
             env=env,
+            inherit_env=inherit_env,
             options=wsl,
             resources=resources,
         )
@@ -72,6 +74,7 @@ def shell_command(
         argv=argv,
         cwd=cwd,
         env=env,
+        inherit_env=inherit_env,
         mode=mode,
         resources=resources or ResourceLimits(),
     )
@@ -83,6 +86,7 @@ def direct_command(
     *,
     cwd: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
+    inherit_env: bool = True,
     mode: CommandMode = CommandMode.PIPE,
     target: Target = Target.NATIVE,
     wsl: Optional[WslOptions] = None,
@@ -93,6 +97,7 @@ def direct_command(
             (executable, *argv),
             mode=mode,
             env=env,
+            inherit_env=inherit_env,
             options=wsl,
             resources=resources,
         )
@@ -101,6 +106,7 @@ def direct_command(
         argv=argv,
         cwd=cwd,
         env=env,
+        inherit_env=inherit_env,
         mode=mode,
         resources=resources or ResourceLimits(),
     )
@@ -111,6 +117,7 @@ def _wsl_spec(
     *,
     mode: CommandMode,
     env: Optional[Mapping[str, str]],
+    inherit_env: bool,
     options: Optional[WslOptions],
     resources: Optional[ResourceLimits],
 ) -> CommandSpec:
@@ -127,6 +134,7 @@ def _wsl_spec(
         executable="wsl.exe",
         argv=tuple(prefix) + command,
         env=env,
+        inherit_env=inherit_env,
         mode=mode,
         resources=resources or ResourceLimits(),
     )

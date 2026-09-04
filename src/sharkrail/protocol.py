@@ -345,6 +345,7 @@ def _parse_spec(params: dict[str, Any]) -> CommandSpec:
     common = {
         "cwd": spec.get("cwd"),
         "env": env,
+        "inherit_env": spec.get("inherit_env", True),
         "mode": CommandMode(spec.get("mode", "pipe")),
         "target": target,
         "wsl": wsl,

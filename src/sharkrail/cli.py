@@ -13,6 +13,7 @@ from .capabilities import collect
 from .doctor import diagnose, format_report, write_diagnostic_bundle
 from .executor import CommandRunner
 from .models import CommandMode, ResourceLimits
+from .policy import ExecutionPolicy
 from .protocol import JsonRpcRuntime, serve_stdio
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .sessions import SessionManager
@@ -35,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-ms", type=int, default=None)
     run.add_argument("--idle-timeout-ms", type=int, default=None)
     run.add_argument("--cwd", default=None)
+    run.add_argument("--clean-env", action="store_true", help="Do not inherit the parent environment")
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--json", action="store_true", help="Print machine-readable output")
     run.add_argument("--events", action="store_true", help="Emit lifecycle events")
@@ -45,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--wsl-cwd", default=None)
     _add_resource_arguments(run)
     _add_event_log_arguments(run)
+    _add_policy_argument(run)
 
     shell = subparsers.add_parser("shell", help="Run an explicit shell script")
     shell.add_argument("shell", choices=[item.value for item in Shell])
@@ -53,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("--timeout-ms", type=int, default=None)
     shell.add_argument("--idle-timeout-ms", type=int, default=None)
     shell.add_argument("--cwd", default=None)
+    shell.add_argument("--clean-env", action="store_true", help="Do not inherit the parent environment")
     shell.add_argument("--dry-run", action="store_true")
     shell.add_argument("--json", action="store_true")
     shell.add_argument("--events", action="store_true")
@@ -63,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("--wsl-cwd", default=None)
     _add_resource_arguments(shell)
     _add_event_log_arguments(shell)
+    _add_policy_argument(shell)
 
     caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
     caps.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -71,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         "serve", help="Serve newline-delimited JSON-RPC 2.0 over stdio"
     )
     _add_event_log_arguments(serve)
+    _add_policy_argument(serve)
 
     doctor = subparsers.add_parser("doctor", help="Diagnose local runtime capabilities")
     doctor.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -91,6 +97,10 @@ def _add_event_log_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--event-log-include-output", action="store_true")
 
 
+def _add_policy_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--policy", metavar="PATH", help="Enforce a JSON execution policy")
+
+
 async def _run_cmd(ns: argparse.Namespace) -> int:
     wsl = WslOptions(
         distribution=ns.wsl_distribution,
@@ -107,6 +117,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
             Shell(ns.shell),
             ns.script,
             cwd=ns.cwd,
+            inherit_env=not ns.clean_env,
             mode=CommandMode(ns.mode),
             target=Target(ns.target),
             wsl=wsl,
@@ -117,6 +128,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
             ns.executable,
             tuple(ns.args),
             cwd=ns.cwd,
+            inherit_env=not ns.clean_env,
             mode=CommandMode(ns.mode),
             target=Target(ns.target),
             wsl=wsl,
@@ -135,6 +147,7 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
         dry_run=ns.dry_run,
         max_output_bytes=ns.max_output_bytes,
         event_recorder=recorder,
+        policy=ns.execution_policy,
     )
 
     events: list[dict[str, object]] = []
@@ -202,6 +215,13 @@ def main() -> int:
     parser = build_parser()
     ns = parser.parse_args()
 
+    ns.execution_policy = None
+    if getattr(ns, "policy", None):
+        try:
+            ns.execution_policy = ExecutionPolicy.from_json(Path(ns.policy))
+        except (OSError, ValueError, json.JSONDecodeError) as err:
+            parser.error(f"invalid execution policy: {err}")
+
     if ns.command in {"run", "shell"}:
         return asyncio.run(_run_cmd(ns))
 
@@ -221,6 +241,8 @@ def main() -> int:
                         "targets": capability.targets,
                         "shells": capability.shells,
                         "degraded_reasons": capability.degraded_reasons,
+                        "process_tree_fallbacks": capability.process_tree_fallbacks,
+                        "resource_limits": capability.resource_limits,
                     },
                     ensure_ascii=False,
                 )
@@ -250,7 +272,9 @@ def main() -> int:
             if ns.event_log
             else None
         )
-        runtime = JsonRpcRuntime(SessionManager(event_recorder=recorder))
+        runtime = JsonRpcRuntime(
+            SessionManager(event_recorder=recorder, policy=ns.execution_policy)
+        )
         asyncio.run(serve_stdio(runtime=runtime))
         return 0
 
