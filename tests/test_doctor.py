@@ -72,3 +72,24 @@ def test_failed_probe_reports_structured_completion_details():
     assert "reason=resource_limited" in check.detail
     assert "error=drain_timeout" in check.detail
     manager.shutdown.assert_awaited_once_with()
+
+
+def test_pty_probe_allows_for_conpty_cold_start():
+    manager = Mock()
+    manager.start = AsyncMock(return_value=SimpleNamespace(id="probe"))
+    manager.wait = AsyncMock(
+        return_value=SimpleNamespace(
+            exit_code=0,
+            stdout="sharkrail-probe True",
+            reason=SimpleNamespace(value="success"),
+            error=None,
+        )
+    )
+    manager.shutdown = AsyncMock()
+
+    with patch("sharkrail.doctor.SessionManager", return_value=manager):
+        check = asyncio.run(_probe_execution(CommandMode.PTY))
+
+    assert check.status == "pass"
+    assert manager.start.await_args.kwargs["timeout_ms"] == 10_000
+    manager.wait.assert_awaited_once_with("probe", timeout_ms=12_000)

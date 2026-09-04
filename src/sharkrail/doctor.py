@@ -53,10 +53,12 @@ class DoctorReport:
 
 async def _probe_execution(mode: CommandMode) -> Check:
     started = monotonic()
+    execution_timeout_ms = 10_000 if mode == CommandMode.PTY else 2_000
+    completion_timeout_ms = execution_timeout_ms + 2_000
     manager = SessionManager(
         default_max_output_bytes=4096,
-        drain_timeout_ms=1000,
-        termination_timeout_ms=1000,
+        drain_timeout_ms=2000,
+        termination_timeout_ms=2000,
     )
     try:
         code = (
@@ -66,9 +68,9 @@ async def _probe_execution(mode: CommandMode) -> Check:
         )
         session = await manager.start(
             CommandSpec(sys.executable, ("-c", code), mode=mode),
-            timeout_ms=2000,
+            timeout_ms=execution_timeout_ms,
         )
-        result = await manager.wait(session.id, timeout_ms=3000)
+        result = await manager.wait(session.id, timeout_ms=completion_timeout_ms)
         healthy = result is not None and result.exit_code == 0 and "sharkrail-probe" in result.stdout
         if mode == CommandMode.PTY:
             healthy = healthy and result is not None and "True" in result.stdout
