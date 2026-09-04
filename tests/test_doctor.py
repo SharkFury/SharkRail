@@ -9,6 +9,7 @@ from sharkrail.doctor import (
     format_report,
     write_diagnostic_bundle,
 )
+from sharkrail.errors import ErrorCode, ErrorStage, ExecutionError
 from sharkrail.models import CommandMode
 
 
@@ -60,7 +61,12 @@ def test_failed_probe_reports_structured_completion_details():
             exit_code=1,
             stdout="sharkrail-probe True",
             reason=SimpleNamespace(value="resource_limited"),
-            error=SimpleNamespace(code=SimpleNamespace(value="drain_timeout")),
+            error=ExecutionError(
+                code=ErrorCode.DRAIN_TIMEOUT,
+                stage=ErrorStage.DRAIN,
+                message="output drain failed",
+                native={"exception": "TimeoutError"},
+            ),
         )
     )
     manager.shutdown = AsyncMock()
@@ -70,7 +76,7 @@ def test_failed_probe_reports_structured_completion_details():
 
     assert check.status == "fail"
     assert "reason=resource_limited" in check.detail
-    assert "error=drain_timeout" in check.detail
+    assert "error=DRAIN_TIMEOUT@drain/TimeoutError" in check.detail
     manager.shutdown.assert_awaited_once_with()
 
 

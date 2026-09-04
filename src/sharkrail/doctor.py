@@ -79,12 +79,19 @@ async def _probe_execution(mode: CommandMode) -> Check:
         elif result is None:
             detail = "active execution probe exceeded its completion deadline"
         else:
-            error_code = result.error.code.value if result.error is not None else "none"
+            if result.error is None:
+                error_detail = "none"
+            else:
+                exception = result.error.native.get("exception", "unknown")
+                error_detail = (
+                    f"{result.error.code.value}@{result.error.stage.value}"
+                    f"/{exception}: {result.error.message}"
+                )
             detail = (
                 "active execution probe failed: "
                 f"reason={result.reason.value}, exit_code={result.exit_code}, "
                 f"marker_seen={'sharkrail-probe' in result.stdout}, "
-                f"tty_seen={'True' in result.stdout}, error={error_code}"
+                f"tty_seen={'True' in result.stdout}, error={error_detail}"
             )
         return Check(
             mode.value,
