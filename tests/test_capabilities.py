@@ -14,6 +14,7 @@ def test_capabilities_contract_shape():
     assert c.max_output_bytes > 0
     assert "native" in c.targets
     assert c.shells
+    assert c.resource_limits
 
 
 def test_windows_capabilities_report_missing_optional_runtimes():
@@ -35,3 +36,5 @@ def test_windows_capabilities_report_missing_optional_runtimes():
     assert capability.shells == ("cmd",)
     assert "pty" not in capability.features
     assert capability.degraded_reasons
+    assert capability.process_tree == "job_object_or_taskkill"
+    assert capability.process_tree_fallbacks == ("taskkill_fallback",)

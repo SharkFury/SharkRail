@@ -32,6 +32,8 @@ if os.name != "nt":
 class ProcessHandle:
     process: asyncio.subprocess.Process
     stdin_closed: bool = False
+    process_tree: str = "unknown"
+    degraded_reasons: tuple[str, ...] = ()
 
     @property
     def pid(self) -> int:
@@ -131,7 +133,10 @@ class PipeBackend(ExecutionBackend):
             kwargs["start_new_session"] = True
             kwargs["preexec_fn"] = _resource_limiter(spec)
         process = await asyncio.create_subprocess_exec(*spec.argv_list, **kwargs)
-        return ProcessHandle(process=process)
+        return ProcessHandle(
+            process=process,
+            process_tree="taskkill_fallback" if os.name == "nt" else "process_group",
+        )
 
     async def write(self, handle: ProcessHandle, data: bytes) -> None:
         if handle.stdin_closed or handle.process.stdin is None:
@@ -220,13 +225,23 @@ class WindowsPipeBackend(PipeBackend):
             # between CreateProcess and AssignProcessToJobObject. Commands
             # without Job-backed resource limits can still use the portable
             # taskkill /T fallback implemented by PipeBackend.kill_tree.
-            return WindowsProcessHandle(process=handle.process)
+            return WindowsProcessHandle(
+                process=handle.process,
+                process_tree="taskkill_fallback",
+                degraded_reasons=(
+                    "Job Object assignment failed; process-tree cleanup uses taskkill /T",
+                ),
+            )
         except BaseException:
             job.close()
             handle.process.kill()
             await handle.process.wait()
             raise
-        return WindowsProcessHandle(process=handle.process, job=job)
+        return WindowsProcessHandle(
+            process=handle.process,
+            process_tree="job_object",
+            job=job,
+        )
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
         if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
@@ -272,7 +287,11 @@ class PtyBackend(ExecutionBackend):
             raise
         finally:
             os.close(slave_fd)
-        return PtyProcessHandle(process=process, master_fd=master_fd)
+        return PtyProcessHandle(
+            process=process,
+            process_tree="process_group",
+            master_fd=master_fd,
+        )
 
     async def write(self, handle: ProcessHandle, data: bytes) -> None:
         pty_handle = _as_pty(handle)
@@ -399,7 +418,12 @@ class WindowsPtyBackend(ExecutionBackend):
             native.close(force=True)
             job.close()
             raise
-        return WindowsPtyProcessHandle(process=process, native_pty=native, job=job)
+        return WindowsPtyProcessHandle(
+            process=process,
+            process_tree="job_object",
+            native_pty=native,
+            job=job,
+        )
 
     async def write(self, handle: ProcessHandle, data: bytes) -> None:
         pty_handle = _as_windows_pty(handle)

@@ -7,6 +7,7 @@ import base64
 import codecs
 import json
 import logging
+import signal
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -323,8 +324,17 @@ class SessionManager:
         session.transition(SessionState.RUNNING)
         await session.emit(
             LifecycleEventType.PROCESS_STARTED,
-            {"pid": handle.pid, "mode": spec.mode.value},
+            {
+                "pid": handle.pid,
+                "mode": spec.mode.value,
+                "process_tree": handle.process_tree,
+            },
         )
+        for reason in handle.degraded_reasons:
+            await session.emit(
+                LifecycleEventType.CAPABILITY_DEGRADED,
+                {"capability": "process_tree", "reason": reason},
+            )
         session.monitor_task = asyncio.create_task(self._monitor(session))
         log_event(
             logging.INFO,
@@ -693,6 +703,8 @@ class SessionManager:
             "state": session.state.value,
             "pid": session.handle.pid,
             "mode": session.spec.mode.value,
+            "process_tree": session.handle.process_tree,
+            "degraded_reasons": session.handle.degraded_reasons,
             "created_at": session.created_at,
             "duration_ms": self._duration_ms(session, now),
             "drain_duration_ms": self._drain_duration_ms(session, now),
@@ -823,11 +835,20 @@ class SessionManager:
                 await asyncio.gather(*readers, return_exceptions=True)
 
         captured = capture_output(bytes(session.stdout), bytes(session.stderr), None)
+        resource_hit = self._infer_resource_limit(session)
+        if monitor_error is None and resource_hit is not None:
+            await session.emit(LifecycleEventType.RESOURCE_LIMIT_HIT, resource_hit)
+            monitor_error = ExecutionError(
+                code=ErrorCode.RESOURCE_LIMITED,
+                stage=ErrorStage.RUN,
+                message=f"process reached the {resource_hit['resource']} limit",
+                native={"exit_code": session.handle.process.returncode},
+            )
         reason = session.completion_reason
         if monitor_error is not None:
             reason = (
                 CompletionReason.RESOURCE_LIMITED
-                if monitor_error.code == ErrorCode.DRAIN_TIMEOUT
+                if monitor_error.code in {ErrorCode.DRAIN_TIMEOUT, ErrorCode.RESOURCE_LIMITED}
                 else CompletionReason.FAILED
             )
             if session.state not in {SessionState.FAILED, SessionState.COMPLETED}:
@@ -1003,6 +1024,20 @@ class SessionManager:
             message=str(error) or type(error).__name__,
             native=native,
         )
+
+    @staticmethod
+    def _infer_resource_limit(session: Session) -> dict[str, object] | None:
+        """Return only resource-limit outcomes the OS exposes unambiguously."""
+        returncode = session.handle.process.returncode
+        cpu_limit = session.spec.resources.cpu_time_seconds
+        sigxcpu = getattr(signal, "SIGXCPU", None)
+        if cpu_limit is not None and sigxcpu is not None and returncode == -sigxcpu:
+            return {
+                "resource": "cpu_time_seconds",
+                "limit": cpu_limit,
+                "attribution": "os_signal",
+            }
+        return None
 
     @staticmethod
     def _duration_ms(session: Session, now: Optional[float] = None) -> float:

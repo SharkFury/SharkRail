@@ -10,7 +10,7 @@ Returns the runtime name, package version, and protocol version.
 
 ### `runtime.capabilities`
 
-Returns runtime-probed platform, modes, targets, available shells, process-tree mechanism, output limit, feature flags, and degradation reasons. Clients must use this response rather than infer support from the OS name.
+Returns runtime-probed platform, modes, targets, available shells, process-tree mechanisms and fallbacks, granular resource limits, output limit, feature flags, and degradation reasons. Clients must use this response rather than infer support from the OS name. A started session reports the mechanism it actually acquired; for example, Windows pipe execution can report `taskkill_fallback` when Job Object assignment is rejected by a parent job.
 
 ### `runtime.health`
 
@@ -87,7 +87,7 @@ Returns the current state and metadata for `session_id`.
 
 Returns retained events starting at the absolute `cursor`, plus `next_cursor` and `has_more`. `limit` defaults to 100 and `wait_ms` optionally performs a bounded predicate-based long poll. `session.events` is an alias. A cursor older than the retained ring fails with `EVENT_CURSOR_EXPIRED` and supplies `first_cursor`.
 
-All events contain UTC and monotonic timestamps and a trace ID. Output events contain stream, byte offset, retained byte count, incremental UTF-8 text, lossless `data_base64`, and a decoding-error flag. PTY sessions emit `pty.output`, not synthetic stdout/stderr events.
+All events contain UTC and monotonic timestamps and a trace ID. Output events contain stream, byte offset, retained byte count, incremental UTF-8 text, lossless `data_base64`, and a decoding-error flag. PTY sessions emit `pty.output`, not synthetic stdout/stderr events. `process.started` identifies the actual process-tree mechanism, and `capability.degraded` reports any per-session fallback.
 
 ### `session.write`
 

@@ -1,5 +1,7 @@
 import asyncio
+import signal
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -7,7 +9,7 @@ import pytest
 from sharkrail.backends import PipeBackend, ProcessHandle, PtyProcessHandle
 from sharkrail.errors import ErrorCode, ErrorStage, SharkRailError
 from sharkrail.executor import CompletionReason, LifecycleEventType
-from sharkrail.models import CommandMode, CommandSpec
+from sharkrail.models import CommandMode, CommandSpec, ResourceLimits
 from sharkrail.sessions import SessionManager, SessionState
 
 
@@ -39,8 +41,40 @@ def test_session_streams_input_output_and_events():
         assert [event.seq for event in session.events] == list(range(len(session.events)))
         assert session.events[-1].kind == LifecycleEventType.SESSION_COMPLETED
         assert any(event.kind == LifecycleEventType.STDOUT for event in session.events)
+        started = next(
+            event
+            for event in session.events
+            if event.kind == LifecycleEventType.PROCESS_STARTED
+        )
+        assert started.payload["process_tree"] == "process_group"
+        assert manager.inspect(session.id)["process_tree"] == "process_group"
 
     asyncio.run(_run())
+
+
+def test_cpu_limit_signal_is_attributed_without_guessing_other_failures():
+    sigxcpu = getattr(signal, "SIGXCPU", None)
+    if sigxcpu is None:
+        pytest.skip("SIGXCPU is unavailable")
+    limited = SimpleNamespace(
+        handle=SimpleNamespace(process=SimpleNamespace(returncode=-sigxcpu)),
+        spec=CommandSpec(
+            executable="tool",
+            argv=(),
+            resources=ResourceLimits(cpu_time_seconds=1),
+        ),
+    )
+    ordinary_failure = SimpleNamespace(
+        handle=SimpleNamespace(process=SimpleNamespace(returncode=2)),
+        spec=limited.spec,
+    )
+
+    assert SessionManager._infer_resource_limit(limited) == {
+        "resource": "cpu_time_seconds",
+        "limit": 1,
+        "attribution": "os_signal",
+    }
+    assert SessionManager._infer_resource_limit(ordinary_failure) is None
 
 
 def test_session_event_cursor_and_bounded_output():

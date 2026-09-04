@@ -44,6 +44,7 @@ class LifecycleEventType(str, Enum):
     CANCELLATION_STEP = "cancellation.step"
     CANCELLATION_COMPLETED = "cancellation.completed"
     RESOURCE_LIMIT_HIT = "resource.limit_hit"
+    CAPABILITY_DEGRADED = "capability.degraded"
 
 
 @dataclass(frozen=True)

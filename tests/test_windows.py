@@ -80,6 +80,8 @@ def test_windows_pipe_falls_back_when_job_assignment_is_unavailable():
 
         assert isinstance(handle, WindowsProcessHandle)
         assert handle.job is None
+        assert handle.process_tree == "taskkill_fallback"
+        assert handle.degraded_reasons
         assert process.killed is False
         job.close.assert_called_once_with()
 
@@ -149,6 +151,7 @@ def test_windows_pty_start_bounds_relay_reads():
             handle = await backend.start(CommandSpec("tool", ()))
 
         assert isinstance(handle, WindowsPtyProcessHandle)
+        assert handle.process_tree == "job_object"
         native.fileobj.settimeout.assert_called_once_with(backend._read_poll_seconds)
         job.assign.assert_called_once_with(123)
 

@@ -89,6 +89,43 @@ def test_stdio_server_rejects_oversized_request():
     asyncio.run(_run())
 
 
+def test_stdio_server_drains_oversized_line_before_next_request():
+    async def _run() -> None:
+        oversized = "x" * 100 + "\n"
+        valid = '{"jsonrpc":"2.0","id":2,"method":"runtime.hello"}\n'
+        destination = io.StringIO()
+
+        await serve_stdio(
+            stdin=io.StringIO(oversized + valid),
+            stdout=destination,
+            max_request_bytes=64,
+        )
+
+        responses = [
+            __import__("json").loads(line)
+            for line in destination.getvalue().splitlines()
+        ]
+        assert responses[0]["error"]["data"]["code"] == "RESOURCE_LIMITED"
+        assert responses[1]["id"] == 2
+        assert responses[1]["result"]["runtime"] == "SharkRail"
+
+    asyncio.run(_run())
+
+
+def test_stdio_server_applies_request_limit_to_utf8_bytes():
+    async def _run() -> None:
+        destination = io.StringIO()
+        await serve_stdio(
+            stdin=io.StringIO("鲨鲨鲨鲨\n"),
+            stdout=destination,
+            max_request_bytes=10,
+        )
+        response = __import__("json").loads(destination.getvalue())
+        assert response["error"]["data"]["code"] == "RESOURCE_LIMITED"
+
+    asyncio.run(_run())
+
+
 def test_stdio_eof_disposes_started_sessions():
     async def _run() -> None:
         runtime = JsonRpcRuntime()

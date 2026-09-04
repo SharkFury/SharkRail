@@ -20,6 +20,8 @@ class Capability:
     targets: tuple[str, ...]
     shells: tuple[str, ...]
     degraded_reasons: tuple[str, ...] = ()
+    process_tree_fallbacks: tuple[str, ...] = ()
+    resource_limits: tuple[str, ...] = ()
 
 
 def collect() -> Capability:
@@ -54,7 +56,7 @@ def collect() -> Capability:
         return Capability(
             contract_version="1.0.0",
             platform_name="windows",
-            process_tree="job_object",
+            process_tree="job_object_or_taskkill",
             modes=modes,
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
@@ -62,6 +64,8 @@ def collect() -> Capability:
             targets=("native", "wsl") if wsl_available else ("native",),
             shells=shells,
             degraded_reasons=tuple(degraded),
+            process_tree_fallbacks=("taskkill_fallback",),
+            resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
         )
 
     if current == "darwin":
@@ -78,6 +82,7 @@ def collect() -> Capability:
             features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize", "resource_limits"),
             targets=("native",),
             shells=shells,
+            resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
         )
 
     shells = tuple(
@@ -93,4 +98,5 @@ def collect() -> Capability:
         features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize", "resource_limits"),
         targets=("native",),
         shells=shells,
+        resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
     )

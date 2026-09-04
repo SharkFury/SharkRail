@@ -247,7 +247,23 @@ async def serve_stdio(
             await write_response(response)
 
     while True:
-        line = await asyncio.to_thread(stdin.readline)
+        line, oversized = await asyncio.to_thread(
+            _read_bounded_line,
+            stdin,
+            max_request_bytes,
+        )
+        if oversized:
+            error = ExecutionError(
+                code=ErrorCode.RESOURCE_LIMITED,
+                stage=ErrorStage.VALIDATE,
+                message=f"request exceeds {max_request_bytes} byte limit",
+            )
+            await write_response(
+                runtime._error_response(None, -32000, error.message, error.to_dict())
+            )
+            if line == "":
+                break
+            continue
         if line == "":
             break
         if len(pending) >= max_pending_requests:
@@ -280,6 +296,28 @@ async def serve_stdio(
             await asyncio.gather(*pending, return_exceptions=True)
     # A session.start request may have completed after the first snapshot.
     await runtime.manager.shutdown()
+
+
+def _read_bounded_line(source: TextIO, max_bytes: int) -> tuple[str, bool]:
+    """Read one line while bounding retained memory before JSON parsing."""
+    if max_bytes <= 0:
+        raise ValueError("max_request_bytes must be positive")
+    retained: list[str] = []
+    retained_bytes = 0
+    oversized = False
+    while True:
+        chunk = source.readline(max_bytes + 1)
+        if chunk == "":
+            return "" if not retained else "".join(retained), oversized
+        encoded_size = len(chunk.encode("utf-8"))
+        if not oversized and retained_bytes + encoded_size <= max_bytes:
+            retained.append(chunk)
+            retained_bytes += encoded_size
+        else:
+            oversized = True
+        if chunk.endswith("\n"):
+            line = "".join(retained)
+            return (line or "\n") if oversized else line, oversized
 
 
 def _parse_spec(params: dict[str, Any]) -> CommandSpec:
@@ -362,6 +400,8 @@ def _session_dict(session: Session) -> dict[str, Any]:
         "state": session.state.value,
         "pid": session.handle.pid,
         "mode": session.spec.mode.value,
+        "process_tree": session.handle.process_tree,
+        "degraded_reasons": session.handle.degraded_reasons,
         "trace_id": session.trace_id,
         "request_id": session.request_id,
         "created_at": session.created_at,
@@ -412,4 +452,6 @@ def _capability_dict(capability: Capability) -> dict[str, Any]:
         "targets": capability.targets,
         "shells": capability.shells,
         "degraded_reasons": capability.degraded_reasons,
+        "process_tree_fallbacks": capability.process_tree_fallbacks,
+        "resource_limits": capability.resource_limits,
     }
