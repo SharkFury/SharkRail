@@ -260,6 +260,7 @@ class SessionManager:
         self._total_dropped_output_bytes = 0
         self._cancellation_count = 0
         self._created_monotonic = time.monotonic()
+        self._starting_sessions = 0
 
     async def start(
         self,
@@ -296,20 +297,6 @@ class SessionManager:
                     ),
                     err,
                 ) from err
-        active_count = sum(
-            session.state
-            not in {SessionState.COMPLETED, SessionState.FAILED, SessionState.DISPOSED}
-            for session in self._sessions.values()
-        )
-        if active_count >= self._max_active_sessions:
-            raise SharkRailError(
-                ExecutionError(
-                    code=ErrorCode.RESOURCE_LIMITED,
-                    stage=ErrorStage.START,
-                    message=f"active session limit reached ({self._max_active_sessions})",
-                    retryable=True,
-                )
-            )
         if timeout_ms is not None and timeout_ms < 0:
             raise self._request_error("timeout_ms must be non-negative")
         if idle_timeout_ms is not None and idle_timeout_ms <= 0:
@@ -320,11 +307,37 @@ class SessionManager:
             raise self._request_error("output_retention must be head or tail")
         if output_retention == "tail" and spec.mode != CommandMode.PTY:
             raise self._request_error("tail output retention requires PTY mode")
+        # No await is allowed between the count and reservation. Cooperative
+        # asyncio scheduling therefore makes admission atomic within the
+        # manager's owning event loop without serializing process creation.
+        active_count = sum(
+            session.state
+            not in {
+                SessionState.COMPLETED,
+                SessionState.FAILED,
+                SessionState.DISPOSED,
+            }
+            for session in self._sessions.values()
+        )
+        if active_count + self._starting_sessions >= self._max_active_sessions:
+            raise SharkRailError(
+                ExecutionError(
+                    code=ErrorCode.RESOURCE_LIMITED,
+                    stage=ErrorStage.START,
+                    message=(
+                        f"active session limit reached ({self._max_active_sessions})"
+                    ),
+                    retryable=True,
+                )
+            )
+        self._starting_sessions += 1
         backend = self._backend or (
             pty_backend() if spec.mode == CommandMode.PTY else pipe_backend()
         )
+        process_started = False
         try:
             handle = await backend.start(spec)
+            process_started = True
         except FileNotFoundError as err:
             raise SharkRailError(
                 ExecutionError(
@@ -345,6 +358,9 @@ class SessionManager:
                 ),
                 err,
             ) from err
+        finally:
+            if not process_started:
+                self._starting_sessions -= 1
 
         session = Session(
             id=str(uuid4()),
@@ -366,6 +382,7 @@ class SessionManager:
             output_retention=output_retention,
         )
         self._sessions[session.id] = session
+        self._starting_sessions -= 1
         self._started_sessions += 1
         session.transition(SessionState.ACCEPTED)
         await session.emit(LifecycleEventType.ACCEPTED, {"session_id": session.id})
@@ -728,7 +745,7 @@ class SessionManager:
     def stats(self) -> dict[str, object]:
         self._prune_completed_sessions()
         states = Counter(session.state.value for session in self._sessions.values())
-        active = sum(
+        active = self._starting_sessions + sum(
             count
             for state, count in states.items()
             if state not in {SessionState.COMPLETED.value, SessionState.FAILED.value}
@@ -737,6 +754,7 @@ class SessionManager:
             "uptime_ms": round((time.monotonic() - self._created_monotonic) * 1000, 3),
             "sessions": {
                 "active": active,
+                "starting": self._starting_sessions,
                 "retained": len(self._sessions),
                 "started": self._started_sessions,
                 "states": dict(states),
