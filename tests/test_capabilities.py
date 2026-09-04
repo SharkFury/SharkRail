@@ -25,7 +25,9 @@ def test_windows_capabilities_report_missing_optional_runtimes():
         stack.enter_context(
             patch("sharkrail.capabilities.platform.system", return_value="Windows")
         )
-        stack.enter_context(patch("sharkrail.capabilities.find_spec", return_value=None))
+        stack.enter_context(
+            patch("sharkrail.capabilities.find_spec", return_value=None)
+        )
         stack.enter_context(
             patch("sharkrail.capabilities.shutil.which", side_effect=executable)
         )

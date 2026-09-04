@@ -38,7 +38,9 @@ def test_session_streams_input_output_and_events():
             SessionState.DRAINING,
             SessionState.COMPLETED,
         ]
-        assert [event.seq for event in session.events] == list(range(len(session.events)))
+        assert [event.seq for event in session.events] == list(
+            range(len(session.events))
+        )
         assert session.events[-1].kind == LifecycleEventType.SESSION_COMPLETED
         assert any(event.kind == LifecycleEventType.STDOUT for event in session.events)
         started = next(
@@ -89,7 +91,9 @@ def test_session_event_cursor_and_bounded_output():
         assert result is not None
         assert result.output_truncated is True
         assert result.retained_output_bytes == 4
-        assert any(event.kind == LifecycleEventType.OUTPUT_TRUNCATED for event in events)
+        assert any(
+            event.kind == LifecycleEventType.OUTPUT_TRUNCATED for event in events
+        )
 
     asyncio.run(_run())
 
@@ -98,7 +102,9 @@ def test_session_timeout_and_non_destructive_wait_timeout():
     async def _run() -> None:
         manager = SessionManager()
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)")),
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            ),
             timeout_ms=100,
         )
         assert await manager.wait(session.id, timeout_ms=1) is None
@@ -143,10 +149,14 @@ def test_session_manager_enforces_concurrency_limit():
     async def _run() -> None:
         manager = SessionManager(max_active_sessions=1)
         first = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         with pytest.raises(SharkRailError) as raised:
-            await manager.start(CommandSpec(executable=sys.executable, argv=("-c", "pass")))
+            await manager.start(
+                CommandSpec(executable=sys.executable, argv=("-c", "pass"))
+            )
         assert raised.value.error.code == ErrorCode.RESOURCE_LIMITED
         assert raised.value.error.retryable is True
         await manager.dispose(first.id)
@@ -158,7 +168,9 @@ def test_session_manager_enforces_input_limit():
     async def _run() -> None:
         manager = SessionManager(max_input_bytes=4)
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import sys; sys.stdin.read()"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import sys; sys.stdin.read()")
+            )
         )
         with pytest.raises(SharkRailError) as raised:
             await manager.write(session.id, b"12345")
@@ -174,13 +186,21 @@ def test_session_manager_limits_output_event_count():
         session = await manager.start(
             CommandSpec(
                 executable=sys.executable,
-                argv=("-c", "import sys; sys.stdout.write('a'*200000); sys.stdout.flush()"),
+                argv=(
+                    "-c",
+                    "import sys; sys.stdout.write('a'*200000); sys.stdout.flush()",
+                ),
             )
         )
         await manager.wait(session.id)
-        output_events = [event for event in session.events if event.kind == LifecycleEventType.STDOUT]
+        output_events = [
+            event for event in session.events if event.kind == LifecycleEventType.STDOUT
+        ]
         assert len(output_events) == 1
-        assert any(event.kind == LifecycleEventType.RESOURCE_LIMIT_HIT for event in session.events)
+        assert any(
+            event.kind == LifecycleEventType.RESOURCE_LIMIT_HIT
+            for event in session.events
+        )
 
     asyncio.run(_run())
 
@@ -189,10 +209,14 @@ def test_session_manager_shutdown_disposes_all_sessions():
     async def _run() -> None:
         manager = SessionManager()
         await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         await manager.shutdown()
         assert manager.session_count == 0
@@ -325,7 +349,9 @@ def test_cancel_and_dispose_are_idempotent():
     async def _run() -> None:
         manager = SessionManager()
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         first, second = await asyncio.gather(
             manager.cancel(session.id),
@@ -351,7 +377,9 @@ def test_event_history_is_bounded_and_reports_expired_cursor():
     async def _run() -> None:
         manager = SessionManager(max_retained_events=4, max_output_events=20)
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(.2)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(.2)")
+            )
         )
         for index in range(8):
             await session.emit(LifecycleEventType.CANCELLATION_STEP, {"index": index})
@@ -430,7 +458,9 @@ def test_session_idle_timeout_is_distinct_from_wall_timeout():
     async def _run() -> None:
         manager = SessionManager()
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)")),
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            ),
             idle_timeout_ms=50,
         )
         result = await asyncio.wait_for(manager.wait(session.id), timeout=2)
@@ -448,7 +478,9 @@ def test_session_enforces_total_input_limit():
     async def _run() -> None:
         manager = SessionManager(max_input_bytes=4, max_total_input_bytes=5)
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import sys; sys.stdin.read()"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import sys; sys.stdin.read()")
+            )
         )
         await manager.write(session.id, b"123")
         with pytest.raises(SharkRailError) as raised:
@@ -469,7 +501,9 @@ def test_streaming_utf8_decoder_handles_character_split_between_chunks():
     async def _run() -> None:
         manager = SessionManager()
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(.1)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(.1)")
+            )
         )
         await session.append_output("stdout", b"\xe4")
         await session.append_output("stdout", b"\xb8\xad")

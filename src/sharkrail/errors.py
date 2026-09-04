@@ -54,7 +54,9 @@ class ExecutionError:
 class SharkRailError(Exception):
     """Exception carrying the stable protocol error representation."""
 
-    def __init__(self, error: ExecutionError, cause: Optional[BaseException] = None) -> None:
+    def __init__(
+        self, error: ExecutionError, cause: Optional[BaseException] = None
+    ) -> None:
         super().__init__(error.message)
         self.error = error
         self.__cause__ = cause

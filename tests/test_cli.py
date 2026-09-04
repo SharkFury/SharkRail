@@ -31,14 +31,26 @@ def test_sharkrail_no_subcommand_prints_help():
     )
     assert result.returncode != 0
     assert "usage" in result.stdout.lower() or "usage" in result.stderr.lower()
-    assert "capabilities" in result.stdout.lower() or "capabilities" in result.stderr.lower()
+    assert (
+        "capabilities" in result.stdout.lower()
+        or "capabilities" in result.stderr.lower()
+    )
 
 
 def test_sharkrail_run_json_output():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "echo", "hello"],
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--dry-run",
+            "echo",
+            "hello",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -55,7 +67,19 @@ def test_sharkrail_run_timeout_json_exit_code():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-m", "sharkrail", "run", "--json", "--timeout-ms", "200", sys.executable, "--", "-c", "import time; time.sleep(10)"],
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--timeout-ms",
+            "200",
+            sys.executable,
+            "--",
+            "-c",
+            "import time; time.sleep(10)",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -131,7 +155,17 @@ def test_sharkrail_run_json_with_events():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "--events", "echo", "hello"],
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--dry-run",
+            "--events",
+            "echo",
+            "hello",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -147,7 +181,17 @@ def test_sharkrail_run_json_nonzero_exit_is_failed():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-m", "sharkrail", "run", "--json", "--", sys.executable, "-c", "import sys; sys.exit(5)"],
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--",
+            sys.executable,
+            "-c",
+            "import sys; sys.exit(5)",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -212,7 +256,15 @@ def test_sharkrail_explicit_shell_command():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-m", "sharkrail", "shell", "bash", "printf shell-ok", "--json"],
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "shell",
+            "bash",
+            "printf shell-ok",
+            "--json",
+        ],
         capture_output=True,
         text=True,
         check=False,

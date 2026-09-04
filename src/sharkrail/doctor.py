@@ -71,7 +71,11 @@ async def _probe_execution(mode: CommandMode) -> Check:
             timeout_ms=execution_timeout_ms,
         )
         result = await manager.wait(session.id, timeout_ms=completion_timeout_ms)
-        healthy = result is not None and result.exit_code == 0 and "sharkrail-probe" in result.stdout
+        healthy = (
+            result is not None
+            and result.exit_code == 0
+            and "sharkrail-probe" in result.stdout
+        )
         if mode == CommandMode.PTY:
             healthy = healthy and result is not None and "True" in result.stdout
         if healthy:
@@ -122,8 +126,12 @@ async def diagnose_async() -> DoctorReport:
         checks.append(Check("pty", "warn", "PTY backend is not available at runtime"))
 
     for shell in capability.shells:
-        executable = "cmd.exe" if shell == "cmd" else (
-            "powershell.exe" if shell == "powershell" and os.name == "nt" else shell
+        executable = (
+            "cmd.exe"
+            if shell == "cmd"
+            else (
+                "powershell.exe" if shell == "powershell" and os.name == "nt" else shell
+            )
         )
         path = shutil.which(executable)
         checks.append(
@@ -135,7 +143,9 @@ async def diagnose_async() -> DoctorReport:
         )
     if "wsl" in capability.targets:
         path = shutil.which("wsl.exe")
-        checks.append(Check("wsl", "pass" if path else "warn", path or "wsl.exe not found"))
+        checks.append(
+            Check("wsl", "pass" if path else "warn", path or "wsl.exe not found")
+        )
 
     return DoctorReport(
         runtime_version=__version__,
@@ -181,5 +191,8 @@ def format_report(report: DoctorReport) -> str:
         f"Output limit: {report.max_output_bytes} bytes",
         "Checks:",
     ]
-    lines.extend(f"  [{check.status.upper()}] {check.name}: {check.detail}" for check in report.checks)
+    lines.extend(
+        f"  [{check.status.upper()}] {check.name}: {check.detail}"
+        for check in report.checks
+    )
     return "\n".join(lines)

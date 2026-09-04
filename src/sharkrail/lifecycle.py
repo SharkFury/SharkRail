@@ -26,11 +26,20 @@ class InvalidTransition(Exception):
 
 
 _TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
-    SessionState.CREATED: frozenset({SessionState.ACCEPTED, SessionState.RUNNING, SessionState.FAILED}),
+    SessionState.CREATED: frozenset(
+        {SessionState.ACCEPTED, SessionState.RUNNING, SessionState.FAILED}
+    ),
     SessionState.ACCEPTED: frozenset({SessionState.STARTING, SessionState.FAILED}),
     SessionState.STARTING: frozenset({SessionState.RUNNING, SessionState.FAILED}),
     SessionState.RUNNING: frozenset(
-        {SessionState.EXITING, SessionState.CANCELLING, SessionState.DRAINING, SessionState.COMPLETED, SessionState.CANCELED, SessionState.FAILED}
+        {
+            SessionState.EXITING,
+            SessionState.CANCELLING,
+            SessionState.DRAINING,
+            SessionState.COMPLETED,
+            SessionState.CANCELED,
+            SessionState.FAILED,
+        }
     ),
     SessionState.EXITING: frozenset({SessionState.DRAINING, SessionState.FAILED}),
     SessionState.CANCELLING: frozenset({SessionState.DRAINING, SessionState.FAILED}),
@@ -49,7 +58,9 @@ class SessionLifecycle:
 
     def transition(self, target: SessionState) -> None:
         if target not in _TRANSITIONS[self.state]:
-            raise InvalidTransition(f"Cannot transition from {self.state.value} to {target.value}")
+            raise InvalidTransition(
+                f"Cannot transition from {self.state.value} to {target.value}"
+            )
         self.state = target
         self.history.append(target)
 

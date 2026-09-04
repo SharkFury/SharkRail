@@ -429,7 +429,9 @@ class WindowsPtyBackend(ExecutionBackend):
         pty_handle = _as_windows_pty(handle)
         if pty_handle.stdin_closed:
             raise RuntimeError("stdin is closed")
-        await asyncio.to_thread(pty_handle.native_pty.write, data.decode("utf-8", errors="replace"))
+        await asyncio.to_thread(
+            pty_handle.native_pty.write, data.decode("utf-8", errors="replace")
+        )
 
     async def close_stdin(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
@@ -472,7 +474,9 @@ class WindowsPtyBackend(ExecutionBackend):
             if handle.process.returncode is not None:
                 return b""
 
-    async def resize(self, handle: WindowsPtyProcessHandle, cols: int, rows: int) -> None:
+    async def resize(
+        self, handle: WindowsPtyProcessHandle, cols: int, rows: int
+    ) -> None:
         if cols <= 0 or rows <= 0:
             raise ValueError("terminal dimensions must be positive")
         await asyncio.to_thread(handle.native_pty.setwinsize, rows, cols)
@@ -500,7 +504,9 @@ def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:
 
     def apply_limits() -> None:
         if limits.memory_bytes is not None:
-            resource.setrlimit(resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes))
+            resource.setrlimit(
+                resource.RLIMIT_AS, (limits.memory_bytes, limits.memory_bytes)
+            )
         if limits.cpu_time_seconds is not None:
             resource.setrlimit(
                 resource.RLIMIT_CPU,

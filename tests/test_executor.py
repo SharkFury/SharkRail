@@ -73,7 +73,9 @@ def test_command_runner_output_is_truncated():
 def test_command_runner_reports_structured_start_error():
     async def _run() -> None:
         runner = CommandRunner()
-        result = await runner.run(CommandSpec(executable="__missing_executable__", argv=()))
+        result = await runner.run(
+            CommandSpec(executable="__missing_executable__", argv=())
+        )
 
         assert result.error is not None
         assert result.error.to_dict()["code"] == "EXECUTABLE_NOT_FOUND"

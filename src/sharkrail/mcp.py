@@ -71,7 +71,9 @@ class McpRuntime:
         except (KeyError, TypeError, ValueError) as err:
             if notification:
                 return None
-            return self._error_response(request_id, -32602, "Invalid params", {"message": str(err)})
+            return self._error_response(
+                request_id, -32602, "Invalid params", {"message": str(err)}
+            )
 
     async def _call(self, method: str, params: dict[str, Any]) -> object:
         if method == "initialize":
@@ -132,7 +134,9 @@ class McpRuntime:
             try:
                 result = await self.manager.wait(session.id)
                 if result is None:
-                    raise RuntimeError("unbounded command wait returned without a result")
+                    raise RuntimeError(
+                        "unbounded command wait returned without a result"
+                    )
                 payload = _result_dict(result)
             finally:
                 await self.manager.dispose(session.id)
@@ -177,7 +181,9 @@ class McpRuntime:
                 _required_string(arguments, "sessionId"),
                 timeout_ms=_optional_integer(arguments, "waitTimeoutMs"),
             )
-            return _tool_result({"result": None if result is None else _result_dict(result)})
+            return _tool_result(
+                {"result": None if result is None else _result_dict(result)}
+            )
         if name == "sharkrail_session_cancel":
             steps = await self.manager.cancel(_required_string(arguments, "sessionId"))
             return _tool_result({"steps": steps})
@@ -206,7 +212,10 @@ def _command_spec(arguments: dict[str, Any]) -> CommandSpec:
     env = arguments.get("env")
     if env is not None and (
         not isinstance(env, dict)
-        or not all(isinstance(key, str) and isinstance(value, str) for key, value in env.items())
+        or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in env.items()
+        )
     ):
         raise TypeError("env must be an object containing string values")
     inherit_env = arguments.get("inheritEnv", True)
@@ -231,7 +240,9 @@ def _input_bytes(arguments: dict[str, Any]) -> bytes:
     if has_base64 == has_text:
         raise TypeError("exactly one of text or dataBase64 is required")
     if has_base64:
-        return base64.b64decode(_required_string(arguments, "dataBase64"), validate=True)
+        return base64.b64decode(
+            _required_string(arguments, "dataBase64"), validate=True
+        )
     return _required_string(arguments, "text").encode("utf-8")
 
 

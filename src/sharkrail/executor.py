@@ -200,7 +200,9 @@ class CommandRunner:
             )
         except SharkRailError as err:
             execution_error = err.error
-            exit_code = 127 if execution_error.code == ErrorCode.EXECUTABLE_NOT_FOUND else 1
+            exit_code = (
+                127 if execution_error.code == ErrorCode.EXECUTABLE_NOT_FOUND else 1
+            )
             result = CommandResult(
                 exit_code=exit_code,
                 stdout="",
@@ -210,8 +212,12 @@ class CommandRunner:
                 error=execution_error,
             )
             events = [
-                LifecycleEvent(0, LifecycleEventType.ACCEPTED, {"executable": spec.executable}),
-                LifecycleEvent(1, LifecycleEventType.SESSION_ERROR, execution_error.to_dict()),
+                LifecycleEvent(
+                    0, LifecycleEventType.ACCEPTED, {"executable": spec.executable}
+                ),
+                LifecycleEvent(
+                    1, LifecycleEventType.SESSION_ERROR, execution_error.to_dict()
+                ),
                 LifecycleEvent(
                     2,
                     LifecycleEventType.SESSION_COMPLETED,

@@ -16,7 +16,10 @@ def test_pty_command_observes_a_real_terminal():
         result = await CommandRunner().run(
             CommandSpec(
                 executable=sys.executable,
-                argv=("-c", "import os; print(os.isatty(0), os.isatty(1), os.isatty(2))"),
+                argv=(
+                    "-c",
+                    "import os; print(os.isatty(0), os.isatty(1), os.isatty(2))",
+                ),
                 mode=CommandMode.PTY,
             )
         )
@@ -38,7 +41,9 @@ def test_pty_backend_writes_and_resizes_terminal():
             "print(data.strip(), size[1], size[0])"
         )
         handle = await backend.start(
-            CommandSpec(executable=sys.executable, argv=("-c", code), mode=CommandMode.PTY)
+            CommandSpec(
+                executable=sys.executable, argv=("-c", code), mode=CommandMode.PTY
+            )
         )
         output_task = asyncio.create_task(read_pty_output(backend, handle))
         await backend.resize(handle, cols=100, rows=40)

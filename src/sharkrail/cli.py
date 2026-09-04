@@ -26,7 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="sharkrail",
         description="SharkRail: Native execution rails for AI agents.",
     )
-    parser.add_argument("--version", action="version", version=f"sharkrail {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"sharkrail {__version__}"
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -37,11 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-ms", type=int, default=None)
     run.add_argument("--idle-timeout-ms", type=int, default=None)
     run.add_argument("--cwd", default=None)
-    run.add_argument("--clean-env", action="store_true", help="Do not inherit the parent environment")
+    run.add_argument(
+        "--clean-env", action="store_true", help="Do not inherit the parent environment"
+    )
     run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--json", action="store_true", help="Print machine-readable output")
+    run.add_argument(
+        "--json", action="store_true", help="Print machine-readable output"
+    )
     run.add_argument("--events", action="store_true", help="Emit lifecycle events")
-    run.add_argument("--max-output-bytes", type=int, default=None, help="Trim stdout/stderr to this byte budget")
+    run.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=None,
+        help="Trim stdout/stderr to this byte budget",
+    )
     run.add_argument("--target", choices=["native", "wsl"], default="native")
     run.add_argument("--wsl-distribution", default=None)
     run.add_argument("--wsl-user", default=None)
@@ -57,7 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument("--timeout-ms", type=int, default=None)
     shell.add_argument("--idle-timeout-ms", type=int, default=None)
     shell.add_argument("--cwd", default=None)
-    shell.add_argument("--clean-env", action="store_true", help="Do not inherit the parent environment")
+    shell.add_argument(
+        "--clean-env", action="store_true", help="Do not inherit the parent environment"
+    )
     shell.add_argument("--dry-run", action="store_true")
     shell.add_argument("--json", action="store_true")
     shell.add_argument("--events", action="store_true")
@@ -70,8 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_event_log_arguments(shell)
     _add_policy_argument(shell)
 
-    caps = subparsers.add_parser("capabilities", help="Print runtime capability contract")
-    caps.add_argument("--json", action="store_true", help="Print machine-readable output")
+    caps = subparsers.add_parser(
+        "capabilities", help="Print runtime capability contract"
+    )
+    caps.add_argument(
+        "--json", action="store_true", help="Print machine-readable output"
+    )
 
     serve = subparsers.add_parser(
         "serve", help="Serve newline-delimited JSON-RPC 2.0 over stdio"
@@ -84,8 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_policy_argument(mcp)
 
     doctor = subparsers.add_parser("doctor", help="Diagnose local runtime capabilities")
-    doctor.add_argument("--json", action="store_true", help="Print machine-readable output")
-    doctor.add_argument("--bundle", metavar="PATH", help="Write a secret-free diagnostic bundle")
+    doctor.add_argument(
+        "--json", action="store_true", help="Print machine-readable output"
+    )
+    doctor.add_argument(
+        "--bundle", metavar="PATH", help="Write a secret-free diagnostic bundle"
+    )
 
     return parser
 
@@ -103,7 +124,9 @@ def _add_event_log_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_policy_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--policy", metavar="PATH", help="Enforce a JSON execution policy")
+    parser.add_argument(
+        "--policy", metavar="PATH", help="Enforce a JSON execution policy"
+    )
 
 
 async def _run_cmd(ns: argparse.Namespace) -> int:
@@ -189,8 +212,12 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                     "reason": result.reason.value,
                     "stdout": result.stdout,
                     "stderr": result.stderr,
-                    "stdout_base64": base64.b64encode(result.stdout_bytes).decode("ascii"),
-                    "stderr_base64": base64.b64encode(result.stderr_bytes).decode("ascii"),
+                    "stdout_base64": base64.b64encode(result.stdout_bytes).decode(
+                        "ascii"
+                    ),
+                    "stderr_base64": base64.b64encode(result.stderr_bytes).decode(
+                        "ascii"
+                    ),
                     "output_truncated": result.output_truncated,
                     "retained_output_bytes": result.retained_output_bytes,
                     "truncated_output_bytes": result.truncated_output_bytes,
@@ -278,7 +305,9 @@ def main() -> int:
             else None
         )
         manager = SessionManager(event_recorder=recorder, policy=ns.execution_policy)
-        runtime = McpRuntime(manager) if ns.command == "mcp" else JsonRpcRuntime(manager)
+        runtime = (
+            McpRuntime(manager) if ns.command == "mcp" else JsonRpcRuntime(manager)
+        )
         asyncio.run(serve_stdio(runtime=runtime))
         return 0
 

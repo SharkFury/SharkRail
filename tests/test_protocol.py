@@ -7,7 +7,9 @@ from sharkrail.models import CommandSpec
 from sharkrail.protocol import JsonRpcRuntime, serve_stdio
 
 
-def request(method: str, params: dict[str, object], request_id: int = 1) -> dict[str, object]:
+def request(
+    method: str, params: dict[str, object], request_id: int = 1
+) -> dict[str, object]:
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
 
 
@@ -31,7 +33,10 @@ def test_protocol_session_full_pipe_lifecycle():
                 {
                     "spec": {
                         "executable": sys.executable,
-                        "argv": ["-c", "import sys; print(sys.stdin.readline().upper(), end='')"],
+                        "argv": [
+                            "-c",
+                            "import sys; print(sys.stdin.readline().upper(), end='')",
+                        ],
                     }
                 },
             )
@@ -39,10 +44,20 @@ def test_protocol_session_full_pipe_lifecycle():
         assert started is not None
         session_id = started["result"]["session_id"]
         encoded = base64.b64encode(b"hello\n").decode()
-        await runtime.dispatch(request("session.write", {"session_id": session_id, "data_base64": encoded}, 2))
-        await runtime.dispatch(request("session.close_stdin", {"session_id": session_id}, 3))
-        waited = await runtime.dispatch(request("session.wait", {"session_id": session_id}, 4))
-        events = await runtime.dispatch(request("session.subscribe", {"session_id": session_id}, 5))
+        await runtime.dispatch(
+            request(
+                "session.write", {"session_id": session_id, "data_base64": encoded}, 2
+            )
+        )
+        await runtime.dispatch(
+            request("session.close_stdin", {"session_id": session_id}, 3)
+        )
+        waited = await runtime.dispatch(
+            request("session.wait", {"session_id": session_id}, 4)
+        )
+        events = await runtime.dispatch(
+            request("session.subscribe", {"session_id": session_id}, 5)
+        )
 
         assert waited is not None
         assert waited["result"]["stdout"].splitlines() == ["HELLO"]
@@ -56,9 +71,13 @@ def test_protocol_session_full_pipe_lifecycle():
 def test_protocol_returns_structured_errors():
     async def _run() -> None:
         runtime = JsonRpcRuntime()
-        invalid = await runtime.dispatch(request("session.start", {"spec": {"argv": []}}))
+        invalid = await runtime.dispatch(
+            request("session.start", {"spec": {"argv": []}})
+        )
         missing = await runtime.dispatch(
-            request("session.start", {"spec": {"executable": "__missing__", "argv": []}}, 2)
+            request(
+                "session.start", {"spec": {"executable": "__missing__", "argv": []}}, 2
+            )
         )
         assert invalid is not None and invalid["error"]["code"] == -32602
         assert missing is not None
@@ -136,7 +155,9 @@ def test_stdio_eof_disposes_started_sessions():
             + '","argv":["-c","import time; time.sleep(10)"]}}}\n'
         )
         destination = io.StringIO()
-        await serve_stdio(runtime=runtime, stdin=io.StringIO(message), stdout=destination)
+        await serve_stdio(
+            runtime=runtime, stdin=io.StringIO(message), stdout=destination
+        )
         assert runtime.manager.session_count == 0
 
     asyncio.run(_run())
@@ -193,8 +214,7 @@ def test_stdio_server_applies_pending_request_backpressure():
             for line in destination.getvalue().splitlines()
         ]
         assert any(
-            response.get("error", {}).get("data", {}).get("code")
-            == "RESOURCE_LIMITED"
+            response.get("error", {}).get("data", {}).get("code") == "RESOURCE_LIMITED"
             for response in responses
         )
 
@@ -209,7 +229,10 @@ def test_protocol_exposes_traces_stats_and_session_inspection():
                 "session.start",
                 {
                     "trace_id": "trace-protocol",
-                    "spec": {"executable": sys.executable, "argv": ["-c", "print('ok')"]},
+                    "spec": {
+                        "executable": sys.executable,
+                        "argv": ["-c", "print('ok')"],
+                    },
                 },
                 41,
             )
@@ -288,9 +311,7 @@ def test_protocol_preserves_non_utf8_output_as_base64():
         assert base64.b64decode(waited["result"]["stdout_base64"]) == b"\xff"
         assert events is not None
         output = next(
-            event
-            for event in events["result"]["events"]
-            if event["kind"] == "stdout"
+            event for event in events["result"]["events"] if event["kind"] == "stdout"
         )
         assert base64.b64decode(output["payload"]["data_base64"]) == b"\xff"
 

@@ -44,7 +44,9 @@ def test_wait_for_exit_reports_deadline():
     async def _run() -> None:
         backend = PipeBackend()
         handle = await backend.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         assert await wait_for_exit(handle, 0.01) is False
         await backend.kill_tree(handle)
@@ -82,7 +84,9 @@ def test_cancel_process_escalates_when_interrupt_is_ignored():
             "signal.signal(signal.SIGINT, signal.SIG_IGN); "
             "print('ready', flush=True); time.sleep(5)"
         )
-        handle = await backend.start(CommandSpec(executable=sys.executable, argv=("-c", code)))
+        handle = await backend.start(
+            CommandSpec(executable=sys.executable, argv=("-c", code))
+        )
         assert handle.process.stdout is not None
         assert await handle.process.stdout.readline() == b"ready\n"
 
@@ -102,7 +106,9 @@ def test_cancel_process_can_skip_soft_interrupt():
     async def _run() -> None:
         backend = PipeBackend()
         handle = await backend.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         steps = await cancel_process(
             backend,
@@ -121,7 +127,10 @@ def test_pipe_backend_environment_is_an_overlay():
         handle = await backend.start(
             CommandSpec(
                 executable=sys.executable,
-                argv=("-c", "import os; print(os.environ['SHARKRAIL_TEST']); print(bool(os.environ.get('PATH')))"),
+                argv=(
+                    "-c",
+                    "import os; print(os.environ['SHARKRAIL_TEST']); print(bool(os.environ.get('PATH')))",
+                ),
                 env={"SHARKRAIL_TEST": "present"},
             )
         )
@@ -135,7 +144,9 @@ def test_cancellation_reports_steps_before_attempting_them():
     async def _run() -> None:
         backend = PipeBackend()
         handle = await backend.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(5)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(5)")
+            )
         )
         reported: list[CancellationStep] = []
 

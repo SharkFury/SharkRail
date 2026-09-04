@@ -47,16 +47,17 @@ class ExecutionPolicy:
         requested = _command_names(spec.executable)
         if self.denied_executables and requested & _normalized(self.denied_executables):
             raise PolicyViolation("denied_executables")
-        if (
-            self.allowed_executables is not None
-            and not requested & _normalized(self.allowed_executables)
+        if self.allowed_executables is not None and not requested & _normalized(
+            self.allowed_executables
         ):
             raise PolicyViolation("allowed_executables")
         if self.require_absolute_executable and not Path(spec.executable).is_absolute():
             raise PolicyViolation("require_absolute_executable")
         if self.allowed_cwd_roots:
             cwd = Path(spec.cwd or os.getcwd()).resolve()
-            if not any(_is_within(cwd, root.resolve()) for root in self.allowed_cwd_roots):
+            if not any(
+                _is_within(cwd, root.resolve()) for root in self.allowed_cwd_roots
+            ):
                 raise PolicyViolation("allowed_cwd_roots")
         if not self.allow_parent_environment and spec.inherit_env:
             raise PolicyViolation("allow_parent_environment")
@@ -102,10 +103,13 @@ class ExecutionPolicy:
         }
         unknown = set(value) - known
         if unknown:
-            raise ValueError(f"unknown execution policy fields: {', '.join(sorted(unknown))}")
+            raise ValueError(
+                f"unknown execution policy fields: {', '.join(sorted(unknown))}"
+            )
         return cls(
             allowed_executables=_optional_strings(value, "allowed_executables"),
-            denied_executables=_optional_strings(value, "denied_executables") or frozenset(),
+            denied_executables=_optional_strings(value, "denied_executables")
+            or frozenset(),
             allowed_cwd_roots=tuple(
                 Path(item) for item in _strings(value, "allowed_cwd_roots", default=())
             ),
@@ -118,9 +122,7 @@ class ExecutionPolicy:
             max_timeout_ms=_optional_positive_int(value, "max_timeout_ms"),
             max_output_bytes=_optional_positive_int(value, "max_output_bytes"),
             max_memory_bytes=_optional_positive_int(value, "max_memory_bytes"),
-            max_cpu_time_seconds=_optional_positive_int(
-                value, "max_cpu_time_seconds"
-            ),
+            max_cpu_time_seconds=_optional_positive_int(value, "max_cpu_time_seconds"),
             max_process_count=_optional_positive_int(value, "max_process_count"),
         )
 
@@ -156,7 +158,9 @@ def _strings(
     value: dict[str, Any], key: str, *, default: tuple[str, ...] | None = None
 ) -> tuple[str, ...]:
     raw = value.get(key, default)
-    if not isinstance(raw, (list, tuple)) or not all(isinstance(item, str) for item in raw):
+    if not isinstance(raw, (list, tuple)) or not all(
+        isinstance(item, str) for item in raw
+    ):
         raise ValueError(f"{key} must be an array of strings")
     return tuple(raw)
 

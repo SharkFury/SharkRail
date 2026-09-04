@@ -24,15 +24,21 @@ def run(args: list[str]) -> subprocess.CompletedProcess[str]:
 version = run([sys.executable, "-m", "sharkrail", "--version"])
 expect(version.returncode == 0, "--version should return 0")
 
-dry = run([sys.executable, "-m", "sharkrail", "run", "--dry-run", "--json", "echo", "hello"])
+dry = run(
+    [sys.executable, "-m", "sharkrail", "run", "--dry-run", "--json", "echo", "hello"]
+)
 expect(dry.returncode == 0, "dry-run should return 0")
 json_payload = json.loads(dry.stdout)
-expect(json_payload["reason"] == "success", "dry-run json should include reason=success")
+expect(
+    json_payload["reason"] == "success", "dry-run json should include reason=success"
+)
 
 no_cmd = run([sys.executable, "-m", "sharkrail"])
 expect(no_cmd.returncode != 0, "missing subcommand should fail")
 
-run_json = run([sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "echo", "hello"])
+run_json = run(
+    [sys.executable, "-m", "sharkrail", "run", "--json", "--dry-run", "echo", "hello"]
+)
 expect(run_json.returncode == 0, "json dry-run should return 0")
 run_payload = json.loads(run_json.stdout)
 expect(run_payload["reason"] == "success", "run --json should include reason=success")
@@ -62,10 +68,19 @@ capabilities = run([sys.executable, "-m", "sharkrail", "capabilities", "--json"]
 expect(capabilities.returncode == 0, "capabilities --json should return 0")
 cap_payload = json.loads(capabilities.stdout)
 expect("platform" in cap_payload, "capabilities payload should include platform")
-expect("contract_version" in cap_payload, "capabilities payload should include contract version")
+expect(
+    "contract_version" in cap_payload,
+    "capabilities payload should include contract version",
+)
 expect("modes" in cap_payload, "capabilities payload should include modes")
 expect(isinstance(cap_payload["modes"], list), "capabilities modes should be a list")
-expect("features" in cap_payload and isinstance(cap_payload["features"], list), "capabilities payload should include features list")
-expect(cap_payload.get("supports_timeout") is True, "capabilities should report timeout support")
+expect(
+    "features" in cap_payload and isinstance(cap_payload["features"], list),
+    "capabilities payload should include features list",
+)
+expect(
+    cap_payload.get("supports_timeout") is True,
+    "capabilities should report timeout support",
+)
 
 print("compat smoke passed")

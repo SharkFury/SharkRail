@@ -90,16 +90,18 @@ class Session:
     def transition(self, target: SessionState) -> None:
         self.lifecycle.transition(target)
 
-    async def emit(self, kind: LifecycleEventType, payload: Optional[dict[str, object]] = None) -> None:
+    async def emit(
+        self, kind: LifecycleEventType, payload: Optional[dict[str, object]] = None
+    ) -> None:
         async with self.condition:
             if len(self.events) >= self.max_retained_events:
                 self.events.popleft()
             event = LifecycleEvent(
-                    self.next_event_seq,
-                    kind,
-                    payload or {},
-                    trace_id=self.trace_id,
-                )
+                self.next_event_seq,
+                kind,
+                payload or {},
+                trace_id=self.trace_id,
+            )
             self.events.append(event)
             self.next_event_seq += 1
             self.condition.notify_all()
@@ -144,7 +146,9 @@ class Session:
             kind = LifecycleEventType.STDOUT
 
         if self.output_retention == "tail" and self.max_output_bytes is not None:
-            overflow = max(0, len(self.stdout) + len(self.stderr) - self.max_output_bytes)
+            overflow = max(
+                0, len(self.stdout) + len(self.stderr) - self.max_output_bytes
+            )
             if overflow:
                 del self.stdout[:overflow]
                 dropped = overflow
@@ -347,7 +351,9 @@ class SessionManager:
             spec=spec,
             backend=backend,
             handle=handle,
-            max_output_bytes=self._default_max_output_bytes if max_output_bytes is None else max_output_bytes,
+            max_output_bytes=self._default_max_output_bytes
+            if max_output_bytes is None
+            else max_output_bytes,
             timeout_ms=timeout_ms,
             idle_timeout_ms=idle_timeout_ms,
             max_output_events=self._max_output_events,
@@ -462,7 +468,9 @@ class SessionManager:
         session = self.get(session_id)
         async with session.operation_lock:
             self._require_active(session_id)
-            if not hasattr(session.backend, "resize") or not isinstance(session.handle, PtyProcessHandle):
+            if not hasattr(session.backend, "resize") or not isinstance(
+                session.handle, PtyProcessHandle
+            ):
                 raise SharkRailError(
                     ExecutionError(
                         code=ErrorCode.CAPABILITY_NOT_SUPPORTED,
@@ -479,7 +487,9 @@ class SessionManager:
         session = self.get(session_id)
         async with session.operation_lock:
             self._require_active(session_id)
-            await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": "interrupt"})
+            await session.emit(
+                LifecycleEventType.CANCELLATION_STEP, {"step": "interrupt"}
+            )
             await asyncio.wait_for(
                 session.backend.interrupt(session.handle),
                 self._termination_timeout_ms / 1000,
@@ -507,7 +517,9 @@ class SessionManager:
             async def report_step(step: CancellationStep) -> None:
                 value = step.value
                 session.cancellation_steps = (*session.cancellation_steps, value)
-                await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": value})
+                await session.emit(
+                    LifecycleEventType.CANCELLATION_STEP, {"step": value}
+                )
 
             try:
                 await cancel_process(
@@ -549,7 +561,9 @@ class SessionManager:
             )
             return session.cancellation_steps
 
-    async def wait(self, session_id: str, timeout_ms: Optional[int] = None) -> Optional[CommandResult]:
+    async def wait(
+        self, session_id: str, timeout_ms: Optional[int] = None
+    ) -> Optional[CommandResult]:
         session = self.get(session_id)
         if session.monitor_task is None:
             return session.result
@@ -557,7 +571,9 @@ class SessionManager:
             if timeout_ms is None:
                 await asyncio.shield(session.monitor_task)
             else:
-                await asyncio.wait_for(asyncio.shield(session.monitor_task), timeout_ms / 1000)
+                await asyncio.wait_for(
+                    asyncio.shield(session.monitor_task), timeout_ms / 1000
+                )
         except asyncio.TimeoutError:
             return None
         return session.result
@@ -601,16 +617,24 @@ class SessionManager:
             )
         if cursor < 0 or cursor > session.next_event_seq:
             raise self._request_error("event cursor is out of range")
-        if cursor == session.next_event_seq and wait_ms > 0 and session.state not in {
-            SessionState.COMPLETED,
-            SessionState.FAILED,
-        }:
+        if (
+            cursor == session.next_event_seq
+            and wait_ms > 0
+            and session.state
+            not in {
+                SessionState.COMPLETED,
+                SessionState.FAILED,
+            }
+        ):
             async with session.condition:
                 try:
                     await asyncio.wait_for(
                         session.condition.wait_for(
-                            lambda: session.next_event_seq > cursor
-                            or session.state in {SessionState.COMPLETED, SessionState.FAILED}
+                            lambda: (
+                                session.next_event_seq > cursor
+                                or session.state
+                                in {SessionState.COMPLETED, SessionState.FAILED}
+                            )
                         ),
                         wait_ms / 1000,
                     )
@@ -628,11 +652,15 @@ class SessionManager:
             if event.seq < cursor:
                 continue
             event_bytes = len(
-                json.dumps(event.payload, ensure_ascii=False, separators=(",", ":")).encode(
-                    "utf-8"
-                )
+                json.dumps(
+                    event.payload, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
             )
-            if selected and byte_limit is not None and selected_bytes + event_bytes > byte_limit:
+            if (
+                selected
+                and byte_limit is not None
+                and selected_bytes + event_bytes > byte_limit
+            ):
                 break
             selected.append(event)
             selected_bytes += event_bytes
@@ -768,13 +796,31 @@ class SessionManager:
 
     async def _monitor(self, session: Session) -> None:
         readers: list[asyncio.Task[None]] = []
-        if hasattr(session.backend, "read") and isinstance(session.handle, PtyProcessHandle):
-            readers.append(asyncio.create_task(self._read_pty(session, session.backend, session.handle)))
+        if hasattr(session.backend, "read") and isinstance(
+            session.handle, PtyProcessHandle
+        ):
+            readers.append(
+                asyncio.create_task(
+                    self._read_pty(session, session.backend, session.handle)
+                )
+            )
         else:
             if session.handle.process.stdout is not None:
-                readers.append(asyncio.create_task(self._read_pipe(session, "stdout", session.handle.process.stdout)))
+                readers.append(
+                    asyncio.create_task(
+                        self._read_pipe(
+                            session, "stdout", session.handle.process.stdout
+                        )
+                    )
+                )
             if session.handle.process.stderr is not None:
-                readers.append(asyncio.create_task(self._read_pipe(session, "stderr", session.handle.process.stderr)))
+                readers.append(
+                    asyncio.create_task(
+                        self._read_pipe(
+                            session, "stderr", session.handle.process.stderr
+                        )
+                    )
+                )
 
         monitor_error: Optional[ExecutionError] = None
         disposed = False
@@ -891,12 +937,15 @@ class SessionManager:
         if monitor_error is not None:
             reason = (
                 CompletionReason.RESOURCE_LIMITED
-                if monitor_error.code in {ErrorCode.DRAIN_TIMEOUT, ErrorCode.RESOURCE_LIMITED}
+                if monitor_error.code
+                in {ErrorCode.DRAIN_TIMEOUT, ErrorCode.RESOURCE_LIMITED}
                 else CompletionReason.FAILED
             )
             if session.state not in {SessionState.FAILED, SessionState.COMPLETED}:
                 session.transition(SessionState.FAILED)
-            await session.emit(LifecycleEventType.SESSION_ERROR, monitor_error.to_dict())
+            await session.emit(
+                LifecycleEventType.SESSION_ERROR, monitor_error.to_dict()
+            )
         elif reason is None:
             reason = (
                 CompletionReason.SUCCESS
@@ -919,7 +968,8 @@ class SessionManager:
             decoding_errors=captured.decoding_errors,
             max_output_bytes=session.max_output_bytes,
             reason=reason,
-            timed_out=reason in {CompletionReason.TIMEOUT, CompletionReason.IDLE_TIMEOUT},
+            timed_out=reason
+            in {CompletionReason.TIMEOUT, CompletionReason.IDLE_TIMEOUT},
             error=monitor_error,
             duration_ms=self._duration_ms(session),
             drain_duration_ms=self._drain_duration_ms(session),
@@ -981,7 +1031,9 @@ class SessionManager:
                     )
                 )
             if session.idle_timeout_ms is not None:
-                last_activity = session.last_output_monotonic or session.started_monotonic
+                last_activity = (
+                    session.last_output_monotonic or session.started_monotonic
+                )
                 deadlines.append(
                     (
                         last_activity + session.idle_timeout_ms / 1000,
@@ -1004,7 +1056,9 @@ class SessionManager:
                 if reason == CompletionReason.TIMEOUT and current >= deadline:
                     return reason
                 if reason == CompletionReason.IDLE_TIMEOUT:
-                    last_activity = session.last_output_monotonic or session.started_monotonic
+                    last_activity = (
+                        session.last_output_monotonic or session.started_monotonic
+                    )
                     if current >= last_activity + (session.idle_timeout_ms or 0) / 1000:
                         return reason
 
@@ -1084,7 +1138,12 @@ class SessionManager:
 
     @staticmethod
     def _duration_ms(session: Session, now: Optional[float] = None) -> float:
-        end = session.exited_monotonic or session.completed_at_monotonic or now or time.monotonic()
+        end = (
+            session.exited_monotonic
+            or session.completed_at_monotonic
+            or now
+            or time.monotonic()
+        )
         return round(max(0.0, end - session.started_monotonic) * 1000, 3)
 
     @staticmethod

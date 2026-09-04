@@ -10,8 +10,10 @@ from sharkrail.protocol import JsonRpcRuntime
 json_scalars = st.none() | st.booleans() | st.integers() | st.text(max_size=64)
 json_values = st.recursive(
     json_scalars,
-    lambda children: st.lists(children, max_size=5)
-    | st.dictionaries(st.text(max_size=32), children, max_size=5),
+    lambda children: (
+        st.lists(children, max_size=5)
+        | st.dictionaries(st.text(max_size=32), children, max_size=5)
+    ),
     max_leaves=20,
 )
 
@@ -39,5 +41,7 @@ def test_output_budget_accounting_is_conserved(stdout, stderr, budget):
     captured = capture_output(stdout, stderr, budget)
 
     assert captured.retained_bytes <= budget
-    assert captured.retained_bytes + captured.truncated_bytes == len(stdout) + len(stderr)
+    assert captured.retained_bytes + captured.truncated_bytes == len(stdout) + len(
+        stderr
+    )
     assert captured.truncated == (captured.truncated_bytes > 0)

@@ -67,7 +67,9 @@ class JsonRpcRuntime:
             ):
                 raise JsonRpcError(-32600, "Invalid Request")
             request_id = candidate_id
-            if request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
+            if request.get("jsonrpc") != "2.0" or not isinstance(
+                request.get("method"), str
+            ):
                 raise JsonRpcError(-32600, "Invalid Request")
             params = request.get("params", {})
             if not isinstance(params, dict):
@@ -85,7 +87,9 @@ class JsonRpcRuntime:
             self._rpc_errors += 1
             if is_notification:
                 return None
-            return self._error_response(request_id, -32000, err.error.message, err.error.to_dict())
+            return self._error_response(
+                request_id, -32000, err.error.message, err.error.to_dict()
+            )
         except (TypeError, ValueError, KeyError) as err:
             self._rpc_errors += 1
             if is_notification:
@@ -95,7 +99,9 @@ class JsonRpcRuntime:
                 stage=ErrorStage.VALIDATE,
                 message=str(err),
             )
-            return self._error_response(request_id, -32602, "Invalid params", error.to_dict())
+            return self._error_response(
+                request_id, -32602, "Invalid params", error.to_dict()
+            )
         except Exception as err:  # noqa: BLE001  # pragma: no cover - protocol boundary
             self._rpc_errors += 1
             if is_notification:
@@ -105,7 +111,9 @@ class JsonRpcRuntime:
                 stage=ErrorStage.RUN,
                 message=str(err),
             )
-            return self._error_response(request_id, -32603, "Internal error", error.to_dict())
+            return self._error_response(
+                request_id, -32603, "Internal error", error.to_dict()
+            )
         finally:
             self._rpc_duration_ms += (time.monotonic() - started) * 1000
 
@@ -182,7 +190,9 @@ class JsonRpcRuntime:
                 "has_more": has_more,
             }
         if method == "session.write":
-            await self.manager.write(_required_str(params, "session_id"), _parse_input(params))
+            await self.manager.write(
+                _required_str(params, "session_id"), _parse_input(params)
+            )
             return {"accepted": True}
         if method == "session.close_stdin":
             await self.manager.close_stdin(_required_str(params, "session_id"))
@@ -261,14 +271,18 @@ async def serve_stdio(
                 stage=ErrorStage.VALIDATE,
                 message=f"request exceeds {max_request_bytes} byte limit",
             )
-            response = runtime._error_response(None, -32000, error.message, error.to_dict())
+            response = runtime._error_response(
+                None, -32000, error.message, error.to_dict()
+            )
             await write_response(response)
             return
         try:
             request = json.loads(line)
             response = await runtime.dispatch(request)
         except json.JSONDecodeError as err:
-            response = runtime._error_response(None, -32700, "Parse error", {"message": str(err)})
+            response = runtime._error_response(
+                None, -32700, "Parse error", {"message": str(err)}
+            )
         if response is not None:
             await write_response(response)
 
@@ -356,7 +370,10 @@ def _parse_spec(params: dict[str, Any]) -> CommandSpec:
     env = spec.get("env")
     if env is not None and (
         not isinstance(env, dict)
-        or not all(isinstance(key, str) and isinstance(value, str) for key, value in env.items())
+        or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in env.items()
+        )
     ):
         raise TypeError("env must be an object containing string values")
     target = Target(spec.get("target", "native"))

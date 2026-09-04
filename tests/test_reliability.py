@@ -37,7 +37,9 @@ def test_long_poll_uses_predicate_and_does_not_lose_wakeup():
     async def _run() -> None:
         manager = SessionManager()
         session = await manager.start(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(.2)"))
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(.2)")
+            )
         )
         cursor = session.next_event_seq
         subscriber = asyncio.create_task(
@@ -45,7 +47,7 @@ def test_long_poll_uses_predicate_and_does_not_lose_wakeup():
         )
         await asyncio.sleep(0)
         await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": "probe"})
-        events, _, _ = await asyncio.wait_for(subscriber, timeout=.2)
+        events, _, _ = await asyncio.wait_for(subscriber, timeout=0.2)
 
         assert events[0].payload["step"] == "probe"
         await manager.dispose(session.id)
@@ -66,13 +68,18 @@ def test_concurrent_writes_are_serialized_without_data_loss():
             )
         )
         await asyncio.gather(
-            *(manager.write(session.id, f"{index:02d}\n".encode()) for index in range(20))
+            *(
+                manager.write(session.id, f"{index:02d}\n".encode())
+                for index in range(20)
+            )
         )
         await manager.close_stdin(session.id)
         result = await manager.wait(session.id)
 
         assert result is not None
-        assert result.stdout.strip().split(",") == [f"{index:02d}" for index in range(20)]
+        assert result.stdout.strip().split(",") == [
+            f"{index:02d}" for index in range(20)
+        ]
         await manager.dispose(session.id)
 
     asyncio.run(_run())

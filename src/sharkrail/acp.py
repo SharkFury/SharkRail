@@ -53,7 +53,9 @@ class AcpTerminalAdapter:
         session_id = _required_string(params, "sessionId")
         command = _required_string(params, "command")
         args = params.get("args", [])
-        if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        if not isinstance(args, list) or not all(
+            isinstance(item, str) for item in args
+        ):
             raise TypeError("args must be an array of strings")
         cwd = params.get("cwd")
         if cwd is not None and (

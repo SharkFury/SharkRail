@@ -79,15 +79,21 @@ def collect() -> Capability:
             modes=("pipe", "pty"),
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
-            features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize", "resource_limits"),
+            features=(
+                "session_lifecycle",
+                "exit_reasons",
+                "capabilities",
+                "process_tree_kill",
+                "pty",
+                "resize",
+                "resource_limits",
+            ),
             targets=("native",),
             shells=shells,
             resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
         )
 
-    shells = tuple(
-        shell for shell in ("bash", "zsh", "pwsh") if shutil.which(shell)
-    )
+    shells = tuple(shell for shell in ("bash", "zsh", "pwsh") if shutil.which(shell))
     return Capability(
         contract_version="1.0.0",
         platform_name="linux",
@@ -95,7 +101,15 @@ def collect() -> Capability:
         modes=("pipe", "pty"),
         max_output_bytes=16 * 1024 * 1024,
         supports_timeout=True,
-        features=("session_lifecycle", "exit_reasons", "capabilities", "process_tree_kill", "pty", "resize", "resource_limits"),
+        features=(
+            "session_lifecycle",
+            "exit_reasons",
+            "capabilities",
+            "process_tree_kill",
+            "pty",
+            "resize",
+            "resource_limits",
+        ),
         targets=("native",),
         shells=shells,
         resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),

@@ -45,7 +45,7 @@ def test_release_workflow_uses_trusted_publishing_and_version_guard() -> None:
 
     assert "workflow_dispatch:" in workflow
     assert 'tags:\n      - "v[0-9]*.[0-9]*.[0-9]*"' in workflow
-    assert 'if: startsWith(github.ref, \'refs/tags/\')' in workflow
+    assert "if: startsWith(github.ref, 'refs/tags/')" in workflow
     assert 'python .github/scripts/check_release.py "${GITHUB_REF_NAME}"' in workflow
     assert "environment:\n      name: pypi" in workflow
     assert "id-token: write" in workflow

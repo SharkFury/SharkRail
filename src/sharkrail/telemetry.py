@@ -56,9 +56,9 @@ class EventRecorder:
             "timestamp": timestamp,
             "payload": safe_payload,
         }
-        encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
-            "utf-8"
-        )
+        encoded = (
+            json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
         with self._lock:
             try:
                 current_size = self.path.stat().st_size if self.path.exists() else 0

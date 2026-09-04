@@ -8,7 +8,9 @@ from sharkrail.models import CommandSpec
 def test_lifecycle_events_order():
     async def _run() -> None:
         runner = CommandRunner(dry_run=True)
-        _, events = await runner.run_events(CommandSpec(executable="echo", argv=("hello",)))
+        _, events = await runner.run_events(
+            CommandSpec(executable="echo", argv=("hello",))
+        )
 
         assert [e.kind for e in events] == [
             LifecycleEventType.ACCEPTED,
@@ -23,7 +25,9 @@ def test_lifecycle_events_for_timeout_reason():
     async def _run() -> None:
         runner = CommandRunner()
         _, events = await runner.run_events(
-            CommandSpec(executable=sys.executable, argv=("-c", "import time; time.sleep(10)")),
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(10)")
+            ),
             timeout_ms=200,
         )
 

@@ -36,10 +36,13 @@ def test_acp_terminal_create_output_wait_and_release():
         assert output["exitStatus"] == status
         assert len(output["output"].encode()) <= 4
 
-        assert await adapter.handle(
-            "terminal/release",
-            {"sessionId": "acp-session", "terminalId": terminal_id},
-        ) == {}
+        assert (
+            await adapter.handle(
+                "terminal/release",
+                {"sessionId": "acp-session", "terminalId": terminal_id},
+            )
+            == {}
+        )
         assert adapter.manager.session_count == 0
 
     asyncio.run(_run())
