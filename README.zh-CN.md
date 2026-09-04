@@ -1,87 +1,150 @@
 # SharkRail
 
-> Native execution rails for AI agents.
+> 为 AI Agent 提供可预测的本地命令与终端执行能力。
 
-SharkRail 是面向 AI 编程 Agent、IDE 与自动化工具的本地跨平台命令/终端执行运行时。它将 Windows、Linux、macOS 和 WSL 不同的进程机制适配为版本化契约，提供结构化输出、生命周期事件、超时取消、进程树清理和 capability 查询。
+[![CI](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-0A7E8C.svg)](LICENSE)
 
-它是执行基础设施，不是终端 UI、远程 Shell，也不是安全沙箱。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 它解决什么问题
+SharkRail 是面向 AI 编程 Agent、IDE 和自动化工具的本地跨平台执行运行时。
+它在 Windows pipes/ConPTY、POSIX pipes/PTY、进程组、Job Object 和 WSL
+之上提供统一、版本化的会话契约。
 
-Agent 不能像人一样观察提示符、手动按 Ctrl+C 或关闭窗口。它需要机器可验证地知道：进程是否启动、stdout/stderr 来自哪里、退出后输出是否排空、取消是否清理了子孙进程，以及输出是否被截断。
+SharkRail 是执行基础设施，不是终端模拟器、远程 Shell 或安全沙箱。
 
-SharkRail v0.1 已实现：
+## 为什么需要 SharkRail？
 
-- 不经过隐式 Shell 的 direct argv 执行；
-- 显式 cmd、Windows PowerShell、PowerShell 7、Bash、Zsh 脚本执行；
-- Pipe 模式独立 stdout/stderr；
-- Linux/macOS 原生 PTY 与 Windows ConPTY；
-- 可持久会话及 stdin、EOF、resize、interrupt、cancel、wait、dispose；
-- interrupt → terminate → kill_tree 取消升级；
-- Windows Job Object 与 POSIX process group 进程树管理；
-- 有序事件、增量游标、字节级输出上限与截断统计；
-- 有界事件分页、会话过期、累计输入和 RPC 背压；
-- CPU、内存、进程数、总时长、空闲时长与 drain 超时策略；
-- UTC/单调时钟事件、trace ID、health/stats、session 检查与主动 doctor 探测；
-- 结构化 stderr 日志、脱敏 JSONL 审计和可选 OpenTelemetry；
-- stdio JSON-RPC 2.0 服务；
-- Native/WSL target 路由；
-- capability negotiation 与 `doctor` 诊断；
-- Windows、Ubuntu、macOS 的持续集成测试。
+启动子进程很简单，让自治 Agent 可靠地管理它却很难。Agent 必须能用机器可验证的
+方式回答以下问题：
+
+- 进程是否成功启动、退出，退出后的输出是否已经排空？
+- 字节来自 stdout、stderr，还是合并的终端流？
+- 命令是正常完成，还是被超时、取消或资源策略终止？
+- 子孙进程是否已被清理？
+- 输出是否被截断，丢弃了多少字节？
+- 当前机器是否支持 PTY、resize、指定 Shell 或 WSL？
+
+SharkRail 将这些答案转化为结构化结果、有序事件、稳定错误码和可发现的能力。
+
+## 核心能力
+
+- 不经过隐式 Shell 解析的 direct argv 执行
+- 显式 cmd、Windows PowerShell、PowerShell 7、Bash 和 Zsh 执行
+- Pipe 模式分离 stdout/stderr，终端模式使用原生 PTY/ConPTY
+- 持久会话：输入、EOF、resize、interrupt、cancel、wait 和 dispose
+- Windows Job Object 与 POSIX process group 进程树清理
+- 有序生命周期事件、可恢复游标和无损 Base64 输出
+- 对输出、输入、事件、会话、RPC 并发与执行时间实施有界策略
+- CPU、内存、进程数、总时长与空闲时长限制
+- stdio JSON-RPC 2.0 服务和异步 Python API
+- health/stats、trace ID、脱敏审计日志和 OpenTelemetry 接口
+- 运行时 capability negotiation 与主动 `doctor` 诊断
 
 ## 快速开始
 
+SharkRail 当前面向早期使用者，建议从源码安装：
+
 ```bash
+git clone https://github.com/SharkFury/SharkRail.git
+cd SharkRail
 python -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 python -m pip install -e .
 
-sharkrail run --json -- python -c "print('hello')"
+sharkrail run --json -- python -c "print('hello from SharkRail')"
 sharkrail capabilities --json
 sharkrail doctor
 ```
 
-显式执行 Shell：
+Shell 解析始终需要显式声明：
 
 ```bash
 sharkrail shell bash "printf 'hello\n'"
 sharkrail shell pwsh "Write-Output hello"
 ```
 
-启动供 Agent host 调用的协议服务：
+Windows 下可以直接路由到 WSL：
+
+```powershell
+sharkrail run --target wsl --wsl-distribution Ubuntu -- python3 -c "print('hello')"
+```
+
+完整开发环境见 [BUILD.md](BUILD.md)。
+
+## Agent 集成
+
+启动 newline-delimited JSON-RPC 服务：
 
 ```bash
 sharkrail serve
 ```
 
-每行输入/输出是一条 JSON-RPC 2.0 消息。完整方法、事件与错误契约见 [协议文档](docs/PROTOCOL.md)。
+每行输入和输出都是一条 JSON-RPC 2.0 消息。请求可以并发执行，调用方通过 `id`
+匹配响应。
 
-## 平台语义
+```json
+{"jsonrpc":"2.0","id":1,"method":"runtime.hello","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"session.start","params":{"spec":{"executable":"python","argv":["-c","print('hello')"]}}}
+```
+
+完整方法、事件和错误契约见 [协议参考](docs/PROTOCOL.md)。
+
+## 跨平台契约
 
 | 能力 | Windows | Linux | macOS |
 | --- | --- | --- | --- |
 | Pipe 输出 | stdout/stderr 分离 | stdout/stderr 分离 | stdout/stderr 分离 |
-| 交互终端 | ConPTY | 原生 PTY | 原生 PTY |
-| 进程树 | Job Object | Process group | Process group |
-| WSL target | 支持，Linux 后代清理为 best effort | 不适用 | 不适用 |
+| 交互终端 | pywinpty/ConPTY | 原生 PTY | 原生 PTY |
+| Resize | 支持 | 支持 | 支持 |
+| 进程树所有权 | Job Object | Process group | Process group |
+| WSL target | 支持，后代清理为 best effort | 不适用 | 不适用 |
 
-客户端应调用 capability 接口，不能只根据操作系统名称猜测能力。PTY/ConPTY 是合并终端流，SharkRail 不会伪造 stderr 分流。
+客户端必须调用 `runtime.capabilities`，不能只根据操作系统名称猜测行为。
+PTY/ConPTY 本身是合并终端流，因此 SharkRail 不会伪造不存在的 stderr 分流。
+
+## 可靠性边界
+
+进程退出和会话完成是两个不同阶段。只有输出排空完成，或产生有界的 drain 错误后，
+会话才进入终态。取消按 interrupt、terminate、kill tree 逐级升级；输出丢失与能力降级
+都会显式报告。
+
+在生产集成前，请阅读 [可靠性契约](docs/RELIABILITY.md) 和
+[安全策略](SECURITY.md)。SharkRail 与调用者使用相同权限执行程序；运行不可信代码时，
+仍需要容器、虚拟机、AppContainer 或 Windows Sandbox。
 
 ## 文档
 
-- [英文 README](README.md)
-- [产品与架构](docs/PRODUCT.md)
+从 [文档索引](docs/README.md) 开始，或直接查看：
+
+- [产品范围与原则](docs/PRODUCT.md)
+- [系统架构](docs/ARCHITECTURE.md)
 - [协议参考](docs/PROTOCOL.md)
+- [配置与限制](docs/CONFIGURATION.md)
 - [可靠性契约](docs/RELIABILITY.md)
 - [可观测性](docs/OBSERVABILITY.md)
+- [故障排查](docs/TROUBLESHOOTING.md)
+- [版本策略](docs/VERSIONING.md)
+- [路线图](ROADMAP.md)
 - [构建与测试](BUILD.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全策略](SECURITY.md)
 
-## 安全边界
+## 项目状态
 
-SharkRail 与调用者使用相同权限执行程序，不提供恶意代码隔离。运行不可信代码时，请额外使用 Windows Sandbox、AppContainer、容器或虚拟机。
+SharkRail 当前处于 alpha（`v0.1`）。本地执行核心已经实现，并在 Windows、Ubuntu、
+macOS 的 Python 3.9、3.11 和 3.14 上持续测试。JSON-RPC 协议版本为 `1.0.0`；
+Python 包到 1.0 之前仍可能通过发布说明和迁移指南引入不兼容调整。
+
+已发布变化见 [CHANGELOG.md](CHANGELOG.md)，非承诺性的未来方向见
+[ROADMAP.md](ROADMAP.md)。
+
+## 社区与安全
+
+- 贡献代码前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 使用帮助与诊断要求见 [SUPPORT.md](SUPPORT.md)。
+- 安全漏洞请按照 [SECURITY.md](SECURITY.md) 私下报告。
+- 社区参与遵循 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 ## 许可证
 
-MIT，详见 [LICENSE](LICENSE)。
+SharkRail 采用 [MIT License](LICENSE)。

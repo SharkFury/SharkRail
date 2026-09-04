@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a reproducible SharkRail defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve SharkRail. Search existing issues first. For a suspected vulnerability, stop and use private vulnerability reporting instead.
+  - type: input
+    id: version
+    attributes:
+      label: SharkRail version
+      description: Release version or commit SHA.
+      placeholder: 0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS version, Python version, execution mode, and native/WSL target.
+      placeholder: Windows 11, Python 3.11, PTY, native
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest command, Python example, or JSON-RPC exchange. Remove secrets and private data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include stable error codes and stages when available.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Attach a reviewed `sharkrail doctor --bundle` file or paste relevant redacted details.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and troubleshooting documentation.
+          required: true
+        - label: I removed credentials, private source, and sensitive output.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

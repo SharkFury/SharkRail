@@ -66,25 +66,10 @@ The product standardizes intent and observable results—not OS mechanisms. Wind
 
 ## Runtime model
 
-```text
-Agent / IDE / CLI
-        |
-Python API or JSON-RPC adapter
-        |
-Session Manager -- events -- quotas -- cursors
-        |
-Target and shell router
-        |
-  +-----+------------------+
-  |                        |
-Windows                 POSIX
-Pipe / ConPTY           Pipe / PTY
-Job Object              Process group
-  |
-WSL adapter (wsl.exe)
-```
-
-Adapters translate requests; they do not own processes. Backends implement platform operations; they do not know JSON-RPC. The session manager owns lifecycle, output retention, event order, and quotas.
+The session manager is the semantic center of the runtime. Interfaces translate
+requests, routers preserve structured intent, and platform backends own native
+process resources. See [ARCHITECTURE.md](ARCHITECTURE.md) for the layer model,
+data flow, ownership rules, and extension points.
 
 ## Lifecycle contract
 
@@ -146,10 +131,5 @@ Direct argv avoids unintended shell interpretation, but executed programs have t
 
 ## Roadmap after v0.1
 
-- MCP and ACP adapters built on the stable session contract
-- Optional Unix Domain Socket and current-user Windows Named Pipe transports
-- WSL in-distribution supervisor for stronger Linux descendant cleanup
-- Optional VT screen model and snapshots
-- Explicit signing for GitHub Release artifacts
-
-These are post-v0.1 integrations and enhancements, not missing parts of the v0.1 local execution contract.
+Future integrations and enhancements are tracked in [ROADMAP.md](../ROADMAP.md).
+They are not missing parts of the v0.1 local execution contract.

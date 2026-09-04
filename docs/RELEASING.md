@@ -8,7 +8,7 @@ PyPI API token is stored in GitHub.
 
 1. Create a GitHub environment named `pypi`. Add required reviewers if releases
    should require manual approval.
-2. On PyPI, add a trusted publisher for owner `imlarrychen`, repository
+2. On PyPI, add a trusted publisher for owner `SharkFury`, repository
    `SharkRail`, workflow `release.yml`, and environment `pypi`. A pending trusted
    publisher can be configured before the first `sharkrail` release exists.
 
@@ -40,13 +40,17 @@ Locally, the equivalent checks are:
 
 ```bash
 python .github/scripts/check_release.py v0.1.0
-ruff check src tests .github/scripts
-pytest
+python -m ruff check src tests .github/scripts
+python -m pytest
 python -m build
 python -m twine check dist/*
 ```
 
+Before tagging, inspect the built wheel metadata and confirm the package version,
+project URLs, Python requirement, and `License-Expression: MIT` are correct.
+
 PyPI versions are immutable. If publishing succeeds but the GitHub Release step
 fails, rerun only after confirming that the existing PyPI files match the
-workflow artifacts; never delete and recreate a release tag with different
-contents.
+workflow artifacts. Never delete and recreate a release tag with different
+contents. If PyPI publication fails before accepting any file, fix the release
+commit and create a new patch version rather than moving a public tag.

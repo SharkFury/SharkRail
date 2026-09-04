@@ -1,77 +1,103 @@
 # SharkRail
 
-Native execution rails for AI agents.
+> Predictable local command and terminal execution for AI agents.
 
-SharkRail is a local, cross-platform command and terminal runtime for AI coding agents, IDE integrations, and automation tools. It turns OS-specific process behavior into a versioned contract with structured output, explicit lifecycle events, cancellation, timeouts, process-tree cleanup, and capability discovery.
+[![CI](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-0A7E8C.svg)](LICENSE)
+[![Protocol: 1.0](https://img.shields.io/badge/protocol-1.0-5B47A5.svg)](docs/PROTOCOL.md)
 
-It is infrastructure, not a terminal UI, remote shell, or security sandbox.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## What it solves
+SharkRail is a local, cross-platform execution runtime for coding agents, IDEs,
+and automation tools. It presents one versioned session contract over Windows
+pipes and ConPTY, POSIX pipes and PTYs, process groups, Job Objects, and WSL.
 
-Calling `subprocess` is easy; making it reliable for an autonomous agent is not. Agents need to know whether a process started, distinguish output streams, retain output within a budget, cancel the entire process tree, and wait until output is drained after exit. Interactive tools additionally need a real PTY/ConPTY and resize support.
+SharkRail is execution infrastructure. It is not a terminal emulator, remote
+shell, or security sandbox.
 
-SharkRail provides:
+## Why SharkRail?
 
-- Direct argv execution without implicit shell parsing
-- Explicit `cmd`, Windows PowerShell, PowerShell 7, Bash, and Zsh requests
-- Independent stdout/stderr in pipe mode
-- Native PTY on Linux/macOS and ConPTY on Windows
-- Persistent sessions with stdin, EOF, resize, interrupt, cancel, wait, and dispose
-- `interrupt → terminate → kill_tree` cancellation escalation
-- Windows Job Objects and POSIX process groups for process-tree cleanup
-- Ordered lifecycle/output events with resumable cursors
-- Byte-accurate output budgets, truncation accounting, and resource limits
-- CPU, memory, process-count, wall-time, idle-time, and cumulative-input policies
-- Bounded event history, paginated subscriptions, session expiry, and RPC backpressure
-- UTC/monotonic event timing, trace IDs, runtime health/stats, and session inspection
-- Structured stderr logs, redacted JSONL audit files, and optional OpenTelemetry
-- A newline-delimited JSON-RPC 2.0 stdio server
-- Native and WSL target routing
-- Runtime capability negotiation and `doctor` diagnostics
+Starting a subprocess is easy. Supervising one for an autonomous agent is not.
+An agent needs deterministic answers to questions that interactive shells leave
+implicit:
+
+- Did the process start, exit, and finish draining its output?
+- Which bytes came from stdout, stderr, or a merged terminal stream?
+- Did a timeout, cancellation, or resource policy end the command?
+- Were descendant processes cleaned up?
+- Was output truncated, and exactly how much was dropped?
+- Does this machine support PTY, resize, a requested shell, or WSL?
+
+SharkRail turns those answers into structured results, ordered events, stable
+errors, and discoverable capabilities.
+
+## Highlights
+
+- Direct argv execution with no implicit shell parsing
+- Explicit cmd, PowerShell, pwsh, Bash, and Zsh execution
+- Separate stdout/stderr in pipe mode; native PTY/ConPTY in terminal mode
+- Persistent sessions with input, EOF, resize, interrupt, cancel, wait, and dispose
+- Process-tree cleanup through Windows Job Objects or POSIX process groups
+- Ordered lifecycle events, resumable cursors, and lossless Base64 output
+- Bounded output, input, events, sessions, RPC concurrency, and execution time
+- Memory, CPU-time, process-count, wall-time, and idle-time policies
+- JSON-RPC 2.0 over stdio plus an asynchronous Python API
+- Runtime health, statistics, trace IDs, redacted audit logs, and OpenTelemetry hooks
+- Runtime-probed capability negotiation and active `doctor` diagnostics
 
 ## Quick start
 
-```bash
-python -m venv .venv
-source .venv/bin/activate       # Windows: .venv\Scripts\activate
-python -m pip install -e .
+SharkRail currently targets early adopters. Install from source:
 
+```bash
+git clone https://github.com/SharkFury/SharkRail.git
+cd SharkRail
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -e .
+```
+
+Run a direct command and inspect the local runtime:
+
+```bash
 sharkrail run --json -- python -c "print('hello from SharkRail')"
 sharkrail capabilities --json
 sharkrail doctor
 ```
 
-Shell execution is always explicit:
+Shell parsing is always explicit:
 
 ```bash
 sharkrail shell bash "printf 'hello\n'"
 sharkrail shell pwsh "Write-Output hello"
 ```
 
-Run a direct command in WSL from Windows:
+On Windows, target a WSL distribution without constructing a shell string:
 
 ```powershell
 sharkrail run --target wsl --wsl-distribution Ubuntu -- python3 -c "print('hello')"
 ```
 
-## Agent protocol
+See [BUILD.md](BUILD.md) for a complete developer setup.
 
-Start the stdio service:
+## Integrate with an agent
+
+Start the newline-delimited JSON-RPC service:
 
 ```bash
 sharkrail serve
 ```
 
-Each input and output line is one JSON-RPC 2.0 message. Requests may run concurrently.
+Each input and output line is one JSON-RPC 2.0 message. Requests may run
+concurrently and responses are matched by `id`.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"runtime.hello","params":{}}
 {"jsonrpc":"2.0","id":2,"method":"session.start","params":{"spec":{"executable":"python","argv":["-c","print('hello')"]}}}
 ```
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for all methods and guarantees.
-
-## Python API
+For in-process integration:
 
 ```python
 import asyncio
@@ -94,35 +120,73 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-## Platform contract
+The complete wire contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+## Cross-platform contract
 
 | Capability | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Pipe stdout/stderr | Separate | Separate | Separate |
+| Pipe output | Separate stdout/stderr | Separate stdout/stderr | Separate stdout/stderr |
 | Interactive terminal | ConPTY via pywinpty | Native PTY | Native PTY |
 | Resize | Yes | Yes | Yes |
 | Process-tree ownership | Job Object | Process group | Process group |
 | Native shells | cmd, PowerShell, pwsh | bash, zsh, pwsh | bash, zsh, pwsh |
-| WSL target | Yes, best-effort Linux descendant cleanup | N/A | N/A |
+| WSL target | Best-effort descendant cleanup | Not applicable | Not applicable |
 
-Clients should call `runtime.capabilities` instead of guessing from the OS name. PTY output is a merged terminal stream; SharkRail does not invent separate stderr where the platform cannot provide it.
+Clients should call `runtime.capabilities`; they should not infer behavior from
+an OS name. PTY/ConPTY output is one merged terminal stream, so SharkRail never
+invents a separate stderr channel where the platform does not provide one.
+
+## Lifecycle and reliability
+
+```text
+created -> accepted -> starting -> running -> exiting -> draining -> completed
+                                      |                         |
+                                      +-> cancelling -----------+
+created / accepted / starting / running / draining -----------> failed
+completed / failed -------------------------------------------> disposed
+```
+
+Process exit and session completion are intentionally different. A session is
+complete only after output has drained or a bounded drain failure has been
+reported. Cancellation escalates through interrupt, terminate, and process-tree
+kill. Output loss and capability degradation are explicit—not silent.
+
+Read the [reliability contract](docs/RELIABILITY.md) before building a production
+integration.
 
 ## Documentation
 
-- [Product and architecture](docs/PRODUCT.md)
+Start with the [documentation index](docs/README.md), or go directly to:
+
+- [Product scope and principles](docs/PRODUCT.md)
+- [Architecture](docs/ARCHITECTURE.md)
 - [Protocol reference](docs/PROTOCOL.md)
+- [Configuration and limits](docs/CONFIGURATION.md)
 - [Reliability contract](docs/RELIABILITY.md)
 - [Observability](docs/OBSERVABILITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Versioning policy](docs/VERSIONING.md)
+- [Roadmap](ROADMAP.md)
 - [Build and test](BUILD.md)
-- [Release process](docs/RELEASING.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
-- [简体中文 README](README.zh-CN.md)
 
 ## Project status
 
-v0.1 is an implementation release of the local execution runtime. The JSON-RPC protocol is versioned `1.0.0`; additive fields and capabilities may be introduced within that major version. See the product document for post-v0.1 integration work.
+SharkRail is in alpha (`v0.1`). Its local execution core is implemented and
+continuously tested on Windows, Ubuntu, and macOS with Python 3.9, 3.11, and
+3.14. The JSON-RPC protocol is versioned `1.0.0`, but pre-1.0 package APIs may
+still change with release notes and migration guidance.
+
+See [CHANGELOG.md](CHANGELOG.md) for shipped changes and [ROADMAP.md](ROADMAP.md)
+for non-binding future direction.
+
+## Community and security
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+- Use [SUPPORT.md](SUPPORT.md) for help and diagnostic guidance.
+- Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+- Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+SharkRail is available under the [MIT License](LICENSE).
