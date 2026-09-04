@@ -12,10 +12,11 @@ to stable `ExecutionError` values and emitted as `session.error`. Output drain,
 forced termination, individual I/O operations, and runtime shutdown all have
 deadlines.
 
-Process exit and session completion remain separate. After the root exits,
-SharkRail drains its pipes or terminal. If descendants keep an inherited output
-handle open beyond the drain deadline, SharkRail kills the owned process tree
-and reports `DRAIN_TIMEOUT` instead of hanging forever.
+Process exit and session completion remain separate. SharkRail observes the root
+process status independently from pipe EOF, then drains its pipes or terminal.
+If descendants keep an inherited output handle open beyond the drain deadline,
+SharkRail kills the owned process tree and reports `DRAIN_TIMEOUT` instead of
+hanging forever.
 
 ## Bounded resources
 

@@ -723,7 +723,11 @@ class SessionManager:
 
         monitor_error: Optional[ExecutionError] = None
         disposed = False
-        process_wait = asyncio.create_task(session.handle.process.wait())
+        # asyncio's POSIX Process.wait() may not finish until subprocess pipe
+        # transports reach EOF, even after returncode is available. Descendants
+        # can inherit those pipes, so root exit detection must stay independent
+        # from the bounded output-drain phase below.
+        process_wait = asyncio.create_task(self._wait_for_process_exit(session.handle))
         try:
             timeout_reason = await self._wait_reason(session, process_wait)
         except Exception as err:  # noqa: BLE001 - backend boundary
@@ -939,6 +943,12 @@ class SessionManager:
                     last_activity = session.last_output_monotonic or session.started_monotonic
                     if current >= last_activity + (session.idle_timeout_ms or 0) / 1000:
                         return reason
+
+    @staticmethod
+    async def _wait_for_process_exit(handle: ProcessHandle) -> int:
+        while handle.process.returncode is None:
+            await asyncio.sleep(0.01)
+        return handle.process.returncode
 
     async def _read_pipe(
         self,

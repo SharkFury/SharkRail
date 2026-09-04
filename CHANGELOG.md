@@ -13,8 +13,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Bound backend disposal inside the session monitor so a stuck pipe close cannot
-  prevent a session from reaching a terminal state.
+- Decouple root-process exit detection from inherited pipe EOF and bound backend
+  disposal so a stuck pipe close cannot prevent a session from reaching a
+  terminal state.
 
 ## 0.1.0 - 2026-09-03
 
