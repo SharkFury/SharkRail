@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,5 +50,27 @@ def test_release_workflow_uses_trusted_publishing_and_version_guard() -> None:
     assert 'python .github/scripts/check_release.py "${GITHUB_REF_NAME}"' in workflow
     assert "environment:\n      name: pypi" in workflow
     assert "id-token: write" in workflow
-    assert "pypa/gh-action-pypi-publish@release/v1" in workflow
+    assert "pypa/gh-action-pypi-publish@" in workflow
     assert "gh release create" in workflow
+
+
+def test_release_retests_platforms_and_publishes_provenance() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "os: [ubuntu-latest, macos-latest, windows-latest]" in workflow
+    assert "needs: verify" in workflow
+    assert "generate_sbom.py" in workflow
+    assert "actions/attest@" in workflow
+    assert "attestations: write" in workflow
+    assert "release-metadata" in workflow
+
+
+def test_release_actions_are_commit_pinned() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    uses = re.findall(r"uses:\s+([^\s#]+)", workflow)
+
+    assert uses
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in uses)
+    assert workflow.count("persist-credentials: false") == workflow.count(
+        "uses: actions/checkout@"
+    )

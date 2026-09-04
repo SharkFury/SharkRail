@@ -14,35 +14,79 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Validate and build
-    runs-on: ubuntu-latest
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install build dependencies
-        run: python -m pip install --upgrade build pytest ruff twine
-      - name: Install SharkRail
-        run: python -m pip install --editable .
+      - run: python -m pip install --editable ".[test]"
+      - run: python -m pytest --timeout=20
+
+  build:
+    name: Validate and build
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install release dependencies
+        run: python -m pip install --editable ".[test]" build twine
       - name: Verify release version
         if: startsWith(github.ref, 'refs/tags/')
         run: python .github/scripts/check_release.py "${GITHUB_REF_NAME}"
-      - name: Run quality gates
+      - name: Run source quality gates
         run: |
-          ruff check src tests .github/scripts
-          pytest
+          python -m ruff check .
+          python -m ruff format --check .
+          python -m mypy src/sharkrail
       - name: Build distributions
         run: python -m build
       - name: Check package metadata
         run: python -m twine check dist/*
+      - name: Generate CycloneDX SBOM
+        run: >-
+          python .github/scripts/generate_sbom.py
+          dist/sharkrail-*.whl
+          release-assets/sharkrail-${GITHUB_REF_NAME:-manual}.sbom.cdx.json
+      - name: Attest distributions and SBOM
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            dist/*
+            release-assets/*
       - name: Store distributions
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-distributions
           path: dist/
+          if-no-files-found: error
+      - name: Store release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-metadata
+          path: release-assets/
           if-no-files-found: error
 
   publish-pypi:
@@ -56,34 +100,34 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: python-distributions
           path: dist/
       - name: Publish distributions
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
   publish-github:
     name: Create GitHub release
     if: startsWith(github.ref, 'refs/tags/')
-    needs:
-      - build
-      - publish-pypi
+    needs: [build, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: python-distributions
           path: dist/
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-metadata
+          path: release-assets/
       - name: Create release with generated notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "${GITHUB_REF_NAME}" dist/*
+          gh release create "${GITHUB_REF_NAME}" dist/* release-assets/*
           --verify-tag
           --generate-notes
           --title "${GITHUB_REF_NAME}"
