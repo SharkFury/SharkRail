@@ -8,9 +8,16 @@ Tagline: Native execution rails for AI agents.
 
 ## Product definition
 
-SharkRail is a local execution runtime that gives AI agents a predictable way to run non-interactive commands and interactive terminal sessions across Windows, Linux, macOS, and WSL.
+SharkRail defines and implements a vendor-neutral reliability contract for
+processes run by AI agents. Its reference runtime gives agents a predictable
+way to run non-interactive commands and interactive terminal sessions across
+Windows, Linux, macOS, and WSL.
 
 The product standardizes intent and observable results—not OS mechanisms. Windows uses pipes, ConPTY, and Job Objects. POSIX systems use pipes, PTYs, process groups, and signals. Clients use the same session methods while discovering differences through capabilities.
+
+The [public value design](VALUE.md) defines who benefits, why this work belongs
+in shared open-source infrastructure, how value is proven, and which proposals
+should not enter the core.
 
 ## Users and jobs
 
@@ -28,6 +35,10 @@ The product standardizes intent and observable results—not OS mechanisms. Wind
 6. Output loss is bounded and reported, never silent.
 7. Capability negotiation describes real behavior; unsupported features do not silently degrade.
 8. The runtime runs with the caller's authority and is not a security sandbox.
+9. Standard process APIs remain the right choice for simple commands; SharkRail
+   must earn adoption with evidence of supervision value.
+10. Shared contracts and conformance evidence take priority over feature and
+    adapter count.
 
 ## v0.1 scope and implementation
 

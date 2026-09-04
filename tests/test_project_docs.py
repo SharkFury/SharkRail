@@ -34,6 +34,8 @@ def test_required_project_documentation_exists() -> None:
         "docs/RELEASING.md",
         "docs/RELIABILITY.md",
         "docs/TROUBLESHOOTING.md",
+        "docs/VALUE.md",
+        "docs/VALUE.zh-CN.md",
         "docs/VERSIONING.md",
     }
 

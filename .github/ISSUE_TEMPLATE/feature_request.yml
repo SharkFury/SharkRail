@@ -19,10 +19,19 @@ body:
     validations:
       required: true
   - type: textarea
+    id: beneficiary
+    attributes:
+      label: Beneficiary and evidence
+      description: Who encounters this problem, how often, and what reproduction or integration evidence is available?
+    validations:
+      required: true
+  - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
       description: Existing workarounds, libraries, or platform APIs you evaluated.
+    validations:
+      required: true
   - type: dropdown
     id: platforms
     attributes:
@@ -40,6 +49,19 @@ body:
     attributes:
       label: Contract impact
       description: Note expected API, protocol, lifecycle, security, or observability changes.
+  - type: dropdown
+    id: placement
+    attributes:
+      label: Suggested placement
+      description: Where should this behavior live?
+      options:
+        - Core contract
+        - Platform backend
+        - Protocol adapter
+        - Example or recipe
+        - Unsure
+    validations:
+      required: true
   - type: checkboxes
     id: checks
     attributes:

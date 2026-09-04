@@ -6,6 +6,8 @@ integrating, operating, or contributing to the runtime.
 
 ## Learn
 
+- [Public value design](VALUE.md): mission, beneficiaries, stewardship, evidence, and work admission
+- [公共价值设计](VALUE.zh-CN.md): Chinese translation of the public value charter
 - [Product scope and principles](PRODUCT.md): users, jobs, boundaries, and goals
 - [Architecture](ARCHITECTURE.md): layers, ownership, data flow, and platform adapters
 - [Roadmap](../ROADMAP.md): current priorities and non-binding future direction

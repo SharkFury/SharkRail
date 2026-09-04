@@ -1,6 +1,10 @@
 ## Problem
 
-<!-- What user or agent problem does this change solve? Link the issue. -->
+<!-- Who experiences which reproducible execution problem? Link the issue. -->
+
+## Public value
+
+<!-- Which VALUE.md measure improves, and why does this belong in core/backend/adapter/example? -->
 
 ## Approach
 
@@ -22,3 +26,4 @@
 - [ ] I ran Ruff and the relevant pytest suite locally.
 - [ ] I did not add credentials, sensitive output, or unrelated generated files.
 - [ ] I documented platform coverage and any capability degradation.
+- [ ] I linked the changed behavior to a fixture, test, or explicit documented limit.

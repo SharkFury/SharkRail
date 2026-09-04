@@ -4,6 +4,25 @@ SharkRail uses a maintainer-led, contribution-driven governance model. The goal
 is to make decisions transparent while keeping a small infrastructure project
 able to move decisively.
 
+## Public-interest stewardship
+
+SharkRail is maintained as open public infrastructure, not as a funnel for a
+hosted or paid product. The official roadmap optimizes for shared reliability,
+interoperability, user control, and maintainability rather than revenue or
+paid-customer privilege.
+
+The official runtime, protocol, schemas, conformance assets, and documentation
+remain public. The project has no proprietary official edition, paywalled core
+capability, mandatory account, required hosted control plane, or required
+remote telemetry. Funding or sponsorship, if accepted, must be disclosed and
+does not buy protocol outcomes, release decisions, maintainer roles, or a
+private roadmap.
+
+The MIT License permits commercial use by anyone. These commitments govern the
+stewardship of the official project; they do not add a license restriction.
+See [the public value design](docs/VALUE.md) for the complete value hierarchy
+and evidence model.
+
 ## Roles
 
 - **Users** run SharkRail and provide operational feedback.
@@ -27,6 +46,10 @@ Maintainers seek rough consensus, with extra weight given to evidence from
 implementations, tests, and production use. When consensus cannot be reached,
 the maintainers make the final decision and document the reasoning. Silence is
 not treated as consensus for a breaking change.
+
+Employment, sponsorship, company size, or popularity does not grant additional
+decision authority. Vendor-specific requirements should remain in adapters or
+extensions unless public evidence demonstrates a shared execution contract.
 
 ## Releases and compatibility
 

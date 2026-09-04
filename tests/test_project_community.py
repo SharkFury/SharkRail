@@ -39,5 +39,13 @@ def test_issue_forms_require_actionable_context() -> None:
 
     for field in ("version", "environment", "reproduction", "expected", "actual"):
         assert f"id: {field}" in bug_report
-    for field in ("problem", "outcome", "platforms", "contract"):
+    for field in (
+        "problem",
+        "outcome",
+        "beneficiary",
+        "alternatives",
+        "platforms",
+        "contract",
+        "placement",
+    ):
         assert f"id: {field}" in feature_request

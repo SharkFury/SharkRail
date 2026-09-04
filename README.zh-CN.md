@@ -1,6 +1,6 @@
 # SharkRail
 
-> 为 AI Agent 提供可预测的本地命令与终端执行能力。
+> 让 AI Agent 的进程执行拥有可验证的结局。
 
 [![CI](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
@@ -8,11 +8,15 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-SharkRail 是面向 AI 编程 Agent、IDE 和自动化工具的本地跨平台执行运行时。
-它在 Windows pipes/ConPTY、POSIX pipes/PTY、进程组、Job Object 和 WSL
-之上提供统一、版本化的会话契约。
+SharkRail 为 AI 编程 Agent、IDE 和自动化工具定义并实现一套开放、厂商中立的进程执行
+可靠性契约。它的 Python 参考运行时在 Windows pipes/ConPTY、POSIX pipes/PTY、进程组、
+Job Object 和 WSL 之上提供统一、版本化的会话模型。
 
 SharkRail 是执行基础设施，不是终端模拟器、远程 Shell 或安全沙箱。
+
+对于单平台、短时、非交互命令，应直接使用标准进程 API。只有当产品需要可验证完成、
+有界输出、交互终端语义、进程树清理或跨系统的诚实契约时，SharkRail 才值得成为额外
+依赖。
 
 ## 为什么需要 SharkRail？
 
@@ -28,6 +32,9 @@ SharkRail 是执行基础设施，不是终端模拟器、远程 Shell 或安全
 
 SharkRail 将这些答案转化为结构化结果、有序事件、稳定错误码和可发现的能力。
 
+项目的公共目标不止是一份实现，而是把执行契约、参考运行时、一致性测试和真实失败
+案例维护为共享基础设施。详见[公共价值设计](docs/VALUE.zh-CN.md)。
+
 ## 核心能力
 
 - 不经过隐式 Shell 解析的 direct argv 执行
@@ -38,7 +45,7 @@ SharkRail 将这些答案转化为结构化结果、有序事件、稳定错误�
 - 有序生命周期事件、可恢复游标和无损 Base64 输出
 - 对输出、输入、事件、会话、RPC 并发与执行时间实施有界策略
 - CPU、内存、进程数、总时长与空闲时长限制
-- stdio JSON-RPC 2.0 服务和异步 Python API
+- MCP、stdio JSON-RPC 2.0 服务和异步 Python API
 - health/stats、trace ID、脱敏审计日志和 OpenTelemetry 接口
 - 运行时 capability negotiation 与主动 `doctor` 诊断
 
@@ -74,6 +81,12 @@ sharkrail run --target wsl --wsl-distribution Ubuntu -- python3 -c "print('hello
 完整开发环境见 [BUILD.md](BUILD.md)。
 
 ## Agent 集成
+
+为支持工具发现的 host 启动 MCP server：
+
+```bash
+sharkrail mcp
+```
 
 启动 newline-delimited JSON-RPC 服务：
 
@@ -119,6 +132,7 @@ PTY/ConPTY 本身是合并终端流，因此 SharkRail 不会伪造不存在的 
 从 [文档索引](docs/README.md) 开始，或直接查看：
 
 - [产品范围与原则](docs/PRODUCT.md)
+- [公共价值、维护承诺与证据](docs/VALUE.zh-CN.md)
 - [系统架构](docs/ARCHITECTURE.md)
 - [协议参考](docs/PROTOCOL.md)
 - [配置与限制](docs/CONFIGURATION.md)

@@ -1,6 +1,6 @@
 # SharkRail
 
-> Predictable local command and terminal execution for AI agents.
+> Verifiable process execution for AI agents.
 
 [![CI](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
@@ -9,12 +9,18 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-SharkRail is a local, cross-platform execution runtime for coding agents, IDEs,
-and automation tools. It presents one versioned session contract over Windows
-pipes and ConPTY, POSIX pipes and PTYs, process groups, Job Objects, and WSL.
+SharkRail defines and implements an open, vendor-neutral reliability contract
+for processes run by coding agents, IDEs, and automation tools. Its Python
+reference runtime presents one versioned session model over Windows pipes and
+ConPTY, POSIX pipes and PTYs, process groups, Job Objects, and WSL.
 
 SharkRail is execution infrastructure. It is not a terminal emulator, remote
 shell, or security sandbox.
+
+For a short, non-interactive command on one platform, use the standard process
+API. SharkRail earns its additional dependency when a product needs verifiable
+completion, bounded output, interactive terminal semantics, process-tree
+cleanup, or one honest contract across operating systems.
 
 ## Why SharkRail?
 
@@ -31,6 +37,10 @@ implicit:
 
 SharkRail turns those answers into structured results, ordered events, stable
 errors, and discoverable capabilities.
+
+The project's public goal is larger than one implementation: preserve the
+contract, reference runtime, conformance tests, and real-world failure cases as
+shared infrastructure. Read the [public value design](docs/VALUE.md).
 
 ## Highlights
 
@@ -167,6 +177,7 @@ integration.
 Start with the [documentation index](docs/README.md), or go directly to:
 
 - [Product scope and principles](docs/PRODUCT.md)
+- [Public value, stewardship, and evidence](docs/VALUE.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Protocol reference](docs/PROTOCOL.md)
 - [Configuration and limits](docs/CONFIGURATION.md)

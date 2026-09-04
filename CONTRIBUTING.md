@@ -4,6 +4,10 @@ Thank you for helping make local execution more predictable for AI agents.
 Contributions of code, tests, documentation, failure reports, and design
 feedback are welcome.
 
+Read the [public value design](docs/VALUE.md) before proposing a feature. A
+minimal reproduction, failure fixture, integration report, or careful review is
+as valuable as implementation code.
+
 By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you start
@@ -52,6 +56,10 @@ source of truth.
   environment values, credentials, or command output.
 - New dependencies require a clear need, compatible license, and maintenance
   assessment.
+- A new feature must identify its beneficiary, reproducible failure, observable
+  outcome, proof strategy, and the public-value measure it improves.
+- Prefer a conformance fixture or contract clarification over adding another
+  host-specific behavior to core.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
 [docs/RELIABILITY.md](docs/RELIABILITY.md), and

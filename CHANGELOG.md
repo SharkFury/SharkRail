@@ -10,6 +10,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Re-license SharkRail under the MIT License.
 - Reorganize project, integration, operations, governance, and support documentation.
+- Define the project's public-value charter, non-commercial stewardship,
+  evidence model, and feature-admission criteria.
 
 ### Fixed
 
