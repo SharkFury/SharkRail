@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, Mock, patch
@@ -158,7 +159,7 @@ def test_windows_pty_read_uses_quiet_post_exit_as_eof():
     async def _run() -> None:
         process = Mock(returncode=0)
         native = Mock()
-        native.read.side_effect = TimeoutError
+        native.read.side_effect = socket.timeout("timed out")
         handle = WindowsPtyProcessHandle(process=process, native_pty=native)
 
         output = await WindowsPtyBackend().read(handle)

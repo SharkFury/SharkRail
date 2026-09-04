@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import socket
 import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
@@ -438,7 +439,7 @@ class WindowsPtyBackend(ExecutionBackend):
                 text = await asyncio.to_thread(handle.native_pty.read)
             except EOFError:
                 return b""
-            except TimeoutError:
+            except (TimeoutError, socket.timeout):
                 if handle.process.returncode is not None:
                     return b""
                 continue
