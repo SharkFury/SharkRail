@@ -9,6 +9,7 @@ def test_v01_public_api_is_exported():
         "ExecutionError",
         "ExecutionPolicy",
         "PolicyViolation",
+        "protocol_schema",
         "SessionManager",
         "SharkRailError",
         "Shell",

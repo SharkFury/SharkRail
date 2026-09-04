@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SharkFury/SharkRail/schema/protocol-1.0.json",
+  "title": "SharkRail JSON-RPC Protocol 1.x",
+  "description": "Machine-readable envelope and value contract for SharkRail protocol 1.x.",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/successResponse"},
+    {"$ref": "#/$defs/errorResponse"},
+    {"$ref": "#/$defs/lifecycleEvent"}
+  ],
+  "$defs": {
+    "requestId": {
+      "type": ["string", "integer", "null"]
+    },
+    "method": {
+      "enum": [
+        "runtime.hello",
+        "runtime.capabilities",
+        "runtime.health",
+        "runtime.stats",
+        "runtime.schema",
+        "session.start",
+        "session.get",
+        "session.list",
+        "session.inspect",
+        "session.subscribe",
+        "session.events",
+        "session.write",
+        "session.close_stdin",
+        "session.resize",
+        "session.interrupt",
+        "session.cancel",
+        "session.wait",
+        "session.dispose"
+      ]
+    },
+    "resourceLimits": {
+      "type": "object",
+      "properties": {
+        "memory_bytes": {"type": "integer", "minimum": 1},
+        "cpu_time_seconds": {"type": "integer", "minimum": 1},
+        "process_count": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "commandSpec": {
+      "type": "object",
+      "properties": {
+        "executable": {"type": "string", "minLength": 1},
+        "argv": {"type": "array", "items": {"type": "string"}},
+        "shell": {"enum": ["cmd", "powershell", "pwsh", "bash", "zsh"]},
+        "script": {"type": "string", "minLength": 1},
+        "cwd": {"type": ["string", "null"]},
+        "env": {
+          "type": ["object", "null"],
+          "additionalProperties": {"type": "string"}
+        },
+        "inherit_env": {"type": "boolean", "default": true},
+        "mode": {"enum": ["pipe", "pty"], "default": "pipe"},
+        "target": {"enum": ["native", "wsl"], "default": "native"},
+        "wsl": {
+          "type": "object",
+          "properties": {
+            "distribution": {"type": ["string", "null"]},
+            "user": {"type": ["string", "null"]},
+            "cwd": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        },
+        "resources": {"$ref": "#/$defs/resourceLimits"}
+      },
+      "oneOf": [
+        {"required": ["executable"]},
+        {"required": ["shell", "script"]}
+      ],
+      "additionalProperties": true
+    },
+    "request": {
+      "type": "object",
+      "required": ["jsonrpc", "method"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "method": {"$ref": "#/$defs/method"},
+        "params": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "successResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "result": true
+      },
+      "additionalProperties": false
+    },
+    "executionError": {
+      "type": "object",
+      "required": ["code", "stage", "message", "retryable", "native"],
+      "properties": {
+        "code": {"type": "string"},
+        "stage": {"enum": ["validate", "start", "run", "drain", "dispose"]},
+        "message": {"type": "string"},
+        "retryable": {"type": "boolean"},
+        "native": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"},
+        "id": {"$ref": "#/$defs/requestId"},
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "integer"},
+            "message": {"type": "string"},
+            "data": {"type": "object"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "lifecycleEvent": {
+      "type": "object",
+      "required": ["seq", "kind", "payload", "timestamp", "monotonic_ns", "trace_id"],
+      "properties": {
+        "seq": {"type": "integer", "minimum": 0},
+        "kind": {
+          "enum": [
+            "accepted",
+            "running",
+            "output",
+            "exited",
+            "drained",
+            "completed",
+            "process.started",
+            "stdout",
+            "stderr",
+            "pty.output",
+            "output.truncated",
+            "process.exited",
+            "session.drained",
+            "session.completed",
+            "session.error",
+            "cancellation.step",
+            "cancellation.completed",
+            "resource.limit_hit",
+            "capability.degraded"
+          ]
+        },
+        "payload": {"type": "object"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "monotonic_ns": {"type": "integer", "minimum": 0},
+        "trace_id": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    }
+  }
+}

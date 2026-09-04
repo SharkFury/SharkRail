@@ -1,0 +1,1 @@
+"""Bundled SharkRail protocol schemas."""

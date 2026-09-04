@@ -12,6 +12,13 @@ Returns the runtime name, package version, and protocol version.
 
 Returns runtime-probed platform, modes, targets, available shells, process-tree mechanisms and fallbacks, granular resource limits, output limit, feature flags, and degradation reasons. Clients must use this response rather than infer support from the OS name. A started session reports the mechanism it actually acquired; for example, Windows pipe execution can report `taskkill_fallback` when Job Object assignment is rejected by a parent job.
 
+### `runtime.schema`
+
+Returns the bundled JSON Schema for protocol 1.x. The same artifact ships at
+`sharkrail/schemas/protocol-1.0.schema.json` in the wheel and is available from
+Python through `sharkrail.protocol_schema()`. SDKs should use it for envelope,
+method, event, and stable-value validation.
+
 ### `runtime.health`
 
 Returns lightweight `live`, `ready`, status, degradation reasons, and active-session count. This does not spawn a probe process; use `sharkrail doctor` for active verification.

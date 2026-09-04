@@ -16,6 +16,7 @@ from .capabilities import Capability, collect
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .models import CommandMode, CommandSpec, ResourceLimits
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
+from .schema import protocol_schema
 from .sessions import Session, SessionManager
 
 MAX_REQUEST_BYTES = 1024 * 1024
@@ -44,7 +45,13 @@ class JsonRpcRuntime:
         try:
             if not isinstance(request, dict):
                 raise JsonRpcError(-32600, "Invalid Request")
-            request_id = request.get("id")
+            candidate_id = request.get("id")
+            if "id" in request and (
+                isinstance(candidate_id, bool)
+                or not isinstance(candidate_id, (str, int, type(None)))
+            ):
+                raise JsonRpcError(-32600, "Invalid Request")
+            request_id = candidate_id
             if request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
                 raise JsonRpcError(-32600, "Invalid Request")
             params = request.get("params", {})
@@ -101,6 +108,8 @@ class JsonRpcRuntime:
             }
         if method == "runtime.capabilities":
             return _capability_dict(collect())
+        if method == "runtime.schema":
+            return protocol_schema()
         if method == "runtime.stats":
             return {
                 **self.manager.stats(),
