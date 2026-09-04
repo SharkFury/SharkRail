@@ -1,5 +1,7 @@
 import asyncio
 import os
+import sys
+from types import ModuleType
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -11,6 +13,7 @@ from sharkrail.backends import (
     WindowsPipeBackend,
     WindowsProcessHandle,
     WindowsPtyBackend,
+    WindowsPtyProcessHandle,
     pipe_backend,
     pty_backend,
 )
@@ -122,5 +125,57 @@ def test_windows_pipe_dispose_also_closes_standard_input():
 
         job.close.assert_called_once_with()
         dispose.assert_awaited_once_with(handle)
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_start_bounds_relay_reads():
+    async def _run() -> None:
+        native = Mock(pid=123)
+        pty_process = Mock()
+        pty_process.spawn.return_value = native
+        winpty = ModuleType("winpty")
+        winpty.PtyProcess = pty_process
+        job = Mock()
+        backend = WindowsPtyBackend()
+
+        with (
+            patch.dict(sys.modules, {"winpty": winpty}),
+            patch("sharkrail.backends.os.name", "nt"),
+            patch("sharkrail.backends.WindowsJob", return_value=job),
+        ):
+            handle = await backend.start(CommandSpec("tool", ()))
+
+        assert isinstance(handle, WindowsPtyProcessHandle)
+        native.fileobj.settimeout.assert_called_once_with(backend._read_poll_seconds)
+        job.assign.assert_called_once_with(123)
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_read_uses_quiet_post_exit_as_eof():
+    async def _run() -> None:
+        process = Mock(returncode=0)
+        native = Mock()
+        native.read.side_effect = TimeoutError
+        handle = WindowsPtyProcessHandle(process=process, native_pty=native)
+
+        output = await WindowsPtyBackend().read(handle)
+
+        assert output == b""
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_read_ignores_empty_live_poll():
+    async def _run() -> None:
+        process = Mock(returncode=None)
+        native = Mock()
+        native.read.side_effect = ["", "ready"]
+        handle = WindowsPtyProcessHandle(process=process, native_pty=native)
+
+        output = await WindowsPtyBackend().read(handle)
+
+        assert output == b"ready"
 
     asyncio.run(_run())

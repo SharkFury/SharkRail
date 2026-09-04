@@ -352,6 +352,8 @@ class _WinPtyAsyncProcess:
 class WindowsPtyBackend(ExecutionBackend):
     """ConPTY backend powered by pywinpty on supported Windows systems."""
 
+    _read_poll_seconds = 0.1
+
     async def start(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
         if os.name != "nt":
             raise NotImplementedError("ConPTY is only available on Windows")
@@ -369,6 +371,13 @@ class WindowsPtyBackend(ExecutionBackend):
             env=environment,
             dimensions=(24, 80),
         )
+        # pywinpty can leave its relay socket open after the child exits, so a
+        # permanently blocking read cannot reliably observe terminal EOF.
+        # A short socket deadline lets read() combine output availability with
+        # the authoritative child exit status.
+        relay = getattr(native, "fileobj", None)
+        if relay is not None and hasattr(relay, "settimeout"):
+            relay.settimeout(self._read_poll_seconds)
         process = _WinPtyAsyncProcess(native)
         job = WindowsJob(
             memory_bytes=spec.resources.memory_bytes,
@@ -416,11 +425,19 @@ class WindowsPtyBackend(ExecutionBackend):
         del size  # pywinpty 3.x returns all currently available characters.
         if handle.output_closed:
             return b""
-        try:
-            text = await asyncio.to_thread(handle.native_pty.read)
-        except EOFError:
-            return b""
-        return text.encode("utf-8")
+        while True:
+            try:
+                text = await asyncio.to_thread(handle.native_pty.read)
+            except EOFError:
+                return b""
+            except TimeoutError:
+                if handle.process.returncode is not None:
+                    return b""
+                continue
+            if text:
+                return text.encode("utf-8")
+            if handle.process.returncode is not None:
+                return b""
 
     async def resize(self, handle: WindowsPtyProcessHandle, cols: int, rows: int) -> None:
         if cols <= 0 or rows <= 0:
