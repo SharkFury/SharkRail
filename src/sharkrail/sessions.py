@@ -545,12 +545,33 @@ class SessionManager:
                     policy,
                     step_handler=report_step,
                 )
-            except TimeoutError as err:
+            except Exception as err:
+                cleanup_succeeded = session.handle.process.returncode is not None
+                cleanup_error: str | None = None
+                if not cleanup_succeeded:
+                    try:
+                        if (
+                            CancellationStep.KILL_TREE.value
+                            not in session.cancellation_steps
+                        ):
+                            await report_step(CancellationStep.KILL_TREE)
+                        await asyncio.wait_for(
+                            session.backend.kill_tree(session.handle),
+                            self._termination_timeout_ms / 1000,
+                        )
+                        await asyncio.wait_for(
+                            self._wait_for_process_exit(session.handle),
+                            self._termination_timeout_ms / 1000,
+                        )
+                        cleanup_succeeded = True
+                    except Exception as cleanup:  # noqa: BLE001 - cleanup boundary
+                        cleanup_error = str(cleanup)
                 await session.emit(
                     LifecycleEventType.CANCELLATION_COMPLETED,
                     {
                         "success": False,
                         "steps": session.cancellation_steps,
+                        "cleanup_succeeded": cleanup_succeeded,
                         "duration_ms": round(
                             (time.monotonic() - cancellation_started) * 1000,
                             3,
@@ -562,6 +583,14 @@ class SessionManager:
                         code=ErrorCode.TERMINATION_FAILED,
                         stage=ErrorStage.RUN,
                         message=str(err),
+                        native={
+                            "cleanup_succeeded": cleanup_succeeded,
+                            **(
+                                {"cleanup_error": cleanup_error}
+                                if cleanup_error is not None
+                                else {}
+                            ),
+                        },
                     ),
                     err,
                 ) from err
@@ -690,6 +719,7 @@ class SessionManager:
         if session_id in self._disposed_session_ids:
             return
         session = self.get(session_id)
+        cancellation_error: SharkRailError | None = None
         if session.state not in {
             SessionState.COMPLETED,
             SessionState.FAILED,
@@ -699,7 +729,11 @@ class SessionManager:
                 await self.cancel(session_id, CancellationPolicy(skip_interrupt=True))
             except SharkRailError as err:
                 if err.error.code != ErrorCode.INVALID_SESSION_STATE:
-                    raise
+                    cancellation_error = err
+            except Exception as err:  # noqa: BLE001 - backend boundary
+                cancellation_error = SharkRailError(
+                    self._backend_error(err, ErrorStage.DISPOSE), err
+                )
             await self.wait(session_id, timeout_ms=self._shutdown_timeout_ms)
         try:
             await asyncio.wait_for(
@@ -719,6 +753,8 @@ class SessionManager:
             session.transition(SessionState.DISPOSED)
         self._sessions.pop(session_id, None)
         self._disposed_session_ids.append(session_id)
+        if cancellation_error is not None:
+            raise cancellation_error
 
     async def shutdown(self) -> None:
         """Dispose every session when the owning transport shuts down."""

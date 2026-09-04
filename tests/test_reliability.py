@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sharkrail.backends import ExecutionBackend, ProcessHandle
+from sharkrail.backends import ExecutionBackend, PipeBackend, ProcessHandle
 from sharkrail.errors import ErrorCode, SharkRailError
 from sharkrail.executor import LifecycleEventType
 from sharkrail.models import CommandSpec
@@ -85,6 +85,39 @@ def test_failed_start_releases_admission_reservation():
         assert manager.stats()["sessions"]["active"] == 1
         await manager.wait(session.id)
         await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_dispose_releases_backend_after_cancellation_error():
+    class FailingInterruptBackend(PipeBackend):
+        disposed = False
+
+        async def interrupt(self, handle: ProcessHandle) -> None:
+            raise RuntimeError("injected interrupt failure")
+
+        async def dispose(self, handle: ProcessHandle) -> None:
+            self.disposed = True
+            await super().dispose(handle)
+
+    async def _run() -> None:
+        backend = FailingInterruptBackend()
+        manager = SessionManager(backend=backend, termination_timeout_ms=1000)
+        session = await manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import time; time.sleep(10)"),
+            )
+        )
+
+        with pytest.raises(SharkRailError) as raised:
+            await manager.cancel(session.id)
+        assert raised.value.error.code == ErrorCode.TERMINATION_FAILED
+        assert raised.value.error.native["cleanup_succeeded"] is True
+
+        await manager.dispose(session.id)
+        assert backend.disposed is True
+        assert manager.session_count == 0
 
     asyncio.run(_run())
 
