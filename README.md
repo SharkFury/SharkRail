@@ -42,7 +42,7 @@ errors, and discoverable capabilities.
 - Ordered lifecycle events, resumable cursors, and lossless Base64 output
 - Bounded output, input, events, sessions, RPC concurrency, and execution time
 - Memory, CPU-time, process-count, wall-time, and idle-time policies
-- JSON-RPC 2.0 over stdio plus an asynchronous Python API
+- MCP and JSON-RPC 2.0 over stdio plus an asynchronous Python API
 - Runtime health, statistics, trace IDs, redacted audit logs, and OpenTelemetry hooks
 - Runtime-probed capability negotiation and active `doctor` diagnostics
 
@@ -83,6 +83,12 @@ See [BUILD.md](BUILD.md) for a complete developer setup.
 
 ## Integrate with an agent
 
+Start the MCP server for hosts that support tool discovery:
+
+```bash
+sharkrail mcp
+```
+
 Start the newline-delimited JSON-RPC service:
 
 ```bash
@@ -120,7 +126,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The complete wire contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+See [agent integrations](docs/INTEGRATIONS.md) for MCP configuration and
+[the protocol reference](docs/PROTOCOL.md) for the complete native wire contract.
 
 ## Cross-platform contract
 

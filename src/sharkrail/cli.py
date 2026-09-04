@@ -12,6 +12,7 @@ from . import __version__
 from .capabilities import collect
 from .doctor import diagnose, format_report, write_diagnostic_bundle
 from .executor import CommandRunner
+from .mcp import McpRuntime
 from .models import CommandMode, ResourceLimits
 from .policy import ExecutionPolicy
 from .protocol import JsonRpcRuntime, serve_stdio
@@ -77,6 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_event_log_arguments(serve)
     _add_policy_argument(serve)
+
+    mcp = subparsers.add_parser("mcp", help="Serve SharkRail tools over MCP stdio")
+    _add_event_log_arguments(mcp)
+    _add_policy_argument(mcp)
 
     doctor = subparsers.add_parser("doctor", help="Diagnose local runtime capabilities")
     doctor.add_argument("--json", action="store_true", help="Print machine-readable output")
@@ -262,7 +267,7 @@ def main() -> int:
         )
         return 0
 
-    if ns.command == "serve":
+    if ns.command in {"serve", "mcp"}:
         recorder = (
             EventRecorder(
                 Path(ns.event_log),
@@ -272,9 +277,8 @@ def main() -> int:
             if ns.event_log
             else None
         )
-        runtime = JsonRpcRuntime(
-            SessionManager(event_recorder=recorder, policy=ns.execution_policy)
-        )
+        manager = SessionManager(event_recorder=recorder, policy=ns.execution_policy)
+        runtime = McpRuntime(manager) if ns.command == "mcp" else JsonRpcRuntime(manager)
         asyncio.run(serve_stdio(runtime=runtime))
         return 0
 

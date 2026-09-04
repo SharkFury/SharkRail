@@ -13,6 +13,7 @@ integrating, operating, or contributing to the runtime.
 ## Integrate
 
 - [Protocol reference](PROTOCOL.md): JSON-RPC methods, events, results, and errors
+- [Agent integrations](INTEGRATIONS.md): MCP, JSON-RPC, and Python entry points
 - [Configuration and limits](CONFIGURATION.md): CLI controls and runtime defaults
 - [Versioning policy](VERSIONING.md): package, protocol, and compatibility rules
 

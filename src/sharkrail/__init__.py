@@ -12,6 +12,7 @@ from .executor import (
     LifecycleEventType,
 )
 from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
+from .mcp import MCP_PROTOCOL_VERSION, McpRuntime
 from .models import CommandMode, CommandSpec, ResourceLimits
 from .policy import ExecutionPolicy, PolicyViolation
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
@@ -20,6 +21,7 @@ from .sessions import Session, SessionManager
 from .telemetry import EventRecorder, configure_logging, configure_opentelemetry
 
 __all__ = [
+    "MCP_PROTOCOL_VERSION",
     "CancellationPolicy",
     "CancellationStep",
     "Capability",
@@ -35,6 +37,7 @@ __all__ = [
     "InvalidTransition",
     "LifecycleEvent",
     "LifecycleEventType",
+    "McpRuntime",
     "PolicyViolation",
     "ResourceLimits",
     "Session",
