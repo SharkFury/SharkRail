@@ -64,6 +64,15 @@ python -m build
 python -m twine check dist/*
 ```
 
+Then install the wheel into a fresh environment and test the installed artifact,
+not the source tree:
+
+```bash
+python -m venv .wheel-venv
+.wheel-venv/bin/python -m pip install dist/*.whl
+.wheel-venv/bin/python .github/scripts/wheel_smoke.py
+```
+
 The build must produce one source distribution and one platform-independent
 wheel. The wheel includes the MIT license and PEP 639 `License-Expression`
 metadata.

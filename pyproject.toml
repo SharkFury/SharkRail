@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
+    "hypothesis>=6.120,<7",
     "pytest>=8",
     "pytest-cov>=6",
     "pytest-timeout>=2.3",
