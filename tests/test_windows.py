@@ -15,6 +15,8 @@ from sharkrail.backends import (
     WindowsProcessHandle,
     WindowsPtyBackend,
     WindowsPtyProcessHandle,
+    _child_environment,
+    _windows_terminal_input,
     _WinPtyAsyncProcess,
     pipe_backend,
     pty_backend,
@@ -45,6 +47,26 @@ def test_platform_pipe_backend_selection():
         assert isinstance(backend, WindowsPipeBackend)
     else:
         assert type(backend) is PipeBackend
+
+
+def test_clean_windows_environment_keeps_only_loader_bootstrap_and_overlay():
+    with (
+        patch.dict(
+            "sharkrail.backends.os.environ",
+            {"SYSTEMROOT": r"C:\Windows", "SECRET": "do-not-copy"},
+            clear=True,
+        ),
+        patch("sharkrail.backends.os.name", "nt"),
+    ):
+        environment = _child_environment(
+            CommandSpec("tool", (), env={"SAFE": "yes"}, inherit_env=False)
+        )
+
+    assert environment == {"SYSTEMROOT": r"C:\Windows", "SAFE": "yes"}
+
+
+def test_windows_terminal_input_translates_lf_without_doubling_crlf():
+    assert _windows_terminal_input(b"first\nsecond\r\n") == b"first\r\nsecond\r\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="non-Windows guard assertion")
@@ -129,6 +151,19 @@ def test_windows_pipe_dispose_also_closes_standard_input():
 
         job.close.assert_called_once_with()
         dispose.assert_awaited_once_with(handle)
+
+    asyncio.run(_run())
+
+
+def test_windows_pipe_kill_waits_for_job_processes_to_exit():
+    async def _run() -> None:
+        job = Mock()
+        handle = WindowsProcessHandle(process=FakeProcess(), job=job)
+
+        await WindowsPipeBackend().kill_tree(handle)
+
+        job.terminate.assert_called_once_with()
+        job.wait_empty.assert_called_once_with(1000)
 
     asyncio.run(_run())
 

@@ -34,6 +34,6 @@ assert "pipe" in payload["modes"]
 
 command = run("run", "--json", "--", sys.executable, "-c", "print('wheel-ok')")
 assert command.returncode == 0, command.stderr
-assert json.loads(command.stdout)["stdout"] == "wheel-ok\n"
+assert json.loads(command.stdout)["stdout"].splitlines() == ["wheel-ok"]
 
 print("installed wheel smoke passed")

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 import sys
 from types import SimpleNamespace
@@ -48,8 +49,9 @@ def test_session_streams_input_output_and_events():
             for event in session.events
             if event.kind == LifecycleEventType.PROCESS_STARTED
         )
-        assert started.payload["process_tree"] == "process_group"
-        assert manager.inspect(session.id)["process_tree"] == "process_group"
+        expected_tree = "job_object" if os.name == "nt" else "process_group"
+        assert started.payload["process_tree"] == expected_tree
+        assert manager.inspect(session.id)["process_tree"] == expected_tree
 
     asyncio.run(_run())
 
@@ -384,6 +386,16 @@ def test_windows_drain_timeout_attempts_descendant_cleanup_after_root_exit():
             assert session.handle.process.returncode == 0
             child_pid = int(result.stdout.strip())
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = (
+                ctypes.c_ulong,
+                ctypes.c_int,
+                ctypes.c_ulong,
+            )
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+            kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+            kernel32.CloseHandle.restype = ctypes.c_int
             handle = kernel32.OpenProcess(0x00100000, False, child_pid)
             if handle:
                 try:

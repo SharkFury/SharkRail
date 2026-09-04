@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import NoReturn
 
 
 class WindowsJob:
@@ -32,6 +33,13 @@ class WindowsJob:
     def terminate(self, exit_code: int = 1) -> None:
         if not self._closed:
             _terminate_job(self._handle, exit_code)
+
+    def wait_empty(self, timeout_ms: int) -> bool:
+        """Wait until the Job has no active processes after termination."""
+
+        if self._closed:
+            return True
+        return _wait_for_job(self._handle, timeout_ms)
 
     def close(self) -> None:
         if self._closed:
@@ -115,11 +123,13 @@ if os.name == "nt":
     _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     _kernel32.TerminateJobObject.restype = wintypes.BOOL
+    _kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
 
-def _raise_last_error(operation: str) -> None:
+def _raise_last_error(operation: str) -> NoReturn:
     error = ctypes.get_last_error()  # type: ignore[attr-defined]
     raise OSError(error, f"{operation} failed", None, error)
 
@@ -171,6 +181,15 @@ def _assign_process(job: int, pid: int) -> None:
 def _terminate_job(job: int, exit_code: int) -> None:
     if not _kernel32.TerminateJobObject(job, exit_code):
         _raise_last_error("TerminateJobObject")
+
+
+def _wait_for_job(job: int, timeout_ms: int) -> bool:
+    result = _kernel32.WaitForSingleObject(job, timeout_ms)
+    if result == 0:
+        return True
+    if result == 258:
+        return False
+    _raise_last_error("WaitForSingleObject")
 
 
 def _close_handle(handle: int) -> None:

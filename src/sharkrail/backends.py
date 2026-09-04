@@ -28,6 +28,28 @@ if os.name != "nt":
     import termios
 
 
+def _child_environment(spec: CommandSpec) -> dict[str, str]:
+    """Build a child environment with the Windows process bootstrap minimum."""
+
+    environment = os.environ.copy() if spec.inherit_env else {}
+    if not spec.inherit_env and os.name == "nt":
+        # CreateProcess and the Windows loader require SystemRoot for some
+        # executables. Keeping this OS bootstrap value does not re-enable
+        # arbitrary parent-environment inheritance.
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            environment["SYSTEMROOT"] = system_root
+    if spec.env is not None:
+        environment.update(spec.env)
+    return environment
+
+
+def _windows_terminal_input(data: bytes) -> bytes:
+    """Translate portable LF input to ConPTY enter sequences without doubling CRLF."""
+
+    return data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+
+
 @dataclass
 class ProcessHandle:
     process: Any
@@ -116,9 +138,7 @@ class PipeBackend(ExecutionBackend):
     """Pipe execution using a dedicated process group for tree operations."""
 
     async def start(self, spec: CommandSpec) -> ProcessHandle:
-        environment = os.environ.copy() if spec.inherit_env else {}
-        if spec.env is not None:
-            environment.update(spec.env)
+        environment = _child_environment(spec)
         kwargs: dict[str, Any] = {
             "cwd": spec.cwd,
             "env": environment,
@@ -244,7 +264,8 @@ class WindowsPipeBackend(PipeBackend):
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
         if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
-            handle.job.terminate()
+            await asyncio.to_thread(handle.job.terminate)
+            await asyncio.to_thread(handle.job.wait_empty, 1000)
             return
         await super().kill_tree(handle)
 
@@ -265,9 +286,7 @@ class PtyBackend(ExecutionBackend):
     async def start(self, spec: CommandSpec) -> PtyProcessHandle:
         if os.name == "nt":
             raise NotImplementedError("ConPTY backend is not available in this build")
-        environment = os.environ.copy() if spec.inherit_env else {}
-        if spec.env is not None:
-            environment.update(spec.env)
+        environment = _child_environment(spec)
         master_fd, slave_fd = pty.openpty()
         try:
             process = await asyncio.create_subprocess_exec(
@@ -389,9 +408,7 @@ class WindowsPtyBackend(ExecutionBackend):
             from winpty import PtyProcess
         except ImportError as err:
             raise RuntimeError("Windows PTY support requires pywinpty") from err
-        environment = os.environ.copy() if spec.inherit_env else {}
-        if spec.env is not None:
-            environment.update(spec.env)
+        environment = _child_environment(spec)
         native = await asyncio.to_thread(
             PtyProcess.spawn,
             spec.argv_list,
@@ -430,7 +447,8 @@ class WindowsPtyBackend(ExecutionBackend):
         if pty_handle.stdin_closed:
             raise RuntimeError("stdin is closed")
         await asyncio.to_thread(
-            pty_handle.native_pty.write, data.decode("utf-8", errors="replace")
+            pty_handle.native_pty.write,
+            _windows_terminal_input(data).decode("utf-8", errors="replace"),
         )
 
     async def close_stdin(self, handle: ProcessHandle) -> None:
@@ -452,7 +470,8 @@ class WindowsPtyBackend(ExecutionBackend):
     async def kill_tree(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
         if pty_handle.job is not None:
-            pty_handle.job.terminate()
+            await asyncio.to_thread(pty_handle.job.terminate)
+            await asyncio.to_thread(pty_handle.job.wait_empty, 1000)
         elif pty_handle.process.returncode is None:
             await asyncio.to_thread(pty_handle.native_pty.terminate, True)
 

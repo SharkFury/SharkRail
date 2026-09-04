@@ -77,7 +77,7 @@ def test_mcp_run_returns_structured_output_and_disposes_session():
         assert response is not None
         result = response["result"]
         assert result["isError"] is False
-        assert result["structuredContent"]["stdout"] == "mcp-ok\n"
+        assert result["structuredContent"]["stdout"].splitlines() == ["mcp-ok"]
         assert runtime.manager.session_count == 0
 
     asyncio.run(_run())
@@ -124,7 +124,9 @@ def test_mcp_persistent_session_lifecycle():
             )
         )
         assert waited is not None
-        assert waited["result"]["structuredContent"]["result"]["stdout"] == "HELLO\n"
+        assert waited["result"]["structuredContent"]["result"][
+            "stdout"
+        ].splitlines() == ["HELLO"]
         await runtime.dispatch(
             _request(
                 "tools/call",

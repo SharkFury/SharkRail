@@ -19,6 +19,12 @@ CLI, Python API, and JSON-RPC service observe the same core behavior.
 | Process count | `--process-count N` | `spec.resources.process_count` | Descendant/process policy where supported |
 | Target | `--target native\|wsl` | `spec.target` | Native OS or WSL routing |
 
+`inherit_env=false` (or CLI `--clean-env`) removes application environment
+variables. On Windows, SharkRail retains `SYSTEMROOT` when present because the
+Windows loader and `CreateProcess` require that bootstrap value for some
+executables. Explicit request environment values are then applied as an
+overlay.
+
 Use `sharkrail run --help`, `sharkrail shell --help`, and
 `runtime.capabilities` as the executable source of truth. Resource policies
 follow OS semantics and may expose degradation reasons.
