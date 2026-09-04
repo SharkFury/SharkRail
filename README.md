@@ -24,6 +24,12 @@ API. SharkRail earns its additional dependency when a product needs verifiable
 completion, bounded output, interactive terminal semantics, process-tree
 cleanup, or one honest contract across operating systems.
 
+**Positioning: SharkRail provides bounded, observable, and verifiable command
+supervision for long-running and concurrent processes started by cross-platform
+agent workflows.** It supervises each process session; it does not provide
+workflow orchestration, retries, cross-session memory, checkpoints, runtime
+restart recovery, or LLM context management.
+
 ## Why SharkRail?
 
 Starting a subprocess is easy. Supervising one for an autonomous agent is not.
@@ -39,6 +45,12 @@ implicit:
 
 SharkRail turns those answers into structured results, ordered events, stable
 errors, and discoverable capabilities.
+
+Native and standard process APIs provide the underlying mechanisms; callers can
+assemble their own supervision semantics from them. SharkRail's value is a
+reusable contract for lifecycle, bounded output, cancellation, interactive
+sessions, concurrency limits, and explicit platform differences. See the full
+[native API comparison and examples](docs/VALUE.md#native-process-apis-vs-sharkrail).
 
 The project's public goal is larger than one implementation: preserve the
 contract, reference runtime, conformance tests, and real-world failure cases as

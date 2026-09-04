@@ -27,6 +27,16 @@ boundaries the current runtime cannot cross.
 
 ## The public value thesis
 
+In the simplest terms:
+
+> SharkRail gives every process session started by an agent workflow bounded,
+> observable, and verifiable supervision.
+
+This is process supervision within one runtime lifecycle, not workflow or LLM
+context management. SharkRail retains bounded session events and incremental
+output while that runtime is alive. The agent remains responsible for workflow
+orchestration, retries, cross-session memory, checkpoints, and restart recovery.
+
 For a short, non-interactive command on one platform, use the standard library.
 Adding SharkRail would create more concepts and another failure layer without
 enough benefit. The project earns its place when execution is a durable product
@@ -40,6 +50,41 @@ capability and one or more of these conditions apply:
 - limits, truncation, degraded cleanup, and unsupported capabilities must be
   machine-observable; or
 - multiple agent hosts are duplicating the same supervision code.
+
+## Native process APIs vs. SharkRail
+
+SharkRail is built on native process, pipe, signal, PTY/ConPTY, process-group,
+and Job Object APIs. The difference is not whether a command can start; it is
+who owns the supervision work after it starts.
+
+| Concern | Direct use of native/standard APIs | SharkRail value |
+| --- | --- | --- |
+| Intended use | One short command controlled by one caller | Long-running command steps, bounded concurrent sessions, interactive tools, or cross-platform work |
+| Lifecycle | Start a process and obtain a handle/exit status | Track acceptance, start, exit, drain, completion, failure, and disposal explicitly |
+| Long tasks | Caller implements polling, deadlines, and state retention | In-runtime session, non-destructive wait, wall/idle deadlines, and cursor-based incremental reads |
+| Output | Caller drains pipes and invents buffering/backpressure policy | Separate pipe streams or merged terminal stream with bounds, offsets, raw bytes, and loss accounting |
+| Cancellation | Signal/terminate a process; descendant behavior is caller-specific | Serialize cancellation and report escalation through interrupt, terminate, and owned-tree kill |
+| Concurrent sessions | Caller coordinates starts, input races, quotas, and shutdown | Bound active sessions and input/output while serializing mutations per session |
+| Interactive tools | Caller selects and integrates a platform PTY | Expose pipe and PTY/ConPTY through the same session operations, including input and resize |
+| Cross-platform behavior | Caller translates quoting, shells, signals, and ownership mechanisms | Preserve structured intent and expose verified, degraded, or best-effort capability evidence |
+| Failure result | Caller defines and normalizes result semantics | Stable error code/stage, completion reason, ordered events, and explicit loss/degradation |
+
+SharkRail therefore does not make a one-line command inherently better. It
+removes repeated supervision work when execution outlives one call or must be
+managed as part of an autonomous system.
+
+### Concrete examples
+
+- **Long test suite:** stream output from a long-running test, distinguish root
+  exit from final pipe drain, and return a classified timeout instead of hanging.
+- **Parallel worktrees:** run builds and linters across multiple worktrees within
+  configured session, output, input, and shutdown limits.
+- **Development server:** keep a server session open while browser tests run,
+  read only new output with a cursor, then cancel and clean up owned descendants.
+- **Interactive debugger or REPL:** use PTY/ConPTY input and resize without
+  changing the caller-facing lifecycle model.
+- **Windows plus WSL:** preserve one execution intent while reporting the real
+  cleanup boundary of the Windows launcher and Linux descendants separately.
 
 SharkRail turns repeated private glue into four shared public assets:
 
@@ -113,7 +158,6 @@ than a broad runtime whose completion and cleanup behavior cannot be proven.
 
 | Alternative | Use it when | SharkRail's role |
 | --- | --- | --- |
-| `subprocess`, `asyncio`, or a platform process API | Commands are short, non-interactive, and controlled by one application on one platform | Do not replace it unless supervision failures justify the extra runtime |
 | PTY libraries such as pywinpty or portable-pty | The main requirement is opening and driving a terminal | Build on or complement them with lifecycle, limits, events, and protocol semantics |
 | Terminal applications and multiplexers | A human needs to see and operate a terminal | Complement them; SharkRail has no terminal UI |
 | Containers, VMs, AppContainer, or Windows Sandbox | Untrusted code requires isolation | Compose with them; SharkRail is not a security sandbox |
