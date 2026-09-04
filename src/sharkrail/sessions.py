@@ -793,8 +793,18 @@ class SessionManager:
                 monitor_error = self._backend_error(err, ErrorStage.DRAIN)
 
         try:
-            await session.backend.dispose(session.handle)
+            await asyncio.wait_for(
+                session.backend.dispose(session.handle),
+                self._termination_timeout_ms / 1000,
+            )
             disposed = True
+        except asyncio.TimeoutError:
+            if monitor_error is None:
+                monitor_error = ExecutionError(
+                    code=ErrorCode.TERMINATION_FAILED,
+                    stage=ErrorStage.DISPOSE,
+                    message="backend disposal exceeded its deadline",
+                )
         except Exception as err:  # noqa: BLE001 - backend boundary
             if monitor_error is None:
                 monitor_error = self._backend_error(err, ErrorStage.DISPOSE)

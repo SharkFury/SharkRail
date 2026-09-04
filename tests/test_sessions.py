@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
-from sharkrail.errors import ErrorCode, SharkRailError
+from sharkrail.backends import PipeBackend
+from sharkrail.errors import ErrorCode, ErrorStage, SharkRailError
 from sharkrail.executor import CompletionReason, LifecycleEventType
 from sharkrail.models import CommandMode, CommandSpec
 from sharkrail.sessions import SessionManager, SessionState
@@ -184,6 +185,32 @@ def test_monitor_failure_reaches_failed_terminal_state():
         assert session.state == SessionState.FAILED
         assert session.events[-2].kind == LifecycleEventType.SESSION_ERROR
         assert session.events[-1].kind == LifecycleEventType.SESSION_COMPLETED
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_monitor_bounds_backend_disposal():
+    async def _run() -> None:
+        backend = PipeBackend()
+        manager = SessionManager(backend=backend, termination_timeout_ms=25)
+
+        async def stalled_dispose(_handle: object) -> None:
+            await asyncio.Event().wait()
+
+        with patch.object(backend, "dispose", side_effect=stalled_dispose):
+            session = await manager.start(
+                CommandSpec(executable=sys.executable, argv=("-c", "pass"))
+            )
+            result = await asyncio.wait_for(manager.wait(session.id), timeout=1)
+
+        assert result is not None
+        assert result.reason == CompletionReason.FAILED
+        assert result.error is not None
+        assert result.error.code == ErrorCode.TERMINATION_FAILED
+        assert result.error.stage == ErrorStage.DISPOSE
+        assert session.state == SessionState.FAILED
+        assert session.events[-1].payload["resources_disposed"] is False
         await manager.dispose(session.id)
 
     asyncio.run(_run())

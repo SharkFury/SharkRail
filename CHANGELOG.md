@@ -11,6 +11,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Re-license SharkRail under the MIT License.
 - Reorganize project, integration, operations, governance, and support documentation.
 
+### Fixed
+
+- Bound backend disposal inside the session monitor so a stuck pipe close cannot
+  prevent a session from reaching a terminal state.
+
 ## 0.1.0 - 2026-09-03
 
 ### Added
