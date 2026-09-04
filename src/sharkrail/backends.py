@@ -208,6 +208,18 @@ class WindowsPipeBackend(PipeBackend):
         )
         try:
             job.assign(handle.pid)
+        except OSError:
+            job.close()
+            if _has_resource_limits(spec):
+                handle.process.kill()
+                await handle.process.wait()
+                raise
+            # Hosted Windows runners and other parent Job environments can
+            # reject nested assignment. An ultra-short process may also exit
+            # between CreateProcess and AssignProcessToJobObject. Commands
+            # without Job-backed resource limits can still use the portable
+            # taskkill /T fallback implemented by PipeBackend.kill_tree.
+            return WindowsProcessHandle(process=handle.process)
         except BaseException:
             job.close()
             handle.process.kill()
@@ -225,6 +237,7 @@ class WindowsPipeBackend(PipeBackend):
         if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
             handle.job.close()
             handle.job = None
+        await super().dispose(handle)
 
 
 def pipe_backend() -> PipeBackend:
@@ -450,6 +463,18 @@ def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:
             )
 
     return apply_limits
+
+
+def _has_resource_limits(spec: CommandSpec) -> bool:
+    limits = spec.resources
+    return any(
+        value is not None
+        for value in (
+            limits.memory_bytes,
+            limits.cpu_time_seconds,
+            limits.process_count,
+        )
+    )
 
 
 def _as_pty(handle: ProcessHandle) -> PtyProcessHandle:
