@@ -7,6 +7,13 @@ def test_command_spec_validation_ok():
     assert spec.argv_list == ["echo", "hello"]
 
 
+def test_pty_command_can_start_executable_without_arguments():
+    spec = CommandSpec(executable="python", argv=(), mode=CommandMode.PTY)
+
+    spec.validate()
+    assert spec.argv_list == ["python"]
+
+
 def test_command_spec_validation_empty_executable():
     try:
         CommandSpec(executable="", argv=()).validate()

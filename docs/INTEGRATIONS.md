@@ -78,7 +78,8 @@ clients.
 - Prefer `pipe` for builds, tests, linters, and scripts. It preserves separate
   stdout and stderr and is easiest to parse.
 - Use `pty` only when a program changes behavior without a terminal or needs
-  interactive input and resize.
+  interactive input and resize. The executable may be started without
+  arguments for REPLs and other programs whose interactive mode is the default.
 - Use direct executable plus argument arrays by default. Select an explicit
   shell only when shell language is part of the requested operation.
 

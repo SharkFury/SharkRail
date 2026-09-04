@@ -145,6 +145,23 @@ def test_persistent_pty_session_supports_resize_and_write():
     asyncio.run(_run())
 
 
+def test_no_argument_pty_supports_repl_input():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=(), mode=CommandMode.PTY)
+        )
+        await manager.write(session.id, b"print('repl-ok')\nexit()\n")
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=10)
+
+        assert result is not None
+        assert result.exit_code == 0
+        assert "repl-ok" in result.stdout
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
 def test_session_manager_enforces_concurrency_limit():
     async def _run() -> None:
         manager = SessionManager(max_active_sessions=1)
