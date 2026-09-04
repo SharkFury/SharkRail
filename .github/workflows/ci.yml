@@ -52,6 +52,16 @@ jobs:
       - name: Test Windows doctor
         if: runner.os == 'Windows' && always()
         run: pytest tests/test_doctor.py
+      - name: Diagnose Windows runtime
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          $report = python -m sharkrail doctor --json
+          if ($LASTEXITCODE -ne 0) {
+            $message = ($report -join " ").Replace("%", "%25")
+            Write-Output "::error title=Windows doctor diagnostics::$message"
+            exit 1
+          }
       - name: Test Windows lifecycle model
         if: runner.os == 'Windows' && always()
         run: pytest tests/test_lifecycle.py
