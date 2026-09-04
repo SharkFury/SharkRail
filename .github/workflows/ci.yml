@@ -46,41 +46,62 @@ jobs:
       - name: Run tests
         if: runner.os != 'Windows'
         run: pytest
-      - name: Test Windows core contracts
-        if: runner.os == 'Windows'
-        run: pytest tests/test_capabilities.py tests/test_doctor.py tests/test_lifecycle.py tests/test_models.py tests/test_output.py tests/test_public_api.py tests/test_routing.py tests/test_windows.py
+      - name: Test Windows capabilities
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_capabilities.py
+      - name: Test Windows doctor
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_doctor.py
+      - name: Test Windows lifecycle model
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_lifecycle.py
+      - name: Test Windows command models
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_models.py
+      - name: Test Windows output capture
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_output.py
+      - name: Test Windows public API
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_public_api.py
+      - name: Test Windows routing
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_routing.py
+      - name: Test Windows platform adapters
+        if: runner.os == 'Windows' && always()
+        run: pytest tests/test_windows.py
       - name: Test Windows pipe stdin
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_backends.py -k supports_stdin
       - name: Test Windows pipe wait and kill
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_backends.py -k wait_for_exit
       - name: Test Windows pipe forced cancel
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_backends.py -k skip_soft_interrupt
       - name: Test Windows pipe environment
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_backends.py -k environment_is_an_overlay
       - name: Test Windows command runner
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_executor.py
       - name: Test Windows lifecycle events
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_lifecycle_events.py
       - name: Test Windows session core
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_sessions.py -k "not persistent_pty"
       - name: Test Windows protocol
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_protocol.py
       - name: Test Windows ConPTY
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_sessions.py -k persistent_pty
       - name: Test Windows CLI
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_cli.py tests/test_pty_backend.py
       - name: Test Windows reliability stress
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && always()
         run: pytest tests/test_reliability.py
       - name: Run compatibility smoke checks
         run: |
