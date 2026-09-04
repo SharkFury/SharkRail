@@ -891,7 +891,10 @@ class SessionManager:
         if timeout_reason is not None:
             try:
                 session.completion_reason = timeout_reason
-                await session.backend.kill_tree(session.handle)
+                await asyncio.wait_for(
+                    session.backend.kill_tree(session.handle),
+                    self._termination_timeout_ms / 1000,
+                )
                 await asyncio.wait_for(
                     asyncio.shield(process_wait),
                     self._termination_timeout_ms / 1000,
@@ -927,7 +930,10 @@ class SessionManager:
                         LifecycleEventType.RESOURCE_LIMIT_HIT,
                         {"resource": "drain_time", "limit_ms": self._drain_timeout_ms},
                     )
-                    await session.backend.kill_tree(session.handle)
+                    await asyncio.wait_for(
+                        session.backend.kill_tree(session.handle),
+                        self._termination_timeout_ms / 1000,
+                    )
                     try:
                         await asyncio.wait_for(
                             asyncio.shield(reader_wait),

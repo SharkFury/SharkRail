@@ -169,10 +169,10 @@ class PipeBackend(ExecutionBackend):
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
         if os.name == "nt":
-            if handle.process.returncode is not None:
-                return
             # taskkill is available on supported Windows versions and provides
-            # tree semantics until the native Job Object backend lands.
+            # tree semantics when Job assignment is unavailable. Attempt it
+            # even after the root exits: descendants can still reference the
+            # root PID as their parent in the process snapshot.
             killer = await asyncio.create_subprocess_exec(
                 "taskkill",
                 "/PID",

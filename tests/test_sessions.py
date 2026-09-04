@@ -362,6 +362,51 @@ def test_drain_timeout_kills_descendants_holding_output_open():
     asyncio.run(_run())
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows process fixture")
+def test_windows_drain_timeout_attempts_descendant_cleanup_after_root_exit():
+    async def _run() -> None:
+        import ctypes
+
+        manager = SessionManager(drain_timeout_ms=100, termination_timeout_ms=2000)
+        code = (
+            "import subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+            "print(child.pid, flush=True)"
+        )
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", code))
+        )
+        try:
+            result = await asyncio.wait_for(manager.wait(session.id), timeout=8)
+            assert result is not None
+            assert result.error is not None
+            assert result.error.code == ErrorCode.DRAIN_TIMEOUT
+            assert session.handle.process.returncode == 0
+            child_pid = int(result.stdout.strip())
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x00100000, False, child_pid)
+            if handle:
+                try:
+                    assert kernel32.WaitForSingleObject(handle, 0) == 0
+                finally:
+                    kernel32.CloseHandle(handle)
+        finally:
+            await manager.shutdown()
+            if "child_pid" in locals():
+                cleanup = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(child_pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await cleanup.wait()
+
+    asyncio.run(_run())
+
+
 def test_cancel_and_dispose_are_idempotent():
     async def _run() -> None:
         manager = SessionManager()
