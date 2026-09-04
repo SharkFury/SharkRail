@@ -84,4 +84,4 @@ SharkRail 与调用者使用相同权限执行程序，不提供恶意代码隔�
 
 ## 许可证
 
-GPL-3.0-only，详见 [LICENSE](LICENSE)。
+MIT，详见 [LICENSE](LICENSE)。

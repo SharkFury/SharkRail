@@ -125,4 +125,4 @@ v0.1 is an implementation release of the local execution runtime. The JSON-RPC p
 
 ## License
 
-GPL-3.0-only. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

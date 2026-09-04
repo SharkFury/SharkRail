@@ -8,7 +8,18 @@ version = "0.1.0"
 description = "Native execution rails for AI agents"
 readme = "README.md"
 requires-python = ">=3.9"
-license = "GPL-3.0-only"
+license = "MIT"
+keywords = ["ai-agents", "automation", "conpty", "process", "pty", "terminal"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Shells",
+]
 dependencies = [
     "pywinpty>=3.0.0; sys_platform == 'win32'",
 ]
@@ -29,7 +40,10 @@ observability = [
 sharkrail = "sharkrail.cli:main"
 
 [project.urls]
-Source = "https://github.com/imlarrychen/SharkRail"
+Changelog = "https://github.com/SharkFury/SharkRail/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/SharkFury/SharkRail/tree/main/docs"
+Issues = "https://github.com/SharkFury/SharkRail/issues"
+Source = "https://github.com/SharkFury/SharkRail"
 
 [tool.ruff]
 target-version = "py39"
