@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.1.0 - 2026-09-04
+
 ### Added
 
 - Host-enforced execution policies for executable, cwd, environment, deadline,
@@ -18,31 +20,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Property-based protocol/output tests and clean installed-wheel smoke tests.
 - Dependabot, CodeQL, OpenSSF Scorecard, CycloneDX SBOM generation, and GitHub
   artifact attestations with commit-pinned CI Actions.
-
-### Changed
-
-- Re-license SharkRail under the MIT License.
-- Reorganize project, integration, operations, governance, and support documentation.
-- Define the project's public-value charter, non-commercial stewardship,
-  evidence model, and feature-admission criteria.
-
-### Fixed
-
-- Decouple root-process exit detection from inherited pipe EOF and bound backend
-  disposal so a stuck pipe close cannot prevent a session from reaching a
-  terminal state.
-- Make concurrent session admission atomic and preserve forced cleanup after a
-  cancellation backend error.
-- Enforce MCP tool input schemas and allow no-argument PTY/REPL commands.
-- Attempt Windows fallback descendant cleanup after root exit and bound the
-  drain-stage kill operation.
-- Attribute CPU resource termination only when the operating system reports the
-  corresponding signal, avoiding false resource-limit diagnoses.
-
-## 0.1.0 - 2026-09-03
-
-### Added
-
 - Concurrent pipe and persistent terminal sessions.
 - Native POSIX PTY and Windows ConPTY support.
 - POSIX process-group and Windows Job Object tree cleanup.
@@ -59,12 +36,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Event timestamps, trace IDs, runtime health/stats, and session inspection.
 - Structured logs, redacted bounded event audits, diagnostic bundles, and optional OpenTelemetry.
 - Windows, Linux, and macOS CI with reliability stress tests and a coverage gate.
-- Tested PyPI trusted-publishing and GitHub Release workflows.
+- PyPI trusted-publishing and GitHub Release workflows.
 
 ### Changed
 
+- Re-license SharkRail under the MIT License.
+- Reorganize project, integration, operations, governance, and support documentation.
+- Define the project's public-value charter, non-commercial stewardship,
+  evidence model, and feature-admission criteria.
 - Unified CLI, Python, and JSON-RPC execution on the supervised session runtime.
 - Guaranteed structured terminal states for backend, drain, termination, and disposal failures.
+
+### Fixed
+
+- Decouple root-process exit detection from inherited pipe EOF and bound backend
+  disposal so a stuck pipe close cannot prevent a session from reaching a
+  terminal state.
+- Make concurrent session admission atomic and preserve forced cleanup after a
+  cancellation backend error.
+- Enforce MCP tool input schemas and allow no-argument PTY/REPL commands.
+- Attempt Windows fallback descendant cleanup after root exit and bound the
+  drain-stage kill operation.
+- Attribute CPU resource termination only when the operating system reports the
+  corresponding signal, avoiding false resource-limit diagnoses.
 
 ## 0.0.1
 
