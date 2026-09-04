@@ -36,6 +36,7 @@ python -m pip install -e ".[test]"
 
 ```bash
 python -m ruff check src tests .github/scripts
+python -m mypy src/sharkrail
 python -m pytest --timeout=20 --cov=sharkrail --cov-report=term-missing --cov-fail-under=70
 python -m compileall src tests
 python .github/scripts/compat_smoke.py

@@ -58,7 +58,7 @@ def shell_command(
         )
 
     if shell == Shell.CMD:
-        argv = ("/d", "/s", "/c", script)
+        argv: tuple[str, ...] = ("/d", "/s", "/c", script)
         executable = "cmd.exe"
     elif shell == Shell.POWERSHELL:
         argv = ("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)

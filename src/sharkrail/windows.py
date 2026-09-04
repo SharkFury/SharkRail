@@ -99,7 +99,7 @@ if os.name == "nt":
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
-    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     _kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
     _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     _kernel32.SetInformationJobObject.argtypes = (
@@ -120,7 +120,7 @@ if os.name == "nt":
 
 
 def _raise_last_error(operation: str) -> None:
-    error = ctypes.get_last_error()
+    error = ctypes.get_last_error()  # type: ignore[attr-defined]
     raise OSError(error, f"{operation} failed", None, error)
 
 

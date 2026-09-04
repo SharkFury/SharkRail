@@ -8,12 +8,13 @@ import json
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Optional, TextIO
+from typing import Any, Optional, Protocol, TextIO, cast
 
 from . import __version__
 from .backends import CancellationPolicy
 from .capabilities import Capability, collect
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
+from .executor import CommandResult, LifecycleEvent
 from .models import CommandMode, CommandSpec, ResourceLimits
 from .routing import Shell, Target, WslOptions, direct_command, shell_command
 from .schema import protocol_schema
@@ -21,6 +22,20 @@ from .sessions import Session, SessionManager
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_PENDING_REQUESTS = 256
+
+
+class StdioRuntime(Protocol):
+    manager: SessionManager
+
+    async def dispatch(self, request: object) -> Optional[dict[str, Any]]: ...
+
+    def _error_response(
+        self,
+        request_id: object,
+        code: int,
+        message: str,
+        data: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -125,12 +140,13 @@ class JsonRpcRuntime:
         if method == "runtime.health":
             capability = collect()
             ready = "pipe" in capability.modes
+            sessions = cast(dict[str, object], self.manager.stats()["sessions"])
             return {
                 "status": "degraded" if capability.degraded_reasons else "ok",
                 "live": True,
                 "ready": ready,
                 "degraded_reasons": capability.degraded_reasons,
-                "active_sessions": self.manager.stats()["sessions"]["active"],
+                "active_sessions": sessions["active"],
             }
         if method == "session.start":
             trace_id = params.get("trace_id")
@@ -217,7 +233,7 @@ class JsonRpcRuntime:
 
 
 async def serve_stdio(
-    runtime: Optional[JsonRpcRuntime] = None,
+    runtime: Optional[StdioRuntime] = None,
     stdin: Optional[TextIO] = None,
     stdout: Optional[TextIO] = None,
     max_request_bytes: int = MAX_REQUEST_BYTES,
@@ -238,6 +254,7 @@ async def serve_stdio(
             stdout.flush()
 
     async def respond(line: str) -> None:
+        response: Optional[dict[str, Any]]
         if len(line.encode("utf-8")) > max_request_bytes:
             error = ExecutionError(
                 code=ErrorCode.RESOURCE_LIMITED,
@@ -420,7 +437,7 @@ def _session_dict(session: Session) -> dict[str, Any]:
     }
 
 
-def _event_dict(event: object) -> dict[str, Any]:
+def _event_dict(event: LifecycleEvent) -> dict[str, Any]:
     return {
         "seq": event.seq,
         "kind": event.kind.value,
@@ -431,7 +448,7 @@ def _event_dict(event: object) -> dict[str, Any]:
     }
 
 
-def _result_dict(result: object) -> dict[str, Any]:
+def _result_dict(result: CommandResult) -> dict[str, Any]:
     return {
         "exit_code": result.exit_code,
         "reason": result.reason.value,

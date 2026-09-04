@@ -30,7 +30,7 @@ if os.name != "nt":
 
 @dataclass
 class ProcessHandle:
-    process: asyncio.subprocess.Process
+    process: Any
     stdin_closed: bool = False
     process_tree: str = "unknown"
     degraded_reasons: tuple[str, ...] = ()
@@ -119,7 +119,7 @@ class PipeBackend(ExecutionBackend):
         environment = os.environ.copy() if spec.inherit_env else {}
         if spec.env is not None:
             environment.update(spec.env)
-        kwargs: dict[str, object] = {
+        kwargs: dict[str, Any] = {
             "cwd": spec.cwd,
             "env": environment,
             "stdin": asyncio.subprocess.PIPE,
@@ -127,7 +127,7 @@ class PipeBackend(ExecutionBackend):
             "stderr": asyncio.subprocess.PIPE,
         }
         if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         else:
             kwargs["start_new_session"] = True
             kwargs["preexec_fn"] = _resource_limiter(spec)
@@ -155,7 +155,7 @@ class PipeBackend(ExecutionBackend):
         if handle.process.returncode is not None:
             return
         if os.name == "nt":
-            handle.process.send_signal(signal.CTRL_BREAK_EVENT)
+            handle.process.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
         else:
             os.killpg(handle.pid, signal.SIGINT)
 
@@ -337,11 +337,12 @@ class PtyBackend(ExecutionBackend):
         dimensions = struct.pack("HHHH", rows, cols, 0, 0)
         fcntl.ioctl(handle.master_fd, termios.TIOCSWINSZ, dimensions)
 
-    async def dispose(self, handle: PtyProcessHandle) -> None:
-        if handle.output_closed:
+    async def dispose(self, handle: ProcessHandle) -> None:
+        pty_handle = _as_pty(handle)
+        if pty_handle.output_closed:
             return
-        handle.output_closed = True
-        os.close(handle.master_fd)
+        pty_handle.output_closed = True
+        os.close(pty_handle.master_fd)
 
 
 class _WinPtyAsyncProcess:
@@ -372,6 +373,7 @@ class _WinPtyAsyncProcess:
     async def wait(self) -> int:
         while self.returncode is None:
             await asyncio.sleep(0.01)
+        assert self._returncode is not None
         return self._returncode
 
 

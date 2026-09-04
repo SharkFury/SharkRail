@@ -30,6 +30,7 @@ test = [
     "pytest-cov>=6",
     "pytest-timeout>=2.3",
     "ruff>=0.11",
+    "mypy>=1.15,<2",
 ]
 observability = [
     "opentelemetry-api>=1.31,<1.42; python_version < '3.10'",
@@ -48,6 +49,16 @@ Source = "https://github.com/SharkFury/SharkRail"
 [tool.ruff]
 target-version = "py39"
 lint.ignore = ["UP045"]
+
+[tool.mypy]
+python_version = "3.9"
+check_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-q"

@@ -35,6 +35,10 @@ The process hosting SharkRail owns the policy. Model-provided tool arguments
 cannot weaken it. Use an absolute policy path and a minimal environment in
 production; see [Configuration](CONFIGURATION.md).
 
+[`examples/mcp_stdio_client.py`](../examples/mcp_stdio_client.py) is a runnable,
+dependency-free host example that performs initialization, discovers tools,
+and calls capability discovery.
+
 ## Native JSON-RPC
 
 Use `sharkrail serve` when the embedding host needs the complete SharkRail

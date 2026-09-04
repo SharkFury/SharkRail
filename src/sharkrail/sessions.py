@@ -12,7 +12,7 @@ import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from .backends import (
@@ -79,7 +79,7 @@ class Session:
     drain_started_monotonic: Optional[float] = None
     last_output_monotonic: Optional[float] = None
     input_bytes: int = 0
-    stream_decoders: dict[str, object] = field(default_factory=dict)
+    stream_decoders: dict[str, Any] = field(default_factory=dict)
     event_recorder: Optional[EventRecorder] = None
     output_retention: Literal["head", "tail"] = "head"
 
@@ -1035,7 +1035,7 @@ class SessionManager:
     async def _read_pty(
         self,
         session: Session,
-        backend: object,
+        backend: Any,
         handle: PtyProcessHandle,
     ) -> None:
         while True:

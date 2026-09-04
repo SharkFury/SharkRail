@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -135,7 +136,7 @@ def _command_names(executable: str) -> set[str]:
     return _normalized((executable, Path(executable).name))
 
 
-def _normalized(values: object) -> set[str]:
+def _normalized(values: Iterable[object]) -> set[str]:
     return {os.path.normcase(str(value)) for value in values}
 
 
