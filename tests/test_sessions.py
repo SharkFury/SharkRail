@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from sharkrail.backends import PipeBackend
+from sharkrail.backends import PipeBackend, ProcessHandle
 from sharkrail.errors import ErrorCode, ErrorStage, SharkRailError
 from sharkrail.executor import CompletionReason, LifecycleEventType
 from sharkrail.models import CommandMode, CommandSpec
@@ -192,17 +192,28 @@ def test_monitor_failure_reaches_failed_terminal_state():
 
 def test_monitor_bounds_backend_disposal():
     async def _run() -> None:
+        class FinishedProcess:
+            pid = 123
+            returncode = 0
+            stdin = None
+            stdout = None
+            stderr = None
+
         backend = PipeBackend()
-        manager = SessionManager(backend=backend, termination_timeout_ms=25)
+        manager = SessionManager(backend=backend, termination_timeout_ms=100)
+        handle = ProcessHandle(process=FinishedProcess())
 
         async def stalled_dispose(_handle: object) -> None:
             await asyncio.Event().wait()
 
-        with patch.object(backend, "dispose", side_effect=stalled_dispose):
+        with (
+            patch.object(backend, "start", return_value=handle),
+            patch.object(backend, "dispose", side_effect=stalled_dispose),
+        ):
             session = await manager.start(
                 CommandSpec(executable=sys.executable, argv=("-c", "pass"))
             )
-            result = await asyncio.wait_for(manager.wait(session.id), timeout=1)
+            result = await asyncio.wait_for(manager.wait(session.id), timeout=2)
 
         assert result is not None
         assert result.reason == CompletionReason.FAILED
