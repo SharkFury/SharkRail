@@ -10,14 +10,28 @@ Tagline: Verifiable process execution for AI agents.
 
 SharkRail defines and implements a vendor-neutral reliability contract for
 processes run by AI agents. Its reference runtime gives agents a predictable
-way to run non-interactive commands and interactive terminal sessions across
-Windows, Linux, macOS, and WSL.
+way to supervise long-running command steps and bounded concurrent sessions,
+including non-interactive and terminal-based work, across Windows, Linux,
+macOS, and WSL.
 
 The product standardizes intent and observable results—not OS mechanisms. Windows uses pipes, ConPTY, and Job Objects. POSIX systems use pipes, PTYs, process groups, and signals. Clients use the same session methods while discovering differences through capabilities.
 
 The [public value design](VALUE.md) defines who benefits, why this work belongs
 in shared open-source infrastructure, how value is proven, and which proposals
 should not enter the core.
+
+In one sentence:
+
+> SharkRail provides bounded, observable, and verifiable command supervision
+> for long-running and concurrent processes started by cross-platform agent
+> workflows.
+
+"Long-running" describes the execution lifecycle, not the model context
+window. SharkRail supervises each process session. The agent owns workflow
+orchestration and retries; SharkRail does not provide cross-session memory,
+checkpoints, runtime restart recovery, or model context management. See the
+[native API comparison](VALUE.md#native-process-apis-vs-sharkrail) for the
+adoption boundary.
 
 ## Users and jobs
 
