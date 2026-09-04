@@ -192,23 +192,31 @@ def test_monitor_failure_reaches_failed_terminal_state():
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX inherited pipe fixture")
 def test_drain_timeout_kills_descendants_holding_output_open():
     async def _run() -> None:
-        manager = SessionManager(drain_timeout_ms=50)
+        # Keep the fixture's internal termination bound well below the outer
+        # test watchdog. Coverage instrumentation and loaded CI runners can add
+        # enough scheduling delay to make equal deadlines race each other.
+        manager = SessionManager(
+            drain_timeout_ms=50,
+            termination_timeout_ms=250,
+        )
         code = (
             "import subprocess,sys; "
-            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(5)']); "
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
             "print('parent exited')"
         )
         session = await manager.start(
             CommandSpec(executable=sys.executable, argv=("-c", code))
         )
-        result = await asyncio.wait_for(manager.wait(session.id), timeout=2)
+        try:
+            result = await asyncio.wait_for(manager.wait(session.id), timeout=5)
 
-        assert result is not None
-        assert result.reason == CompletionReason.RESOURCE_LIMITED
-        assert result.error is not None
-        assert result.error.code == ErrorCode.DRAIN_TIMEOUT
-        assert session.state == SessionState.FAILED
-        await manager.dispose(session.id)
+            assert result is not None
+            assert result.reason == CompletionReason.RESOURCE_LIMITED
+            assert result.error is not None
+            assert result.error.code == ErrorCode.DRAIN_TIMEOUT
+            assert session.state == SessionState.FAILED
+        finally:
+            await manager.shutdown()
 
     asyncio.run(_run())
 
