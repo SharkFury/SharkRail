@@ -4,7 +4,7 @@ Status: v0.1 implementation
 
 Product: SharkRail
 
-Tagline: Native execution rails for AI agents.
+Tagline: Verifiable process execution for AI agents.
 
 ## Product definition
 

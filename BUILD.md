@@ -94,8 +94,9 @@ Windows with Python 3.9, 3.11, and 3.14. CI runs tests, reliability stress
 coverage, Ruff, dependency and compatibility checks, capability smoke tests,
 distribution builds, per-job deadlines, and a 70% coverage gate.
 
-Tagged releases use PyPI trusted publishing and attach the verified artifacts
-to a GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md).
+Tagged releases retest all three operating systems, use PyPI trusted publishing,
+generate a CycloneDX SBOM, attest artifacts, and attach verified assets to a
+GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Generated files
 

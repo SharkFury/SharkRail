@@ -1,0 +1,7 @@
+# Default review owner. Additional platform reviewers will be added as earned.
+* @imlarrychen
+
+# Security and release surfaces require maintainer review.
+/.github/workflows/ @imlarrychen
+/SECURITY.md @imlarrychen
+/src/sharkrail/windows.py @imlarrychen

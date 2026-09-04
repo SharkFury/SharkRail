@@ -9,9 +9,12 @@ def test_community_health_files_exist() -> None:
         "CODE_OF_CONDUCT.md",
         "CONTRIBUTING.md",
         "GOVERNANCE.md",
+        "MAINTAINERS.md",
+        "CITATION.cff",
         "SECURITY.md",
         "SUPPORT.md",
         ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/CODEOWNERS",
         ".github/ISSUE_TEMPLATE/bug_report.yml",
         ".github/ISSUE_TEMPLATE/feature_request.yml",
         ".github/ISSUE_TEMPLATE/config.yml",
@@ -29,6 +32,15 @@ def test_security_reports_use_a_private_channel() -> None:
     assert advisory_url in security
     assert advisory_url in issue_config
     assert "Do not open a public issue" in security
+
+
+def test_maintainer_ownership_is_public_and_reviewable() -> None:
+    maintainers = (REPOSITORY / "MAINTAINERS.md").read_text(encoding="utf-8")
+    owners = (REPOSITORY / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+
+    assert "@imlarrychen" in maintainers
+    assert "@imlarrychen" in owners
+    assert "/.github/workflows/" in owners
 
 
 def test_issue_forms_require_actionable_context() -> None:

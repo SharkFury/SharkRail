@@ -15,6 +15,11 @@ for untrusted workloads.
 Until SharkRail reaches 1.0, security fixes may require compatibility changes.
 Such changes will be called out in release notes.
 
+The maintainers aim to acknowledge a complete report within three business
+days, provide an initial assessment within seven business days, and send a
+status update at least every fourteen days until resolution. These are
+best-effort targets for a volunteer project, not guaranteed service levels.
+
 ## Report a vulnerability
 
 Do not open a public issue or pull request for a suspected vulnerability. Use
@@ -48,6 +53,8 @@ SharkRail:
 
 Direct argv execution avoids unintended shell parsing. Explicit shell execution
 still interprets caller-provided script text and must be treated accordingly.
+The detailed trust boundary and threat/control matrix are in
+[docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
 
 ## Sensitive observability data
 

@@ -43,3 +43,7 @@ They cannot debug private applications without a reproduction, guarantee a
 response time, provide emergency operational support, or make executed programs
 safe. Platform-specific behavior outside SharkRail's ownership boundary may
 need to be reproduced independently.
+
+For production deployments, start with the [operations guide](docs/OPERATIONS.md)
+and include the applicable item from the [test and evidence map](docs/TESTING.md)
+when reporting a reliability regression.

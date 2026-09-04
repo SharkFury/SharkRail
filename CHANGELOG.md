@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- Host-enforced execution policies for executable, cwd, environment, deadline,
+  output, memory, CPU, and process-count constraints.
+- MCP `2025-11-25` tools and an ACP v1 client-side terminal adapter.
+- Bundled protocol JSON Schema, typed-package marker, mypy gate, and runnable
+  MCP host example.
+- Runtime capability verification labels, per-session process-tree degradation,
+  and bounded byte-accurate protocol frame input.
+- Property-based protocol/output tests and clean installed-wheel smoke tests.
+- Dependabot, CodeQL, OpenSSF Scorecard, CycloneDX SBOM generation, and GitHub
+  artifact attestations with commit-pinned CI Actions.
+
 ### Changed
 
 - Re-license SharkRail under the MIT License.
@@ -18,6 +31,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Decouple root-process exit detection from inherited pipe EOF and bound backend
   disposal so a stuck pipe close cannot prevent a session from reaching a
   terminal state.
+- Make concurrent session admission atomic and preserve forced cleanup after a
+  cancellation backend error.
+- Enforce MCP tool input schemas and allow no-argument PTY/REPL commands.
+- Attempt Windows fallback descendant cleanup after root exit and bound the
+  drain-stage kill operation.
+- Attribute CPU resource termination only when the operating system reports the
+  corresponding signal, avoiding false resource-limit diagnoses.
 
 ## 0.1.0 - 2026-09-03
 

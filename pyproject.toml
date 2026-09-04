@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sharkrail"
 version = "0.1.0"
-description = "Native execution rails for AI agents"
+description = "Verifiable process execution for AI agents"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"

@@ -26,9 +26,11 @@ PyPI API token is stored in GitHub.
    git push origin v0.1.0
    ```
 
-The `release` workflow validates the tag, reruns Ruff and all tests, builds and
-checks the wheel and source distribution, publishes them to PyPI, and then
-creates a GitHub Release with generated notes and the same distributions.
+The `release` workflow validates the tag, reruns the complete test suite on
+Windows, Ubuntu, and macOS, runs source quality gates, builds and checks the
+wheel and source distribution, generates a CycloneDX SBOM, and creates GitHub
+artifact attestations. It then publishes only the Python distributions to PyPI
+and attaches the distributions and SBOM to a GitHub Release.
 
 ## Validate without publishing
 
@@ -40,14 +42,26 @@ Locally, the equivalent checks are:
 
 ```bash
 python .github/scripts/check_release.py v0.1.0
-python -m ruff check src tests .github/scripts
-python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src/sharkrail
+python -m pytest --timeout=20
 python -m build
 python -m twine check dist/*
 ```
 
 Before tagging, inspect the built wheel metadata and confirm the package version,
 project URLs, Python requirement, and `License-Expression: MIT` are correct.
+
+After publication, download an artifact and verify that GitHub attested it from
+this repository's release workflow:
+
+```bash
+gh attestation verify sharkrail-0.1.0-py3-none-any.whl --repo SharkFury/SharkRail
+```
+
+Inspect the attached `*.sbom.cdx.json` and verify its root component hash against
+the wheel before using it for dependency inventory.
 
 PyPI versions are immutable. If publishing succeeds but the GitHub Release step
 fails, rerun only after confirming that the existing PyPI files match the

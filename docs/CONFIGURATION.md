@@ -22,6 +22,9 @@ CLI, Python API, and JSON-RPC service observe the same core behavior.
 Use `sharkrail run --help`, `sharkrail shell --help`, and
 `runtime.capabilities` as the executable source of truth. Resource policies
 follow OS semantics and may expose degradation reasons.
+Capability collection is discovery-only and labels its evidence accordingly;
+run `sharkrail doctor` for active probes and inspect each started session for
+the process-tree mechanism actually acquired.
 
 ## SessionManager defaults
 

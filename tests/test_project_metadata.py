@@ -22,3 +22,20 @@ def test_public_documentation_has_no_stale_gpl_reference() -> None:
 
     for path in public_files:
         assert "GPL" not in path.read_text(encoding="utf-8"), path
+
+
+def test_project_tagline_is_consistent() -> None:
+    expected = "Verifiable process execution for AI agents"
+
+    assert expected in (REPOSITORY / "README.md").read_text(encoding="utf-8")
+    assert expected in (REPOSITORY / "docs" / "PRODUCT.md").read_text(encoding="utf-8")
+    assert expected in (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_citation_metadata_tracks_current_release() -> None:
+    citation = (REPOSITORY / "CITATION.cff").read_text(encoding="utf-8")
+
+    assert "cff-version: 1.2.0" in citation
+    assert "license: MIT" in citation
+    assert "version: 0.1.0" in citation
+    assert "https://github.com/SharkFury/SharkRail" in citation

@@ -20,9 +20,10 @@ it makes supervision materially more reliable: output drain, terminal
 semantics, cancellation, descendant cleanup, bounded resources, stable errors,
 and discoverable platform differences.
 
-The project does not promise that commands succeed. It promises that callers
-can determine what happened, what was retained or lost, what cleanup was
-attempted, and which guarantees the current runtime actually supports.
+The project does not promise that commands succeed. Within capabilities backed
+by conformance evidence, it aims to guarantee that callers can determine what
+happened, what was retained or lost, what cleanup was attempted, and which
+boundaries the current runtime cannot cross.
 
 ## The public value thesis
 
@@ -45,13 +46,41 @@ SharkRail turns repeated private glue into four shared public assets:
 | Public asset | Purpose | Current state |
 | --- | --- | --- |
 | Open execution contract | Stable lifecycle, event, error, limit, and capability semantics | Protocol, schema, and reliability contract exist |
-| Native reference runtime | Demonstrate the contract with real platform mechanisms | Python alpha exists for Windows, WSL, Linux, and macOS |
+| Native reference runtime | Demonstrate the contract with real platform mechanisms | Python alpha has Windows and POSIX backends plus WSL routing; guarantee coverage must be shown in the public status matrix |
 | Cross-implementation conformance kit | Let clients and alternative runtimes prove compatible behavior | Tests exist, but a portable kit is still a roadmap priority |
 | Shared failure corpus | Turn hangs, leaked descendants, output loss, encoding faults, and platform surprises into reusable regressions | Cases exist in tests, but need a named, documented corpus |
 
 The project succeeds even when another implementation passes the public
 conformance suite and a client can replace the reference runtime. Adoption of a
 contract is public value; lock-in to one implementation is not.
+
+## Differentiation must be proven
+
+Process APIs, friendly subprocess wrappers, PTY/ConPTY libraries, process-tree
+helpers, and agent terminal protocols already solve substantial parts of this
+problem. SharkRail does not claim process creation, JSON-RPC, PTY allocation, or
+Job Objects as inventions.
+
+Relevant work includes [Execa](https://github.com/sindresorhus/execa),
+[ProcessKit](https://github.com/ZelAnton/ProcessKit-rs),
+[node-pty](https://github.com/microsoft/node-pty),
+[pywinpty](https://github.com/andfoy/pywinpty),
+[portable-pty](https://github.com/wezterm/wezterm/tree/main/pty), and the
+[ACP terminal contract](https://agentclientprotocol.com/protocol/v1/terminals).
+SharkRail should reuse, interoperate with, or contribute upstream to these
+projects where possible and state overlap plainly. Comparative claims require
+reproducible fixtures or benchmarks.
+
+Its defensible public contribution must be the combination of domain-specific
+semantics and portable black-box proof: exit versus drained completion,
+byte-accurate loss accounting, observable cancellation escalation, verified
+containment, and explicit Windows/WSL boundaries. General agent transport and
+task semantics should map to standards such as ACP and MCP rather than compete
+with them. Native libraries should remain replaceable backend building blocks.
+
+Until an implementation-independent conformance kit and independent adopters
+exist, the SharkRail wire protocol is a project contract—not an industry
+standard. Documentation must preserve that distinction.
 
 ## Beneficiaries and jobs
 
@@ -176,6 +205,20 @@ distribution signals, not proof of value.
 Published measurements must include the test environment, iteration count,
 failure definition, known blind spots, and raw reproduction instructions. A
 green badge without a stated boundary is not sufficient evidence.
+
+### Current alpha evidence boundary
+
+The current repository has meaningful tests for session lifecycle, pipe and
+POSIX PTY execution, bounded output, cursor behavior, timeouts, protocol paths,
+and nominal MCP/ACP integration. It also contains Windows backend and Job Object
+code rather than documentation-only placeholders.
+
+That is not yet portable conformance evidence. Native Windows descendant
+cleanup and ConPTY stress paths need stronger non-mock tests; WSL currently has
+stronger routing evidence than cleanup evidence; resource enforcement needs
+real workload verification; and long-running race, leak, and performance
+baselines are not yet published. These gaps are release work, not footnotes to
+be hidden behind a CI badge.
 
 ## Work admission test
 

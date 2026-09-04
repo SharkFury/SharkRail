@@ -15,8 +15,8 @@ SharkRail 的使命，是让自治软件能够可预测地执行本地进程。�
 操作系统本来就能启动进程。SharkRail 只有在显著提高监督可靠性时才有存在价值：输出
 排空、终端语义、取消、后代进程清理、有界资源、稳定错误，以及可发现的平台差异。
 
-项目不保证命令必然成功；它保证调用者能够判断发生了什么、保留或丢失了什么、尝试了
-哪些清理，以及当前运行时真正支持哪些保证。
+项目不保证命令必然成功。在已有一致性证据支持的能力范围内，它追求保证调用者能够
+判断发生了什么、保留或丢失了什么、尝试了哪些清理，以及当前运行时无法跨越哪些边界。
 
 ## 公共价值主张
 
@@ -36,12 +36,35 @@ SharkRail 把重复的私有胶水代码转化为四项公共资产：
 | 公共资产 | 作用 | 当前状态 |
 | --- | --- | --- |
 | 开放执行契约 | 稳定定义生命周期、事件、错误、限制与 capability | 已有协议、schema 与可靠性契约 |
-| 平台原生参考实现 | 用真实系统机制证明契约可以实现 | 已有覆盖 Windows、WSL、Linux、macOS 的 Python alpha |
+| 平台原生参考实现 | 用真实系统机制证明契约可以实现 | Python alpha 已有 Windows/POSIX backend 与 WSL 路由；保证覆盖范围必须由公开状态矩阵说明 |
 | 跨实现一致性套件 | 让客户端和替代运行时证明行为兼容 | 已有内部测试，但可独立运行的套件仍是路线图重点 |
 | 共享失败语料库 | 把挂起、后代残留、输出丢失、编码和平台差异变成可复用回归资产 | 测试中已有案例，但仍需形成具名、可检索的语料库 |
 
 即使其他实现通过公开一致性套件，客户端可以替换掉 Python 参考运行时，项目依然成功。
 契约被采用是公共价值；锁定到单一实现不是。
+
+## 差异化必须被证明
+
+进程 API、易用型 subprocess 封装、PTY/ConPTY 库、进程树工具和 Agent 终端协议，已经
+解决了这个问题的许多部分。SharkRail 不应把创建进程、JSON-RPC、PTY 分配或 Job Object
+描述成自己的发明。
+
+相关项目包括 [Execa](https://github.com/sindresorhus/execa)、
+[ProcessKit](https://github.com/ZelAnton/ProcessKit-rs)、
+[node-pty](https://github.com/microsoft/node-pty)、
+[pywinpty](https://github.com/andfoy/pywinpty)、
+[portable-pty](https://github.com/wezterm/wezterm/tree/main/pty)，以及
+[ACP terminal contract](https://agentclientprotocol.com/protocol/v1/terminals)。SharkRail 应在
+可能时复用、互操作或向上游贡献，并坦率说明能力重叠；任何比较性主张都必须附带可复现
+fixture 或 benchmark。
+
+项目真正可成立的公共贡献，必须是“领域语义 + 可移植黑盒证明”的组合：退出与输出排空
+完成严格分离、字节级损失记账、可观察的取消升级、经过验证的 containment，以及明确的
+Windows/WSL 边界。通用 Agent transport 与 task 语义应映射 ACP、MCP 等现有标准，而不是
+与它们竞争；原生库应保持为可替换的 backend 构件。
+
+在出现与实现无关的一致性套件和独立采用者之前，SharkRail wire protocol 只是项目契约，
+不是行业标准。文档必须始终保留这个区别。
 
 ## 受益者与核心任务
 
@@ -154,6 +177,16 @@ SharkRail 使用 MIT License。该许可证允许个人和公司商业使用、�
 
 公开测量必须包含测试环境、迭代次数、失败定义、已知盲区和原始复现步骤。没有边界说明
 的绿色徽章不是充分证据。
+
+### 当前 alpha 的证据边界
+
+当前仓库已经对会话生命周期、Pipe 与 POSIX PTY、有界输出、读取游标、超时、协议路径
+以及 MCP/ACP 正常集成路径建立了有意义的测试；Windows backend 与 Job Object 也有实际
+代码，并非仅存在于文档。
+
+但这还不是可移植的一致性证据。Windows 原生后代清理与 ConPTY 压力路径需要更强的
+非 Mock 测试；WSL 的路由证据强于清理证据；资源限制需要真实 workload 验证；长时间
+竞态、泄漏与性能基线也尚未公开。这些缺口是发布工作，不能藏在 CI badge 后面。
 
 ## 工作准入测试
 

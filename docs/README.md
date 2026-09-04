@@ -23,6 +23,9 @@ integrating, operating, or contributing to the runtime.
 
 - [Reliability contract](RELIABILITY.md): lifecycle and failure guarantees
 - [Observability](OBSERVABILITY.md): health, metrics, logs, traces, and audit files
+- [Operations guide](OPERATIONS.md): production checklist, alerts, incidents, and rollback
+- [Security model](SECURITY_MODEL.md): trust boundary, threats, controls, and residual risks
+- [Test and evidence map](TESTING.md): guarantees, fixtures, platforms, and claim limits
 - [Troubleshooting](TROUBLESHOOTING.md): diagnosis and common failure modes
 - [Security policy](../SECURITY.md): trust boundary and vulnerability reporting
 - [Support guide](../SUPPORT.md): where and how to ask for help
@@ -33,6 +36,7 @@ integrating, operating, or contributing to the runtime.
 - [Contributing guide](../CONTRIBUTING.md)
 - [Release process](RELEASING.md)
 - [Governance](../GOVERNANCE.md)
+- [Maintainers](../MAINTAINERS.md)
 - [Changelog](../CHANGELOG.md)
 
 Documentation is part of the public contract. A behavior change is incomplete

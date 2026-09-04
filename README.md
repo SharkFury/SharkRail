@@ -3,6 +3,8 @@
 > Verifiable process execution for AI agents.
 
 [![CI](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/SharkFury/SharkRail/actions/workflows/codeql.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://github.com/SharkFury/SharkRail/actions/workflows/scorecard.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/scorecard.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-0A7E8C.svg)](LICENSE)
 [![Protocol: 1.0](https://img.shields.io/badge/protocol-1.0-5B47A5.svg)](docs/PROTOCOL.md)
@@ -183,6 +185,9 @@ Start with the [documentation index](docs/README.md), or go directly to:
 - [Configuration and limits](docs/CONFIGURATION.md)
 - [Reliability contract](docs/RELIABILITY.md)
 - [Observability](docs/OBSERVABILITY.md)
+- [Operations guide](docs/OPERATIONS.md)
+- [Security model](docs/SECURITY_MODEL.md)
+- [Test and evidence map](docs/TESTING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Versioning policy](docs/VERSIONING.md)
 - [Roadmap](ROADMAP.md)
@@ -204,6 +209,7 @@ for non-binding future direction.
 - Use [SUPPORT.md](SUPPORT.md) for help and diagnostic guidance.
 - Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 - Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- Project ownership is listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 ## License
 

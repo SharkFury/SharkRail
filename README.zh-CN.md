@@ -3,6 +3,8 @@
 > 让 AI Agent 的进程执行拥有可验证的结局。
 
 [![CI](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/SharkFury/SharkRail/actions/workflows/codeql.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://github.com/SharkFury/SharkRail/actions/workflows/scorecard.yml/badge.svg)](https://github.com/SharkFury/SharkRail/actions/workflows/scorecard.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-0A7E8C.svg)](LICENSE)
 
@@ -138,6 +140,9 @@ PTY/ConPTY 本身是合并终端流，因此 SharkRail 不会伪造不存在的 
 - [配置与限制](docs/CONFIGURATION.md)
 - [可靠性契约](docs/RELIABILITY.md)
 - [可观测性](docs/OBSERVABILITY.md)
+- [生产运维指南](docs/OPERATIONS.md)
+- [安全模型](docs/SECURITY_MODEL.md)
+- [测试与证据地图](docs/TESTING.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
 - [版本策略](docs/VERSIONING.md)
 - [路线图](ROADMAP.md)

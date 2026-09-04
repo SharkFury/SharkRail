@@ -34,6 +34,9 @@ and evidence model.
 Roles are earned through sustained, constructive contributions and sound
 judgment. Maintainers may invite a contributor into a broader role after public
 discussion of their track record and the project's needs.
+The current roster and responsibility areas are recorded in
+[MAINTAINERS.md](MAINTAINERS.md); CODEOWNERS indicates required review, not a
+separate governance role.
 
 ## Decisions
 

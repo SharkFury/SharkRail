@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If SharkRail contributes to your work, cite the software release you used."
+title: SharkRail
+type: software
+authors:
+  - family-names: Chen
+    given-names: Larry
+    alias: imlarrychen
+repository-code: "https://github.com/SharkFury/SharkRail"
+url: "https://github.com/SharkFury/SharkRail"
+license: MIT
+version: 0.1.0
+date-released: 2026-09-03
