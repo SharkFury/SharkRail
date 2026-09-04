@@ -14,6 +14,7 @@ from sharkrail.backends import (
     WindowsProcessHandle,
     WindowsPtyBackend,
     WindowsPtyProcessHandle,
+    _WinPtyAsyncProcess,
     pipe_backend,
     pty_backend,
 )
@@ -177,5 +178,38 @@ def test_windows_pty_read_ignores_empty_live_poll():
         output = await WindowsPtyBackend().read(handle)
 
         assert output == b"ready"
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_process_prefers_child_exit_status_over_relay_liveness():
+    native = Mock(pid=123, exitstatus=0)
+    native.isalive.return_value = True
+
+    process = _WinPtyAsyncProcess(native)
+
+    assert process.returncode == 0
+    native.isalive.assert_not_called()
+
+
+def test_windows_pty_process_wait_polls_child_exit_status():
+    async def _run() -> None:
+        class Native:
+            pid = 123
+
+            def __init__(self):
+                self.statuses = iter((None, 0))
+
+            @property
+            def exitstatus(self):
+                return next(self.statuses)
+
+            def isalive(self):
+                return True
+
+        native = Native()
+        process = _WinPtyAsyncProcess(native)
+
+        assert await process.wait() == 0
 
     asyncio.run(_run())

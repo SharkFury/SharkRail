@@ -340,12 +340,20 @@ class _WinPtyAsyncProcess:
 
     @property
     def returncode(self) -> int | None:
-        if self._returncode is None and not self.native.isalive():
-            self._returncode = self.native.exitstatus or 0
+        if self._returncode is None:
+            # On ConPTY, pywinpty can keep its relay alive after the child has
+            # exited. get_exitstatus() is the authoritative child status and
+            # must be checked before the broader PTY liveness flag.
+            exitstatus = self.native.exitstatus
+            if exitstatus is not None:
+                self._returncode = exitstatus
+            elif not self.native.isalive():
+                self._returncode = self.native.exitstatus or 0
         return self._returncode
 
     async def wait(self) -> int:
-        self._returncode = await asyncio.to_thread(self.native.wait)
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
         return self._returncode
 
 
