@@ -164,6 +164,39 @@ def test_mcp_reports_host_policy_denial_as_tool_error():
     asyncio.run(_run())
 
 
+def test_mcp_strictly_validates_tool_input_schema():
+    async def _run() -> None:
+        runtime = McpRuntime()
+        await _initialize(runtime)
+        cases = [
+            {
+                "name": "sharkrail_run",
+                "arguments": {"executable": sys.executable, "unexpected": True},
+            },
+            {
+                "name": "sharkrail_run",
+                "arguments": {"executable": sys.executable, "timeoutMs": -1},
+            },
+            {
+                "name": "sharkrail_session_write",
+                "arguments": {"sessionId": "s", "text": "x", "dataBase64": "eA=="},
+            },
+        ]
+
+        for index, arguments in enumerate(cases):
+            response = await runtime.dispatch(
+                _request("tools/call", arguments, request_id=index + 10)
+            )
+            assert response is not None
+            result = response["result"]
+            assert result["isError"] is True
+            assert (
+                result["structuredContent"]["error"]["code"] == "INVALID_TOOL_ARGUMENTS"
+            )
+
+    asyncio.run(_run())
+
+
 def test_mcp_stdio_handshake_and_tool_listing():
     async def _run() -> None:
         messages = [

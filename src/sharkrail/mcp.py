@@ -116,9 +116,20 @@ class McpRuntime:
             if not isinstance(arguments, dict):
                 raise TypeError("arguments must be an object")
             try:
+                _validate_tool_arguments(name, arguments)
                 return await self._call_tool(name, arguments)
             except SharkRailError as err:
                 return _tool_result({"error": err.error.to_dict()}, is_error=True)
+            except (KeyError, TypeError, ValueError) as err:
+                return _tool_result(
+                    {
+                        "error": {
+                            "code": "INVALID_TOOL_ARGUMENTS",
+                            "message": str(err),
+                        }
+                    },
+                    is_error=True,
+                )
         raise McpError(-32601, "Method not found", {"method": method})
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -384,3 +395,60 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": session,
         },
     ]
+
+
+def _validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
+    definitions = {tool["name"]: tool for tool in _tool_definitions()}
+    try:
+        schema = definitions[name]["inputSchema"]
+    except KeyError as err:
+        raise ValueError(f"unknown tool: {name}") from err
+    _validate_schema(arguments, schema, path="arguments")
+
+
+def _validate_schema(value: Any, schema: dict[str, Any], *, path: str) -> None:
+    expected = schema.get("type")
+    if expected == "object":
+        if not isinstance(value, dict):
+            raise TypeError(f"{path} must be an object")
+        required = schema.get("required", [])
+        for key in required:
+            if key not in value:
+                raise ValueError(f"{path}.{key} is required")
+        properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties", True)
+        for key, item in value.items():
+            if key in properties:
+                _validate_schema(item, properties[key], path=f"{path}.{key}")
+            elif additional is False:
+                raise ValueError(f"{path}.{key} is not allowed")
+            elif isinstance(additional, dict):
+                _validate_schema(item, additional, path=f"{path}.{key}")
+        alternatives = schema.get("oneOf")
+        if alternatives is not None:
+            matches = sum(
+                all(key in value for key in option.get("required", []))
+                for option in alternatives
+            )
+            if matches != 1:
+                raise ValueError(f"{path} must match exactly one input form")
+    elif expected == "array":
+        if not isinstance(value, list):
+            raise TypeError(f"{path} must be an array")
+        item_schema = schema.get("items", {})
+        for index, item in enumerate(value):
+            _validate_schema(item, item_schema, path=f"{path}[{index}]")
+    elif expected == "string":
+        if not isinstance(value, str):
+            raise TypeError(f"{path} must be a string")
+        if len(value) < schema.get("minLength", 0):
+            raise ValueError(f"{path} is shorter than the minimum length")
+    elif expected == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{path} must be an integer")
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ValueError(f"{path} is below the minimum")
+    elif expected == "boolean" and not isinstance(value, bool):
+        raise TypeError(f"{path} must be a boolean")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path} must be one of {schema['enum']}")
