@@ -946,6 +946,12 @@ class SessionManager:
 
     @staticmethod
     async def _wait_for_process_exit(handle: ProcessHandle) -> int:
+        # PTY adapters own their output channel independently from asyncio's
+        # subprocess pipe transports. In particular, pywinpty updates its
+        # cached exit status from wait(), so polling returncode would never
+        # observe completion for a short-lived ConPTY process.
+        if isinstance(handle, PtyProcessHandle):
+            return await handle.process.wait()
         while handle.process.returncode is None:
             await asyncio.sleep(0.01)
         return handle.process.returncode

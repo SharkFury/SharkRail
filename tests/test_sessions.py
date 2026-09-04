@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from sharkrail.backends import PipeBackend, ProcessHandle
+from sharkrail.backends import PipeBackend, ProcessHandle, PtyProcessHandle
 from sharkrail.errors import ErrorCode, ErrorStage, SharkRailError
 from sharkrail.executor import CompletionReason, LifecycleEventType
 from sharkrail.models import CommandMode, CommandSpec
@@ -223,6 +223,34 @@ def test_monitor_bounds_backend_disposal():
         assert session.state == SessionState.FAILED
         assert session.events[-1].payload["resources_disposed"] is False
         await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_pty_exit_detection_calls_adapter_wait():
+    async def _run() -> None:
+        class WaitDrivenProcess:
+            pid = 123
+            returncode = None
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def __init__(self):
+                self.wait_called = False
+
+            async def wait(self) -> int:
+                self.wait_called = True
+                self.returncode = 0
+                return 0
+
+        process = WaitDrivenProcess()
+        handle = PtyProcessHandle(process=process)
+
+        exit_code = await SessionManager._wait_for_process_exit(handle)
+
+        assert exit_code == 0
+        assert process.wait_called is True
 
     asyncio.run(_run())
 
