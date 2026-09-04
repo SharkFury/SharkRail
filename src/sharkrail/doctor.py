@@ -72,10 +72,22 @@ async def _probe_execution(mode: CommandMode) -> Check:
         healthy = result is not None and result.exit_code == 0 and "sharkrail-probe" in result.stdout
         if mode == CommandMode.PTY:
             healthy = healthy and result is not None and "True" in result.stdout
+        if healthy:
+            detail = "active start/write/drain/exit probe passed"
+        elif result is None:
+            detail = "active execution probe exceeded its completion deadline"
+        else:
+            error_code = result.error.code.value if result.error is not None else "none"
+            detail = (
+                "active execution probe failed: "
+                f"reason={result.reason.value}, exit_code={result.exit_code}, "
+                f"marker_seen={'sharkrail-probe' in result.stdout}, "
+                f"tty_seen={'True' in result.stdout}, error={error_code}"
+            )
         return Check(
             mode.value,
             "pass" if healthy else "fail",
-            "active start/write/drain/exit probe passed" if healthy else "active execution probe failed",
+            detail,
             round((monotonic() - started) * 1000, 3),
         )
     except Exception as error:  # noqa: BLE001 - diagnostic boundary

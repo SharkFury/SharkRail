@@ -1,6 +1,15 @@
+import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-from sharkrail.doctor import diagnose, format_report, write_diagnostic_bundle
+from sharkrail.doctor import (
+    _probe_execution,
+    diagnose,
+    format_report,
+    write_diagnostic_bundle,
+)
+from sharkrail.models import CommandMode
 
 
 def test_doctor_report_is_safe_and_structured():
@@ -41,3 +50,25 @@ def test_diagnostic_bundle_is_structured_and_secret_free(tmp_path):
     assert payload["doctor"]["healthy"] is True
     assert "environment" not in payload
     assert "argv" not in payload
+
+
+def test_failed_probe_reports_structured_completion_details():
+    manager = Mock()
+    manager.start = AsyncMock(return_value=SimpleNamespace(id="probe"))
+    manager.wait = AsyncMock(
+        return_value=SimpleNamespace(
+            exit_code=1,
+            stdout="sharkrail-probe True",
+            reason=SimpleNamespace(value="resource_limited"),
+            error=SimpleNamespace(code=SimpleNamespace(value="drain_timeout")),
+        )
+    )
+    manager.shutdown = AsyncMock()
+
+    with patch("sharkrail.doctor.SessionManager", return_value=manager):
+        check = asyncio.run(_probe_execution(CommandMode.PIPE))
+
+    assert check.status == "fail"
+    assert "reason=resource_limited" in check.detail
+    assert "error=drain_timeout" in check.detail
+    manager.shutdown.assert_awaited_once_with()
