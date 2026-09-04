@@ -36,7 +36,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Event timestamps, trace IDs, runtime health/stats, and session inspection.
 - Structured logs, redacted bounded event audits, diagnostic bundles, and optional OpenTelemetry.
 - Windows, Linux, and macOS CI with reliability stress tests and a coverage gate.
-- PyPI trusted-publishing and GitHub Release workflows.
+- GitHub Release workflow with signed distributions and SBOM assets; PyPI
+  publication is explicitly deferred while the project application is pending.
 
 ### Changed
 
