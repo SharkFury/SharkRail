@@ -2,6 +2,7 @@
 
 __version__ = "0.1.0"
 
+from .acp import AcpTerminalAdapter
 from .backends import CancellationPolicy, CancellationStep
 from .capabilities import Capability, collect
 from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
@@ -22,6 +23,7 @@ from .telemetry import EventRecorder, configure_logging, configure_opentelemetry
 
 __all__ = [
     "MCP_PROTOCOL_VERSION",
+    "AcpTerminalAdapter",
     "CancellationPolicy",
     "CancellationStep",
     "Capability",

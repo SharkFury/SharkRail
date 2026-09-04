@@ -41,6 +41,27 @@ Use `sharkrail serve` when the embedding host needs the complete SharkRail
 session contract, including health, statistics, resize, EOF, inspection, and
 schema discovery. See [Protocol](PROTOCOL.md).
 
+## ACP client terminal provider
+
+ACP sends terminal requests from an agent to its client. An ACP client can
+delegate those methods to `AcpTerminalAdapter`:
+
+```python
+from sharkrail import AcpTerminalAdapter
+
+terminals = AcpTerminalAdapter()
+
+# In the ACP client's request router:
+response = await terminals.handle(method, params)
+```
+
+The adapter implements ACP v1 `terminal/create`, `terminal/output`,
+`terminal/wait_for_exit`, `terminal/kill`, and `terminal/release`. Each terminal
+is bound to its ACP `sessionId`. `outputByteLimit` retains the newest output,
+truncates only at a valid UTF-8 boundary, and reports `truncated` as required by
+ACP. The embedding client remains responsible for the rest of ACP and for
+calling `terminal/release`.
+
 ## Python
 
 The asynchronous Python API is best for an agent implemented in the same

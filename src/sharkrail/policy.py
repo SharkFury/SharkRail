@@ -127,7 +127,7 @@ class ExecutionPolicy:
     def from_json(cls, path: Path) -> ExecutionPolicy:
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
-            raise ValueError("execution policy must be a JSON object")
+            raise TypeError("execution policy must be a JSON object")
         return cls.from_dict(value)
 
 
@@ -169,7 +169,7 @@ def _optional_strings(value: dict[str, Any], key: str) -> frozenset[str] | None:
 def _boolean(value: dict[str, Any], key: str, default: bool) -> bool:
     raw = value.get(key, default)
     if not isinstance(raw, bool):
-        raise ValueError(f"{key} must be a boolean")
+        raise TypeError(f"{key} must be a boolean")
     return raw
 
 

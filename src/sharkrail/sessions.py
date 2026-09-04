@@ -12,7 +12,7 @@ import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 from uuid import uuid4
 
 from .backends import (
@@ -81,6 +81,7 @@ class Session:
     input_bytes: int = 0
     stream_decoders: dict[str, object] = field(default_factory=dict)
     event_recorder: Optional[EventRecorder] = None
+    output_retention: Literal["head", "tail"] = "head"
 
     @property
     def state(self) -> SessionState:
@@ -129,6 +130,9 @@ class Session:
             remaining = max(0, self.max_output_bytes - retained)
         kept = data[:remaining]
         dropped = len(data) - len(kept)
+        if self.output_retention == "tail":
+            kept = data
+            dropped = 0
         if stream == "stderr":
             self.stderr.extend(kept)
             kind = LifecycleEventType.STDERR
@@ -138,6 +142,15 @@ class Session:
         else:
             self.stdout.extend(kept)
             kind = LifecycleEventType.STDOUT
+
+        if self.output_retention == "tail" and self.max_output_bytes is not None:
+            overflow = max(0, len(self.stdout) + len(self.stderr) - self.max_output_bytes)
+            if overflow:
+                del self.stdout[:overflow]
+                dropped = overflow
+            if len(kept) > self.max_output_bytes:
+                kept = kept[-self.max_output_bytes :] if self.max_output_bytes else b""
+                offset += len(data) - len(kept)
 
         if kept and self.output_event_count < self.max_output_events:
             decoder = self.stream_decoders.get(stream)
@@ -253,6 +266,7 @@ class SessionManager:
         max_output_bytes: Optional[int] = None,
         trace_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        output_retention: Literal["head", "tail"] = "head",
     ) -> Session:
         self._prune_completed_sessions()
         requested_monotonic = time.monotonic()
@@ -298,6 +312,10 @@ class SessionManager:
             raise self._request_error("idle_timeout_ms must be positive")
         if max_output_bytes is not None and max_output_bytes < 0:
             raise self._request_error("max_output_bytes must be non-negative")
+        if output_retention not in {"head", "tail"}:
+            raise self._request_error("output_retention must be head or tail")
+        if output_retention == "tail" and spec.mode != CommandMode.PTY:
+            raise self._request_error("tail output retention requires PTY mode")
         backend = self._backend or (
             pty_backend() if spec.mode == CommandMode.PTY else pipe_backend()
         )
@@ -339,6 +357,7 @@ class SessionManager:
             created_monotonic=requested_monotonic,
             started_monotonic=time.monotonic(),
             event_recorder=self._event_recorder,
+            output_retention=output_retention,
         )
         self._sessions[session.id] = session
         self._started_sessions += 1

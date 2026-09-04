@@ -224,7 +224,7 @@ def main() -> int:
     if getattr(ns, "policy", None):
         try:
             ns.execution_policy = ExecutionPolicy.from_json(Path(ns.policy))
-        except (OSError, ValueError, json.JSONDecodeError) as err:
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as err:
             parser.error(f"invalid execution policy: {err}")
 
     if ns.command in {"run", "shell"}:

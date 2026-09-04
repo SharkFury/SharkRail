@@ -47,7 +47,7 @@ class CommandSpec:
         if self.env is not None and any(not key or "=" in key for key in self.env):
             raise ValueError("environment contains an invalid variable name")
         if not isinstance(self.inherit_env, bool):
-            raise ValueError("inherit_env must be a boolean")
+            raise TypeError("inherit_env must be a boolean")
         if self.mode == CommandMode.PTY and not self.argv:
             raise ValueError("PTY mode requires at least one argument")
         self.resources.validate()
