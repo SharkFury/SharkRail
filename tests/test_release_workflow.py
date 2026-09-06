@@ -52,6 +52,10 @@ def test_release_workflow_publishes_github_release_without_pypi() -> None:
     assert "pypa/gh-action-pypi-publish@" not in workflow
     assert "needs: [build, publish-pypi]" not in workflow
     assert "gh release create" in workflow
+    assert '--repo "${GITHUB_REPOSITORY}"' in workflow
+    assert workflow.index("gh release create") < workflow.index(
+        '--repo "${GITHUB_REPOSITORY}"'
+    )
 
 
 def test_release_retests_platforms_and_publishes_provenance() -> None:
