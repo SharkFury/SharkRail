@@ -3,8 +3,8 @@ import base64
 import io
 import sys
 
-from sharkrail.models import CommandSpec
-from sharkrail.protocol import JsonRpcRuntime, serve_stdio
+from sharkrail.core.models import CommandSpec
+from sharkrail.integrations.protocol import JsonRpcRuntime, serve_stdio
 
 
 def request(

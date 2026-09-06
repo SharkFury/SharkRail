@@ -9,16 +9,16 @@ import json
 from pathlib import Path
 
 from . import __version__
-from .capabilities import collect
-from .doctor import diagnose, format_report, write_diagnostic_bundle
-from .executor import CommandRunner
-from .mcp import McpRuntime
-from .models import CommandMode, ResourceLimits
-from .policy import ExecutionPolicy
-from .protocol import JsonRpcRuntime, serve_stdio
-from .routing import Shell, Target, WslOptions, direct_command, shell_command
-from .sessions import SessionManager
-from .telemetry import EventRecorder
+from .core.models import CommandMode, ResourceLimits
+from .integrations.mcp import McpRuntime
+from .integrations.protocol import JsonRpcRuntime, serve_stdio
+from .observability.telemetry import EventRecorder
+from .runtime.capabilities import collect
+from .runtime.doctor import diagnose, format_report, write_diagnostic_bundle
+from .runtime.executor import CommandRunner
+from .runtime.policy import ExecutionPolicy
+from .runtime.routing import Shell, Target, WslOptions, direct_command, shell_command
+from .runtime.sessions import SessionManager
 
 
 def build_parser() -> argparse.ArgumentParser:

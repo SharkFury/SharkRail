@@ -10,15 +10,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, TextIO, cast
 
-from . import __version__
-from .backends import CancellationPolicy
-from .capabilities import Capability, collect
-from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
-from .executor import CommandResult, LifecycleEvent
-from .models import CommandMode, CommandSpec, ResourceLimits
-from .routing import Shell, Target, WslOptions, direct_command, shell_command
+from .. import __version__
+from ..core.errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
+from ..core.models import CommandMode, CommandSpec, ResourceLimits
+from ..runtime.backends import CancellationPolicy
+from ..runtime.capabilities import Capability, collect
+from ..runtime.executor import CommandResult, LifecycleEvent
+from ..runtime.routing import Shell, Target, WslOptions, direct_command, shell_command
+from ..runtime.sessions import Session, SessionManager
 from .schema import protocol_schema
-from .sessions import Session, SessionManager
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_PENDING_REQUESTS = 256

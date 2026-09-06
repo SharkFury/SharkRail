@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from sharkrail.errors import ErrorCode, SharkRailError
-from sharkrail.executor import CommandRunner
-from sharkrail.models import CommandSpec, ResourceLimits
-from sharkrail.policy import ExecutionPolicy, PolicyViolation
-from sharkrail.sessions import SessionManager
+from sharkrail.core.errors import ErrorCode, SharkRailError
+from sharkrail.core.models import CommandSpec, ResourceLimits
+from sharkrail.runtime.executor import CommandRunner
+from sharkrail.runtime.policy import ExecutionPolicy, PolicyViolation
+from sharkrail.runtime.sessions import SessionManager
 
 
 def test_policy_allows_named_executable_and_bounded_request(tmp_path: Path):

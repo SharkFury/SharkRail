@@ -7,9 +7,9 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from .models import CommandMode
-from .routing import direct_command
-from .sessions import Session, SessionManager
+from ..core.models import CommandMode
+from ..runtime.routing import direct_command
+from ..runtime.sessions import Session, SessionManager
 
 
 class AcpTerminalAdapter:

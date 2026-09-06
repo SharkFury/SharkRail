@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from .models import CommandMode, CommandSpec, ResourceLimits
+from ..core.models import CommandMode, CommandSpec, ResourceLimits
 
 
 class Shell(str, Enum):

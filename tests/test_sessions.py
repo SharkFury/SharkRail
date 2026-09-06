@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from sharkrail.backends import PipeBackend, ProcessHandle, PtyProcessHandle
-from sharkrail.errors import ErrorCode, ErrorStage, SharkRailError
-from sharkrail.executor import CompletionReason, LifecycleEventType
-from sharkrail.models import CommandMode, CommandSpec, ResourceLimits
-from sharkrail.sessions import SessionManager, SessionState
+from sharkrail.core.errors import ErrorCode, ErrorStage, SharkRailError
+from sharkrail.core.models import CommandMode, CommandSpec, ResourceLimits
+from sharkrail.runtime.backends import PipeBackend, ProcessHandle, PtyProcessHandle
+from sharkrail.runtime.executor import CompletionReason, LifecycleEventType
+from sharkrail.runtime.sessions import SessionManager, SessionState
 
 
 def test_session_streams_input_output_and_events():
@@ -247,7 +247,7 @@ def test_monitor_failure_reaches_failed_terminal_state():
     async def _run() -> None:
         manager = SessionManager()
         with patch(
-            "sharkrail.sessions.Session.append_output",
+            "sharkrail.runtime.sessions.Session.append_output",
             side_effect=OSError("simulated output failure"),
         ):
             session = await manager.start(

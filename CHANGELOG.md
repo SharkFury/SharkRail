@@ -44,6 +44,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Re-license SharkRail under the MIT License.
+- Organize the implementation by architectural responsibility under `core`,
+  `runtime`, `integrations`, and `observability` packages while preserving the
+  package-level public API.
 - Reorganize project, integration, operations, governance, and support documentation.
 - Define the project's public-value charter, non-commercial stewardship,
   evidence model, and feature-admission criteria.

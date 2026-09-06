@@ -1,8 +1,8 @@
 import asyncio
 import sys
 
-from sharkrail.executor import CommandRunner, LifecycleEventType
-from sharkrail.models import CommandSpec
+from sharkrail.core.models import CommandSpec
+from sharkrail.runtime.executor import CommandRunner, LifecycleEventType
 
 
 def test_command_runner_executes_command():

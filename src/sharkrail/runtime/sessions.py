@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
+from ..core.errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
+from ..core.lifecycle import SessionLifecycle, SessionState
+from ..core.models import CommandMode, CommandSpec
+from ..core.output import capture_output
+from ..observability.telemetry import EventRecorder, log_event, observe_session
 from .backends import (
     CancellationPolicy,
     CancellationStep,
@@ -25,18 +30,13 @@ from .backends import (
     pipe_backend,
     pty_backend,
 )
-from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .executor import (
     CommandResult,
     CompletionReason,
     LifecycleEvent,
     LifecycleEventType,
 )
-from .lifecycle import SessionLifecycle, SessionState
-from .models import CommandMode, CommandSpec
-from .output import capture_output
 from .policy import ExecutionPolicy, PolicyViolation
-from .telemetry import EventRecorder, log_event, observe_session
 
 
 @dataclass

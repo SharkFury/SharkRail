@@ -1,7 +1,7 @@
 from contextlib import ExitStack
 from unittest.mock import patch
 
-from sharkrail.capabilities import collect
+from sharkrail.runtime.capabilities import collect
 
 
 def test_capabilities_contract_shape():
@@ -25,13 +25,15 @@ def test_windows_capabilities_report_missing_optional_runtimes():
 
     with ExitStack() as stack:
         stack.enter_context(
-            patch("sharkrail.capabilities.platform.system", return_value="Windows")
+            patch(
+                "sharkrail.runtime.capabilities.platform.system", return_value="Windows"
+            )
         )
         stack.enter_context(
-            patch("sharkrail.capabilities.find_spec", return_value=None)
+            patch("sharkrail.runtime.capabilities.find_spec", return_value=None)
         )
         stack.enter_context(
-            patch("sharkrail.capabilities.shutil.which", side_effect=executable)
+            patch("sharkrail.runtime.capabilities.shutil.which", side_effect=executable)
         )
         capability = collect()
 

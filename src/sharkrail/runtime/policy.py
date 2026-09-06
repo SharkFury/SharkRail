@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import CommandSpec
+from ..core.models import CommandSpec
 
 
 class PolicyViolation(ValueError):

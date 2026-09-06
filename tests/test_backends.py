@@ -5,14 +5,14 @@ import sys
 
 import pytest
 
-from sharkrail.backends import (
+from sharkrail.core.models import CommandSpec, ResourceLimits
+from sharkrail.runtime.backends import (
     CancellationPolicy,
     CancellationStep,
     PipeBackend,
     cancel_process,
     wait_for_exit,
 )
-from sharkrail.models import CommandSpec, ResourceLimits
 
 
 def test_pipe_backend_supports_stdin_and_eof():
@@ -164,7 +164,7 @@ def test_cancellation_reports_steps_before_attempting_them():
 def test_posix_resource_policy_is_applied_before_exec():
     from unittest.mock import patch
 
-    from sharkrail.backends import _resource_limiter
+    from sharkrail.runtime.backends import _resource_limiter
 
     spec = CommandSpec(
         executable=sys.executable,
@@ -178,7 +178,7 @@ def test_posix_resource_policy_is_applied_before_exec():
     limiter = _resource_limiter(spec)
     assert limiter is not None
 
-    with patch("sharkrail.backends.resource.setrlimit") as set_limit:
+    with patch("sharkrail.runtime.backends.resource.setrlimit") as set_limit:
         limiter()
 
     assert set_limit.call_count == 3

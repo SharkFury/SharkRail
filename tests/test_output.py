@@ -1,6 +1,6 @@
 import pytest
 
-from sharkrail.output import capture_output
+from sharkrail.core.output import capture_output
 
 
 def test_output_budget_is_measured_in_utf8_bytes():

@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from sharkrail.backends import (
+from sharkrail.core.models import CommandSpec, ResourceLimits
+from sharkrail.runtime.backends import (
     PipeBackend,
     ProcessHandle,
     PtyBackend,
@@ -21,8 +22,7 @@ from sharkrail.backends import (
     pipe_backend,
     pty_backend,
 )
-from sharkrail.models import CommandSpec, ResourceLimits
-from sharkrail.windows import WindowsJob
+from sharkrail.runtime.windows import WindowsJob
 
 
 class FakeProcess:
@@ -52,11 +52,11 @@ def test_platform_pipe_backend_selection():
 def test_clean_windows_environment_keeps_only_loader_bootstrap_and_overlay():
     with (
         patch.dict(
-            "sharkrail.backends.os.environ",
+            "sharkrail.runtime.backends.os.environ",
             {"SYSTEMROOT": r"C:\Windows", "SECRET": "do-not-copy"},
             clear=True,
         ),
-        patch("sharkrail.backends.os.name", "nt"),
+        patch("sharkrail.runtime.backends.os.name", "nt"),
     ):
         environment = _child_environment(
             CommandSpec("tool", (), env={"SAFE": "yes"}, inherit_env=False)
@@ -96,7 +96,7 @@ def test_windows_pipe_falls_back_when_job_assignment_is_unavailable():
                 "start",
                 new=AsyncMock(return_value=ProcessHandle(process=process)),
             ),
-            patch("sharkrail.backends.WindowsJob", return_value=job),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
         ):
             handle = await backend.start(CommandSpec("tool", ()))
 
@@ -128,7 +128,7 @@ def test_windows_pipe_requires_job_when_resource_limits_are_requested():
                 "start",
                 new=AsyncMock(return_value=ProcessHandle(process=process)),
             ),
-            patch("sharkrail.backends.WindowsJob", return_value=job),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
             pytest.raises(OSError, match="nested Job assignment"),
         ):
             await backend.start(spec)
@@ -180,8 +180,8 @@ def test_windows_pty_start_bounds_relay_reads():
 
         with (
             patch.dict(sys.modules, {"winpty": winpty}),
-            patch("sharkrail.backends.os.name", "nt"),
-            patch("sharkrail.backends.WindowsJob", return_value=job),
+            patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
         ):
             handle = await backend.start(CommandSpec("tool", ()))
 

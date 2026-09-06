@@ -1,6 +1,6 @@
 import pytest
 
-from sharkrail.lifecycle import InvalidTransition, SessionLifecycle, SessionState
+from sharkrail.core.lifecycle import InvalidTransition, SessionLifecycle, SessionState
 
 
 def test_lifecycle_success_path():

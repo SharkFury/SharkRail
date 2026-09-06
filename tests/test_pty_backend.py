@@ -4,9 +4,9 @@ import sys
 
 import pytest
 
-from sharkrail.backends import PtyBackend, read_pty_output
-from sharkrail.executor import CommandRunner
-from sharkrail.models import CommandMode, CommandSpec
+from sharkrail.core.models import CommandMode, CommandSpec
+from sharkrail.runtime.backends import PtyBackend, read_pty_output
+from sharkrail.runtime.executor import CommandRunner
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX PTY backend")
 

@@ -7,13 +7,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from . import __version__
-from .capabilities import collect
-from .errors import SharkRailError
-from .models import CommandMode, CommandSpec
+from .. import __version__
+from ..core.errors import SharkRailError
+from ..core.models import CommandMode, CommandSpec
+from ..runtime.capabilities import collect
+from ..runtime.routing import direct_command
+from ..runtime.sessions import SessionManager
 from .protocol import _capability_dict, _event_dict, _result_dict
-from .routing import direct_command
-from .sessions import SessionManager
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
 

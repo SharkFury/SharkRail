@@ -1,4 +1,4 @@
-from sharkrail.models import CommandMode, CommandSpec, ResourceLimits
+from sharkrail.core.models import CommandMode, CommandSpec, ResourceLimits
 
 
 def test_command_spec_validation_ok():

@@ -3,10 +3,10 @@ import io
 import json
 import sys
 
-from sharkrail.mcp import MCP_PROTOCOL_VERSION, McpRuntime
-from sharkrail.policy import ExecutionPolicy
-from sharkrail.protocol import serve_stdio
-from sharkrail.sessions import SessionManager
+from sharkrail.integrations.mcp import MCP_PROTOCOL_VERSION, McpRuntime
+from sharkrail.integrations.protocol import serve_stdio
+from sharkrail.runtime.policy import ExecutionPolicy
+from sharkrail.runtime.sessions import SessionManager
 
 
 def _request(method: str, params: dict[str, object], request_id: object = 1):
