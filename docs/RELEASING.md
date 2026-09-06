@@ -1,16 +1,14 @@
 # Releasing SharkRail
 
-SharkRail publishes Python distributions to PyPI through GitHub Actions trusted
-publishing and attaches the same artifacts to a GitHub Release. No long-lived
-PyPI API token is stored in GitHub.
+SharkRail currently publishes signed Python distributions and a CycloneDX SBOM
+as assets on a GitHub Release. PyPI publication is intentionally disabled while
+the `sharkrail` project application is pending.
 
-## One-time repository setup
+## Current release destination
 
-1. Create a GitHub environment named `pypi`. Add required reviewers if releases
-   should require manual approval.
-2. On PyPI, add a trusted publisher for owner `SharkFury`, repository
-   `SharkRail`, workflow `release.yml`, and environment `pypi`. A pending trusted
-   publisher can be configured before the first `sharkrail` release exists.
+The release workflow does not contain a PyPI publishing job and does not require
+a PyPI token or GitHub `pypi` environment. A version tag creates only a GitHub
+Release. Do not upload the generated distributions to PyPI manually.
 
 ## Create a release
 
@@ -29,8 +27,8 @@ PyPI API token is stored in GitHub.
 The `release` workflow validates the tag, reruns the complete test suite on
 Windows, Ubuntu, and macOS, runs source quality gates, builds and checks the
 wheel and source distribution, generates a CycloneDX SBOM, and creates GitHub
-artifact attestations. It then publishes only the Python distributions to PyPI
-and attaches the distributions and SBOM to a GitHub Release.
+artifact attestations. It attaches the distributions and SBOM to a GitHub
+Release without publishing to PyPI.
 
 ## Validate without publishing
 
@@ -53,8 +51,8 @@ python -m twine check dist/*
 Before tagging, inspect the built wheel metadata and confirm the package version,
 project URLs, Python requirement, and `License-Expression: MIT` are correct.
 
-After publication, download an artifact and verify that GitHub attested it from
-this repository's release workflow:
+After the GitHub Release is created, download an artifact and verify that GitHub
+attested it from this repository's release workflow:
 
 ```bash
 gh attestation verify sharkrail-0.1.0-py3-none-any.whl --repo SharkFury/SharkRail
@@ -63,8 +61,21 @@ gh attestation verify sharkrail-0.1.0-py3-none-any.whl --repo SharkFury/SharkRai
 Inspect the attached `*.sbom.cdx.json` and verify its root component hash against
 the wheel before using it for dependency inventory.
 
-PyPI versions are immutable. If publishing succeeds but the GitHub Release step
-fails, rerun only after confirming that the existing PyPI files match the
-workflow artifacts. Never delete and recreate a release tag with different
-contents. If PyPI publication fails before accepting any file, fix the release
-commit and create a new patch version rather than moving a public tag.
+Never delete and recreate a public release tag with different contents. If the
+GitHub Release step fails, preserve the tag and rerun the failed job only after
+confirming that the workflow is still building the tagged commit.
+
+## Enable PyPI later
+
+PyPI publishing must be introduced by a reviewed pull request after the project
+application is approved. That change must:
+
+1. Create a protected GitHub environment named `pypi`.
+2. Configure a PyPI trusted publisher for owner `SharkFury`, repository
+   `SharkRail`, workflow `release.yml`, and environment `pypi`.
+3. Add a tag-only publish job using GitHub OIDC trusted publishing, with no
+   long-lived PyPI API token.
+4. Make GitHub Release creation depend on successful PyPI publication so the
+   published artifacts cannot diverge.
+5. Validate the complete workflow with a new patch version; PyPI versions are
+   immutable and public tags must never be moved.

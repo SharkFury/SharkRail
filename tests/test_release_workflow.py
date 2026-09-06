@@ -41,16 +41,16 @@ def test_release_tag_must_use_strict_semver() -> None:
     assert "vMAJOR.MINOR.PATCH" in result.stderr
 
 
-def test_release_workflow_uses_trusted_publishing_and_version_guard() -> None:
+def test_release_workflow_publishes_github_release_without_pypi() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
     assert 'tags:\n      - "v[0-9]*.[0-9]*.[0-9]*"' in workflow
     assert "if: startsWith(github.ref, 'refs/tags/')" in workflow
     assert 'python .github/scripts/check_release.py "${GITHUB_REF_NAME}"' in workflow
-    assert "environment:\n      name: pypi" in workflow
-    assert "id-token: write" in workflow
-    assert "pypa/gh-action-pypi-publish@" in workflow
+    assert "publish-pypi:" not in workflow
+    assert "pypa/gh-action-pypi-publish@" not in workflow
+    assert "needs: [build, publish-pypi]" not in workflow
     assert "gh release create" in workflow
 
 
