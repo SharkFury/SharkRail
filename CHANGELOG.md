@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+
+- Allow the artifact-only GitHub Release job to verify tags without requiring a
+  checked-out Git repository.
+
 ## 0.1.0 - 2026-09-04
 
 ### Added
