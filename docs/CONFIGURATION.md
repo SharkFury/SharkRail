@@ -90,8 +90,8 @@ Hosts can reject unsafe requests before process creation by passing an
 server accept the same policy as strict JSON:
 
 ```bash
-sharkrail serve --policy ./examples/policy.json
-sharkrail run --policy ./examples/policy.json --clean-env \
+sharkrail serve --policy ./examples/security/policy.json
+sharkrail run --policy ./examples/security/policy.json --clean-env \
   --timeout-ms 30000 --max-output-bytes 1048576 -- python -V
 ```
 

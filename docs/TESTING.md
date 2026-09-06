@@ -12,6 +12,7 @@ program behaves identically on every machine.
 | PTY semantics diverge | isatty, resize, interactive input, ConPTY probe and ACP tail-output tests | Linux, macOS, Windows |
 | Capability claim is stale | active doctor and capability degradation tests | Linux, macOS, Windows |
 | A source checkout hides a packaging defect | sdist/wheel metadata and clean installed-wheel smoke jobs | Linux, macOS, Windows |
+| A documented integration example stops working | every Python file in `examples/` is executed and JSON-validated by `test_examples.py` | Linux, macOS, Windows; unsupported capabilities skip explicitly |
 | Supply-chain workflow drifts | pinned-action, least-privilege, release, SBOM and provenance tests | GitHub Actions |
 
 The CI matrix runs the complete suite on Python 3.9, 3.11, and 3.14 across

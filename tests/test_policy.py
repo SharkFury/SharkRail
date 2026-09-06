@@ -190,7 +190,9 @@ def test_dry_run_still_enforces_policy():
 
 
 def test_repository_policy_example_is_valid():
-    example = Path(__file__).resolve().parents[1] / "examples" / "policy.json"
+    example = (
+        Path(__file__).resolve().parents[1] / "examples" / "security" / "policy.json"
+    )
     policy = ExecutionPolicy.from_json(example)
     assert policy.require_timeout is True
     assert policy.allow_parent_environment is False
