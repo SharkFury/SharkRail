@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from sharkrail.errors import ErrorCode, SharkRailError
-from sharkrail.executor import CommandRunner
-from sharkrail.models import CommandSpec, ResourceLimits
-from sharkrail.policy import ExecutionPolicy, PolicyViolation
-from sharkrail.sessions import SessionManager
+from sharkrail.core.errors import ErrorCode, SharkRailError
+from sharkrail.core.models import CommandSpec, ResourceLimits
+from sharkrail.runtime.executor import CommandRunner
+from sharkrail.runtime.policy import ExecutionPolicy, PolicyViolation
+from sharkrail.runtime.sessions import SessionManager
 
 
 def test_policy_allows_named_executable_and_bounded_request(tmp_path: Path):
@@ -190,7 +190,9 @@ def test_dry_run_still_enforces_policy():
 
 
 def test_repository_policy_example_is_valid():
-    example = Path(__file__).resolve().parents[1] / "examples" / "policy.json"
+    example = (
+        Path(__file__).resolve().parents[1] / "examples" / "security" / "policy.json"
+    )
     policy = ExecutionPolicy.from_json(example)
     assert policy.require_timeout is True
     assert policy.allow_parent_environment is False

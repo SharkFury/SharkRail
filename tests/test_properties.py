@@ -3,9 +3,9 @@ import asyncio
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from sharkrail.mcp import McpRuntime
-from sharkrail.output import capture_output
-from sharkrail.protocol import JsonRpcRuntime
+from sharkrail.core.output import capture_output
+from sharkrail.integrations.mcp import McpRuntime
+from sharkrail.integrations.protocol import JsonRpcRuntime
 
 json_scalars = st.none() | st.booleans() | st.integers() | st.text(max_size=64)
 json_values = st.recursive(

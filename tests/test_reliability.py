@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from sharkrail.backends import ExecutionBackend, PipeBackend, ProcessHandle
-from sharkrail.errors import ErrorCode, SharkRailError
-from sharkrail.executor import LifecycleEventType
-from sharkrail.models import CommandSpec
-from sharkrail.protocol import JsonRpcRuntime
-from sharkrail.sessions import SessionManager
+from sharkrail.core.errors import ErrorCode, SharkRailError
+from sharkrail.core.models import CommandSpec
+from sharkrail.integrations.protocol import JsonRpcRuntime
+from sharkrail.runtime.backends import ExecutionBackend, PipeBackend, ProcessHandle
+from sharkrail.runtime.executor import LifecycleEventType
+from sharkrail.runtime.sessions import SessionManager
 
 
 class _SlowStartBackend(ExecutionBackend):

@@ -113,6 +113,8 @@ sharkrail serve
 ```
 
 完整方法、事件和错误契约见 [协议参考](docs/PROTOCOL.md)。
+所有支持的集成入口和核心执行场景，都可以在
+[`examples/README.md`](examples/README.md) 中找到可运行示例。
 
 ## 跨平台契约
 
@@ -145,6 +147,7 @@ PTY/ConPTY 本身是合并终端流，因此 SharkRail 不会伪造不存在的 
 - [公共价值、维护承诺与证据](docs/VALUE.zh-CN.md)
 - [系统架构](docs/ARCHITECTURE.md)
 - [协议参考](docs/PROTOCOL.md)
+- [按使用场景组织的可运行示例](examples/README.md)
 - [配置与限制](docs/CONFIGURATION.md)
 - [可靠性契约](docs/RELIABILITY.md)
 - [可观测性](docs/OBSERVABILITY.md)

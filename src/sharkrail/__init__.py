@@ -2,24 +2,28 @@
 
 __version__ = "0.1.0"
 
-from .acp import AcpTerminalAdapter
-from .backends import CancellationPolicy, CancellationStep
-from .capabilities import Capability, collect
-from .errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
-from .executor import (
+from .core.errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
+from .core.lifecycle import InvalidTransition, SessionLifecycle, SessionState
+from .core.models import CommandMode, CommandSpec, ResourceLimits
+from .integrations.acp import AcpTerminalAdapter
+from .integrations.mcp import MCP_PROTOCOL_VERSION, McpRuntime
+from .integrations.schema import protocol_schema
+from .observability.telemetry import (
+    EventRecorder,
+    configure_logging,
+    configure_opentelemetry,
+)
+from .runtime.backends import CancellationPolicy, CancellationStep
+from .runtime.capabilities import Capability, collect
+from .runtime.executor import (
     CommandResult,
     CommandRunner,
     LifecycleEvent,
     LifecycleEventType,
 )
-from .lifecycle import InvalidTransition, SessionLifecycle, SessionState
-from .mcp import MCP_PROTOCOL_VERSION, McpRuntime
-from .models import CommandMode, CommandSpec, ResourceLimits
-from .policy import ExecutionPolicy, PolicyViolation
-from .routing import Shell, Target, WslOptions, direct_command, shell_command
-from .schema import protocol_schema
-from .sessions import Session, SessionManager
-from .telemetry import EventRecorder, configure_logging, configure_opentelemetry
+from .runtime.policy import ExecutionPolicy, PolicyViolation
+from .runtime.routing import Shell, Target, WslOptions, direct_command, shell_command
+from .runtime.sessions import Session, SessionManager
 
 __all__ = [
     "MCP_PROTOCOL_VERSION",

@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from sharkrail.acp import AcpTerminalAdapter, _decode_tail, _exit_status
+from sharkrail.integrations.acp import AcpTerminalAdapter, _decode_tail, _exit_status
 
 
 def test_acp_terminal_create_output_wait_and_release():

@@ -40,6 +40,7 @@ def test_required_project_documentation_exists() -> None:
         "docs/VALUE.md",
         "docs/VALUE.zh-CN.md",
         "docs/VERSIONING.md",
+        "examples/README.md",
     }
 
     missing = sorted(path for path in required if not (REPOSITORY / path).is_file())
@@ -79,6 +80,7 @@ def test_readme_exposes_primary_entry_points() -> None:
 
     for link in (
         "docs/README.md",
+        "examples/README.md",
         "CONTRIBUTING.md",
         "SECURITY.md",
         "SUPPORT.md",

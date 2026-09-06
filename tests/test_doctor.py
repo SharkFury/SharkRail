@@ -3,14 +3,14 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from sharkrail.doctor import (
+from sharkrail.core.errors import ErrorCode, ErrorStage, ExecutionError
+from sharkrail.core.models import CommandMode
+from sharkrail.runtime.doctor import (
     _probe_execution,
     diagnose,
     format_report,
     write_diagnostic_bundle,
 )
-from sharkrail.errors import ErrorCode, ErrorStage, ExecutionError
-from sharkrail.models import CommandMode
 
 
 def test_doctor_report_is_safe_and_structured():
@@ -72,7 +72,7 @@ def test_failed_probe_reports_structured_completion_details():
     )
     manager.shutdown = AsyncMock()
 
-    with patch("sharkrail.doctor.SessionManager", return_value=manager):
+    with patch("sharkrail.runtime.doctor.SessionManager", return_value=manager):
         check = asyncio.run(_probe_execution(CommandMode.PIPE))
 
     assert check.status == "fail"
@@ -94,7 +94,7 @@ def test_pty_probe_allows_for_conpty_cold_start():
     )
     manager.shutdown = AsyncMock()
 
-    with patch("sharkrail.doctor.SessionManager", return_value=manager):
+    with patch("sharkrail.runtime.doctor.SessionManager", return_value=manager):
         check = asyncio.run(_probe_execution(CommandMode.PTY))
 
     assert check.status == "pass"

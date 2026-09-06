@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 
-from . import __version__
+from .. import __version__
+from ..core.models import CommandMode, CommandSpec
 from .capabilities import collect
-from .models import CommandMode, CommandSpec
 from .sessions import SessionManager
 
 

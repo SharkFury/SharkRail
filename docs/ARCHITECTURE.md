@@ -21,8 +21,32 @@ Agent / IDE / automation
  pipes · ConPTY                 pipes · PTY
  Job Objects                    process groups
     |
- WSL adapter (wsl.exe --exec)
+WSL adapter (wsl.exe --exec)
 ```
+
+## Source layout
+
+The package mirrors those architectural responsibilities instead of grouping
+all implementation modules at the package root:
+
+```text
+src/sharkrail/
+├── core/              stable models, errors, lifecycle, and output contracts
+├── runtime/           sessions, execution, routing, policy, and OS backends
+├── integrations/      MCP, ACP, JSON-RPC, and protocol schema helpers
+├── observability/     telemetry adapters
+├── schemas/           packaged JSON Schema resources
+├── cli.py             command-line composition
+├── __init__.py        stable public Python API facade
+└── __main__.py        python -m sharkrail entry point
+```
+
+Dependencies point inward: `core` is independent of the runtime and
+integrations; `runtime` builds on `core` and observability; integrations build
+on the runtime and core contracts. The package-level `__init__.py` re-exports
+the supported public API, so users can continue to write
+`from sharkrail import SessionManager` without depending on the internal
+directory layout.
 
 ## Layer responsibilities
 

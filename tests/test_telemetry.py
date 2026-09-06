@@ -4,7 +4,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from sharkrail.telemetry import (
+from sharkrail.observability.telemetry import (
     EventRecorder,
     configure_logging,
     configure_opentelemetry,

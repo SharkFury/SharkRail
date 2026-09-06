@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
 
-from .models import CommandSpec
+from ..core.models import CommandSpec
 from .windows import WindowsJob
 
 if os.name != "nt":

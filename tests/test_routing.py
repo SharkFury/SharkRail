@@ -1,5 +1,11 @@
-from sharkrail.models import CommandMode, ResourceLimits
-from sharkrail.routing import Shell, Target, WslOptions, direct_command, shell_command
+from sharkrail.core.models import CommandMode, ResourceLimits
+from sharkrail.runtime.routing import (
+    Shell,
+    Target,
+    WslOptions,
+    direct_command,
+    shell_command,
+)
 
 
 def test_direct_command_preserves_argv_without_shell_parsing():

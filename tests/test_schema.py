@@ -1,7 +1,7 @@
 import asyncio
 
-from sharkrail.protocol import JsonRpcRuntime
-from sharkrail.schema import protocol_schema
+from sharkrail.integrations.protocol import JsonRpcRuntime
+from sharkrail.integrations.schema import protocol_schema
 
 
 def test_bundled_protocol_schema_has_stable_identity_and_contracts():

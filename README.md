@@ -152,6 +152,8 @@ asyncio.run(main())
 
 See [agent integrations](docs/INTEGRATIONS.md) for MCP configuration and
 [the protocol reference](docs/PROTOCOL.md) for the complete native wire contract.
+Runnable examples for every supported integration surface and core execution
+scenario are indexed in [`examples/README.md`](examples/README.md).
 
 ## Cross-platform contract
 
@@ -194,6 +196,7 @@ Start with the [documentation index](docs/README.md), or go directly to:
 - [Public value, stewardship, and evidence](docs/VALUE.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Protocol reference](docs/PROTOCOL.md)
+- [Runnable examples by use case](examples/README.md)
 - [Configuration and limits](docs/CONFIGURATION.md)
 - [Reliability contract](docs/RELIABILITY.md)
 - [Observability](docs/OBSERVABILITY.md)
