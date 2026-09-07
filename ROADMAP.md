@@ -34,7 +34,8 @@ in [CHANGELOG.md](CHANGELOG.md); decision criteria belong in the
 ## Next: make the contract independently useful
 
 - Validate the optional self-hosted asynchronous job design with a single-node
-  prototype: durable admission, idempotency, transactional Outbox delivery, and
+  prototype: declarative Job resources, a SQLite `JobStore`, idempotent
+  reconciliation, periodic full resync, transactional Outbox delivery, and
   explicit executor-loss semantics. It must reuse the execution contract and
   remain separate from workflow orchestration.
 - Extract the failure corpus and conformance runner so they can test an

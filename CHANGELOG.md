@@ -9,8 +9,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Document the proposed reliable, self-hosted asynchronous job architecture,
-  including durable admission, executor leases, output storage, transactional
-  webhook delivery, failure semantics, security boundaries, and delivery phases.
+  using Kubernetes-inspired declarative resources and reconciliation, a
+  configurable SQLite/PostgreSQL `JobStore`, executor leases, output storage,
+  transactional webhook delivery, and explicit failure semantics.
 
 ## 0.1.2 - 2026-09-07
 
