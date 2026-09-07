@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## 0.1.2 - 2026-09-07
+
 ### Changed
 
 - Use `src/sharkrail/_version.py` as the single package-version source for
