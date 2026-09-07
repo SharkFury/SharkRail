@@ -37,5 +37,5 @@ def test_citation_metadata_tracks_current_release() -> None:
 
     assert "cff-version: 1.2.0" in citation
     assert "license: MIT" in citation
-    assert "version: 0.1.0" in citation
+    assert "version: 0.1.1" in citation
     assert "https://github.com/SharkFury/SharkRail" in citation
