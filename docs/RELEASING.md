@@ -20,8 +20,8 @@ Release. Do not upload the generated distributions to PyPI manually.
 4. Create and push an annotated tag for that exact commit:
 
    ```bash
-   git tag -a v0.1.0 -m "SharkRail 0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.1.1 -m "SharkRail 0.1.1"
+   git push origin v0.1.1
    ```
 
 The `release` workflow validates the tag, reruns the complete test suite on
@@ -39,7 +39,7 @@ artifact, but its tag guards prevent both PyPI and GitHub publication.
 Locally, the equivalent checks are:
 
 ```bash
-python .github/scripts/check_release.py v0.1.0
+python3 .github/scripts/check_release.py v0.1.1
 python -m ruff check .
 python -m ruff format --check .
 python -m mypy src/sharkrail
@@ -55,7 +55,7 @@ After the GitHub Release is created, download an artifact and verify that GitHub
 attested it from this repository's release workflow:
 
 ```bash
-gh attestation verify sharkrail-0.1.0-py3-none-any.whl --repo SharkFury/SharkRail
+gh attestation verify sharkrail-0.1.1-py3-none-any.whl --repo SharkFury/SharkRail
 ```
 
 Inspect the attached `*.sbom.cdx.json` and verify its root component hash against

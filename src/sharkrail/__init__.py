@@ -1,6 +1,6 @@
 """SharkRail execution package."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .core.errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .core.lifecycle import InvalidTransition, SessionLifecycle, SessionState
