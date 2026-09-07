@@ -1,3 +1,5 @@
+import re
+
 import sharkrail
 
 
@@ -18,4 +20,6 @@ def test_v01_public_api_is_exported():
         "shell_command",
     }
     assert expected.issubset(set(sharkrail.__all__))
-    assert sharkrail.__version__ == "0.1.1"
+    assert re.fullmatch(
+        r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", sharkrail.__version__
+    )

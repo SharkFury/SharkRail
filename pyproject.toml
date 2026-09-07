@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sharkrail"
-version = "0.1.1"
+dynamic = ["version"]
 description = "Verifiable process execution for AI agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -66,6 +66,9 @@ addopts = "-q"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "sharkrail._version.__version__"}
 
 [tool.setuptools.package-data]
 sharkrail = ["py.typed", "schemas/*.json"]

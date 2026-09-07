@@ -37,6 +37,7 @@ src/sharkrail/
 ├── observability/     telemetry adapters
 ├── schemas/           packaged JSON Schema resources
 ├── cli.py             command-line composition
+├── _version.py        single package-version source
 ├── __init__.py        stable public Python API facade
 └── __main__.py        python -m sharkrail entry point
 ```

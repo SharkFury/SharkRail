@@ -32,10 +32,20 @@ def test_project_tagline_is_consistent() -> None:
     assert expected in (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
 
 
-def test_citation_metadata_tracks_current_release() -> None:
+def test_citation_metadata_describes_the_project() -> None:
     citation = (REPOSITORY / "CITATION.cff").read_text(encoding="utf-8")
 
     assert "cff-version: 1.2.0" in citation
     assert "license: MIT" in citation
-    assert "version: 0.1.1" in citation
     assert "https://github.com/SharkFury/SharkRail" in citation
+
+
+def test_package_version_has_one_configuration_source() -> None:
+    project = (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
+    package_init = (REPOSITORY / "src" / "sharkrail" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'dynamic = ["version"]' in project
+    assert 'version = {attr = "sharkrail._version.__version__"}' in project
+    assert "from ._version import __version__" in package_init

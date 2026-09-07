@@ -1,7 +1,6 @@
 """SharkRail execution package."""
 
-__version__ = "0.1.1"
-
+from ._version import __version__
 from .core.errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
 from .core.lifecycle import InvalidTransition, SessionLifecycle, SessionState
 from .core.models import CommandMode, CommandSpec, ResourceLimits
@@ -54,6 +53,7 @@ __all__ = [
     "Shell",
     "Target",
     "WslOptions",
+    "__version__",
     "collect",
     "configure_logging",
     "configure_opentelemetry",
