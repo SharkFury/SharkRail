@@ -33,6 +33,12 @@ in [CHANGELOG.md](CHANGELOG.md); decision criteria belong in the
 
 ## Next: make the contract independently useful
 
+- Validate the optional self-hosted asynchronous job design with a single-node
+  prototype: declarative Job resources, bounded in-memory and durable file
+  SQLite modes, system configuration discovery, idempotent reconciliation,
+  periodic full resync, transactional Outbox delivery, and explicit executor-
+  loss semantics. It must reuse the execution contract and remain separate from
+  workflow orchestration.
 - Extract the failure corpus and conformance runner so they can test an
   implementation without importing the Python reference runtime.
 - Validate ACP terminal and MCP tool mappings with their upstream schemas and
@@ -90,7 +96,8 @@ Implementation possibility alone is not a reason to add it.
 ## Permanent non-goals
 
 - A terminal emulator UI or general agent framework
-- A hosted, remote, or multi-tenant execution service
+- A project-operated hosted execution service; any asynchronous server remains
+  optional, self-hosted, and separate from the execution core
 - Credential storage or automatic privilege elevation
 - Malware isolation or a replacement for a sandbox, container, or VM
 - Prompt-regex lifecycle detection

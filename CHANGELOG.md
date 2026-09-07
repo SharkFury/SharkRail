@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added
+
+- Document the proposed reliable, self-hosted asynchronous job architecture,
+  using portable declarative resources and reconciliation, volatile and durable
+  SQLite/PostgreSQL `JobStore` modes, system configuration discovery, a shipped
+  configuration example, supervised Master/Worker process isolation, overload
+  protection, executor leases, transactional webhooks, and explicit failure
+  semantics.
+
 ## 0.1.2 - 2026-09-07
 
 ### Changed

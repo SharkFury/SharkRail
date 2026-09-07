@@ -33,6 +33,10 @@ checkpoints, runtime restart recovery, or model context management. See the
 [native API comparison](VALUE.md#native-process-apis-vs-sharkrail) for the
 adoption boundary.
 
+An [optional self-hosted asynchronous job layer](ASYNC_JOBS.md) is documented as
+a future design proposal. It is not part of the implemented v0.1 contract and
+does not change the guarantees listed on this page.
+
 ## Users and jobs
 
 - Agent and IDE developers replace duplicated subprocess, PTY, timeout, buffering, and cleanup code.
@@ -145,7 +149,7 @@ Direct argv avoids unintended shell interpretation, but executed programs have t
 
 ## Non-goals
 
-- Remote shell or public network service
+- Remote shell or project-operated hosted execution service
 - Multi-tenant execution
 - Credential storage or automatic UAC elevation
 - Malware isolation

@@ -195,6 +195,7 @@ Start with the [documentation index](docs/README.md), or go directly to:
 - [Product scope and principles](docs/PRODUCT.md)
 - [Public value, stewardship, and evidence](docs/VALUE.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Reliable asynchronous jobs proposal](docs/ASYNC_JOBS.md)
 - [Protocol reference](docs/PROTOCOL.md)
 - [Runnable examples by use case](examples/README.md)
 - [Configuration and limits](docs/CONFIGURATION.md)
