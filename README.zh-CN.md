@@ -146,6 +146,7 @@ PTY/ConPTY 本身是合并终端流，因此 SharkRail 不会伪造不存在的 
 - [产品范围与原则](docs/PRODUCT.md)
 - [公共价值、维护承诺与证据](docs/VALUE.zh-CN.md)
 - [系统架构](docs/ARCHITECTURE.md)
+- [可靠异步任务架构提案](docs/ASYNC_JOBS.zh-CN.md)
 - [协议参考](docs/PROTOCOL.md)
 - [按使用场景组织的可运行示例](examples/README.md)
 - [配置与限制](docs/CONFIGURATION.md)

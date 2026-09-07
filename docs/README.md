@@ -10,6 +10,9 @@ integrating, operating, or contributing to the runtime.
 - [公共价值设计](VALUE.zh-CN.md): Chinese translation of the public value charter
 - [Product scope and principles](PRODUCT.md): users, jobs, boundaries, and goals
 - [Architecture](ARCHITECTURE.md): layers, ownership, data flow, and platform adapters
+- [Reliable asynchronous jobs](ASYNC_JOBS.md): proposed self-hosted client/server
+  execution, persistence, recovery, and notification design
+- [可靠异步任务架构](ASYNC_JOBS.zh-CN.md)：自托管 C/S 执行与回调方案
 - [Roadmap](../ROADMAP.md): current priorities and non-binding future direction
 
 ## Integrate
