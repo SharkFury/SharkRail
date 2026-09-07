@@ -38,20 +38,23 @@ Client
   |
   | HTTP：声明期望状态、查询实际状态、请求取消
   v
-API Server
+Control Master
+  |--> API Worker
+  |--> Controller Worker
+  +--> Notification Worker
   |
   | 校验 + compare-and-swap 事务
   v
 JobStore（唯一事实源）
   | Resource · Attempt · Lease · Event · Outbox
   |
-  +--> Job Controller --------+
-  +--> Scheduler Controller --+--> Executor Agent --> SessionManager
-  +--> Lease Reconciler ------+                         |--> OS Process / PTY
-  +--> Notification Controller                         +--> OutputStore
-  +--> Retention Controller
-             |
-             +--> 签名 Webhook --> Client
+  +--> Job/Scheduler/Lease Reconciler --> Executor Master
+  |                                           |
+  |                                           +--> Executor Worker
+  |                                                  |--> SessionManager
+  |                                                  |--> OS Process / PTY
+  |                                                  +--> OutputStore
+  +--> Notification Reconciler --> 签名 Webhook --> Client
 ```
 
 API 与 Controller 除 `JobStore` 外都不保存状态。Controller 之间不通过内存队列转移
@@ -158,6 +161,133 @@ WAL、busy timeout、显式事务和有文档说明的 durability 级别，并�
 
 文件在进程或机器重启后仍然存在，以及 Controller 能恢复逻辑状态，是两个独立要求。
 每一种部署形态都需要经过验证的数据库备份、输出保留、重启流程和恢复演练。
+
+## 控制面进程可靠性
+
+只有持久化数据库还不足以保证控制面可靠。设计必须在过载前主动保护，在故障发生后隔离
+影响，由外部拉起进程，并根据持久化状态重建全部工作。已经接受的 Job 不能依赖某一个
+API 或 Controller 进程一直存活。
+
+### Master 与 Worker 进程模型
+
+生产环境使用一个轻量 Master 进程和一组可替换 Worker 进程。Master 不接收业务请求、
+不拥有 Job、不调度命令，也不保存权威状态；它只负责启动 Worker、监控进展、优雅下线、
+替换异常或失去响应的 Worker、聚合进程健康状态和协调停止。Master 不承担业务工作，
+可以显著缩小内存占用与故障面。
+
+Worker 按职责分池：
+
+```text
+Control Master
+  |-- API Worker Pool
+  |-- Controller Worker Pool
+  +-- Notification Worker Pool
+
+Executor Master
+  +-- Executor Worker Pool
+        +-- 受控命令进程树
+```
+
+Control Master 与 Executor Master 是两个独立故障域，因此控制面过载不能直接终止正在运行
+的命令。小型部署可以由同一个可执行文件启动两棵服务进程树，但它们仍应使用独立 Master、
+进程组、资源预算和停止策略。命令进程和输出读取任务绝不能运行在 API 或 Controller
+Worker 内。
+
+跨平台实现使用 spawn 语义创建 Worker，不能依赖 Unix 专有的 fork 行为。Master 维护
+固定、有上限且可配置的 Worker 数量，不能为每个请求创建新进程。API 监听端口的持有与
+交接必须使用一种明确的跨平台策略，保证替换 Worker 时不会丢失已接受请求，也不会让两个
+Worker 写入同一个响应。
+
+每个 Worker 通过有界本地 IPC 上报单调进展 heartbeat。Worker 退出、超过进展期限、突破
+硬资源上限或有限自检失败时，Master 将其替换。Master 先把 Worker 标记为 unready 并请求
+优雅 drain；超过期限后终止 Worker 及其拥有的子进程树。替换使用带随机抖动的指数退避和
+每角色重启频率限制。某个角色连续崩溃时打开熔断器并报告 degraded，不能形成 fork storm。
+
+Worker 可随时丢弃，因此替换过程必须安全。新 Worker 使用新的 `worker_id` 和 `boot_id`，
+不能继承前任的 ownership，只能从 `JobStore` 重新领取工作；所有 claim 和写入继续接受
+lease、revision 与 fencing 校验。计划升级时启动新一代 Worker，等待 ready 后再 drain
+旧一代，并在整个切换期间为控制流量保留容量。
+
+Master 自身仍由宿主服务管理器或容器运行时等外部 Supervisor 管理。外部 Supervisor
+负责自动重启、带随机抖动的指数退避、重启频率限制和上次退出诊断。Master 无法从自身
+OOM Kill、死锁、运行时故障或整机重启中自救。Master 异常退出后，存活 Worker 必须按照
+明确的平台契约被终止或重新接管，不能成为长期无人监督的孤儿进程。
+
+Control Master 不可用期间，由独立服务监督的 Executor 继续运行已领取命令，在可能的
+情况下持久化有界输出并重试状态上报。如果部署者主动把两棵服务进程树放在同一故障域，
+则接受共享故障可能产生 `executor_lost` 的较弱保证。
+
+每次 Master 启动生成 `instance_id`，每次 Worker 启动生成 `worker_id` 和 `boot_id`。
+持久化 claim 同时记录这些身份、lease 期限和 epoch；旧 Worker 或暂停后恢复的 Worker
+写入会被 revision 与 fencing 校验拒绝。
+
+### 启动、停止与恢复
+
+只有配置有效、schema 版本兼容、`JobStore` 可写且已经获得角色所需 ownership 后，启动
+才算成功。Schema migration 使用数据库锁，并作为独立管理操作执行；普通副本不能并发
+抢着升级。服务暴露：
+
+```text
+GET /health/live   进程事件循环和 watchdog 仍在推进
+GET /health/ready  当前角色能够安全接受对应流量
+GET /health/state  依赖、队列、lease 和调谐诊断
+```
+
+不能因为数据库短暂不可用就让 liveness 失败，否则会形成重启风暴。角色无法安全服务时
+readiness 失败；普通过载和依赖故障通过诊断状态明确报告。
+
+优雅停止时，API 先停止接收新 Job，Controller 停止领取新工作，未完成数据库事务在期限
+内结束，已经持有的 lease 主动释放或自然过期。异常退出时，数据库事务必须原子回滚。
+重启后 Controller 先执行 full resync，再开始正常调度，并调谐未完成 Job、过期 claim 和
+待投递 Outbox；正确性不依赖任何内存 checkpoint。
+
+SQLite 模式只允许一个控制面实例，并使用独占进程锁阻止意外重复启动。它提供的是可靠
+重启恢复，而不是服务永不中断。多实例高可用需要 PostgreSQL：API 副本无状态，多个
+Controller 通过数据库短 claim 主动分担任务；确实只能单实例执行的维护操作使用可续租
+lease 和 fencing epoch。分布式 ownership 不能依赖本地 mutex。
+
+### 过载保护
+
+控制面必须在内存、文件描述符、线程或数据库连接耗尽前丢弃过量负载：
+
+- 限制 HTTP 连接数、请求体、请求时长和每租户提交速率；
+- 数据库连接池保持固定且较小，事务要短，等待连接必须有上限；
+- 限制每个 Controller 工作队列、resync batch、回调 batch、重试集合和并发异步任务数；
+- 输出直接流式写入 `OutputStore`，API/Controller 内存不能累积命令输出或完整结果集；
+- 为提交、状态/取消、Executor heartbeat/结果更新和通知投递分别预留并发预算；
+- heartbeat、取消和完成写入优先于新 Job，避免过载掩盖正在运行的任务；
+- 使用全局与租户配额及公平调度，避免一个调用方饿死恢复流量或其他租户。
+
+Admission 容量满时，新提交返回带 `Retry-After` 的 `429 Too Many Requests`；必要依赖
+不可用时返回 `503 Service Unavailable`。必须在产生部分状态前拒绝请求。已经接受的 Job
+保持持久化，恢复后继续调谐。状态查询和取消使用预留容量，不能与新提交共享无界队列。
+
+异常隔离到单个请求和 Job。格式错误或反复失败的 Job 写入稳定 Failure Condition，并在
+有限次数后隔离；它不能使整个 Controller 循环崩溃，也不能形成高频重试。进程连续崩溃
+时，Supervisor 执行退避并暴露 degraded 状态，不能立即无限重启。
+
+### 故障检测与可靠性测试
+
+至少监控进程 RSS、CPU、文件描述符、event-loop lag、线程数、数据库连接等待、请求拒绝、
+工作队列深度、调谐延迟、最老 lease、Outbox 年龄、重启次数，以及每个 Controller 距离
+上次取得进展的时间。Watchdog 可以在记录有界诊断后终止死锁进程，再由外部 Supervisor
+重新拉起。
+
+发布前必须通过自动化故障注入证明：
+
+| 故障注入 | 必须提供的证据 |
+| --- | --- |
+| Admission 期间杀死 API/Controller | 没有未持久化 Job 获得 `202`；已提交 Job 不丢失 |
+| 杀死或卡死一个 Worker | Master 只替换该 Worker，持久化任务会被重新领取 |
+| 杀死 Control Master | 外部 Supervisor 将其拉起，不产生永久孤儿 Worker，full resync 能收敛 |
+| 让 Worker 连续崩溃 | 每角色退避与熔断器阻止 fork storm |
+| 外部动作完成但 status 写入前杀死 Controller | 调谐动作幂等，或明确报告执行不确定性 |
+| 提交流量打满 | 新任务获得有界 `429`；状态、取消和 heartbeat 仍能推进 |
+| 输出速率打满 | 内存保持有界，输出截断或降级显式可见 |
+| 数据库变慢或断开 | 停止 admission，事务有界，恢复时不会形成惊群 |
+| Notification Worker 连续崩溃 | Job 结果不变，Outbox 恢复且不丢失 |
+| 启动第二个 SQLite 控制面 | 在可能破坏 ownership 前拒绝启动 |
+| 重启全部控制面角色 | full resync 无需人工修复即可收敛 Job、lease 和通知 |
 
 ## 客户端 API
 
@@ -430,17 +560,22 @@ resync，不能猜测遗漏了哪些事件。
 ### 第一阶段：单节点持久化服务
 
 - REST 提交、查询、输出、结果和取消接口；
+- 独立的 Control/Executor Master、有界的按角色 Worker Pool、heartbeat、drain、替换、
+  重启退避，以及适用于受支持平台的外部 Supervisor 配置示例；
 - `JobStore`/`OutputStore` 接口、SQLite/本地文件默认实现、migration、备份与幂等
   admission；
 - 声明式 `spec`/`status`、revision 校验、持久事件、Condition 和周期性 full resync；
 - 一组 Controller 和一个 Executor，复用现有 `SessionManager`；
 - 本地文件 `OutputStore`；
 - 事务 Outbox、签名 Webhook、重试和死信；
-- 重启、重复提交、重复调谐、漏事件、回调失败、SQLite 磁盘满/损坏和崩溃注入测试。
+- Master/Worker 重启风暴、重复提交、重复调谐、漏事件、回调失败、SQLite 磁盘满/损坏、
+  过载和崩溃注入测试。
 
 ### 第二阶段：多 Executor 可靠性
 
 - PostgreSQL `JobStore`、S3 兼容 `OutputStore` 和后端一致性测试；
+- 多 Control Master、active-active Controller Worker、滚动 Worker generation 和带
+  fencing 的单例维护操作；
 - Executor 注册、能力匹配、lease、heartbeat 和 fencing；
 - 处理过期 lease 和不确定 Attempt 的 reconciler；
 - 租户配额、公平调度、队列期限和节点 draining；

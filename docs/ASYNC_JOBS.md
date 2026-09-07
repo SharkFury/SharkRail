@@ -49,20 +49,23 @@ Client
   |
   | HTTP: declare desired state, inspect status, request cancellation
   v
-API server
+Control Master
+  |--> API Workers
+  |--> Controller Workers
+  +--> Notification Workers
   |
   | validate + compare-and-swap transaction
   v
 JobStore (source of truth)
   | resources · attempts · leases · events · outbox
   |
-  +--> Job controller --------+
-  +--> Scheduler controller --+--> Executor agent --> SessionManager
-  +--> Lease reconciler ------+                         |--> OS process / PTY
-  +--> Notification controller                         +--> OutputStore
-  +--> Retention controller
-             |
-             +--> signed webhook --> Client
+  +--> Job/Scheduler/Lease reconcilers --> Executor Master
+  |                                          |
+  |                                          +--> Executor Workers
+  |                                                  |--> SessionManager
+  |                                                  |--> OS process / PTY
+  |                                                  +--> OutputStore
+  +--> Notification reconciler --> signed webhook --> Client
 ```
 
 The API and controllers are stateless apart from the `JobStore`. Controllers do
@@ -187,6 +190,175 @@ Files surviving a process or machine restart and controllers restoring logical
 state are separate requirements. Operators need tested database backups,
 output retention, restart procedures, and restore drills in every deployment
 form.
+
+## Control-plane process reliability
+
+A durable database does not by itself make the control plane reliable. The
+design must prevent overload where possible, contain failures when prevention
+fails, restart failed processes, and reconstruct all work from durable state.
+An accepted Job must never depend on one API or controller process remaining
+alive.
+
+### Master and Worker process model
+
+The production process model uses a small Master process and replaceable Worker
+processes. The Master never accepts business requests, owns Jobs, schedules
+commands, or stores authoritative state. It only starts Workers, monitors their
+progress, drains them, replaces failed or stale Workers, aggregates process
+health, and coordinates shutdown. Keeping it free of business work minimizes its
+memory footprint and failure surface.
+
+Worker pools are separated by responsibility:
+
+```text
+Control Master
+  |-- API Worker pool
+  |-- Controller Worker pool
+  +-- Notification Worker pool
+
+Executor Master
+  +-- Executor Worker pool
+        +-- owned command process tree
+```
+
+The Control Master and Executor Master are independent failure domains. A
+control-plane overload therefore cannot directly terminate running commands.
+On a small installation the same executable can start both service trees, but
+they still use separate masters, process groups, resource budgets, and shutdown
+policies. Command processes and output pumps never run inside an API or
+Controller Worker.
+
+Cross-platform implementations create Workers with spawn semantics rather than
+depending on Unix-only fork behavior. The Master maintains a bounded, configured
+worker count; it does not create a new process per request. API listener
+ownership and handoff must use one documented cross-platform strategy so a
+Worker replacement cannot drop accepted requests or allow two Workers to write
+one response.
+
+Each Worker reports a monotonic progress heartbeat over bounded local IPC. A
+Worker is replaced if it exits, misses its progress deadline, exceeds a hard
+resource ceiling, or fails a bounded self-check. The Master first marks it
+unready and requests a graceful drain; after the deadline it terminates the
+Worker and its owned child tree. Replacement uses exponential backoff with
+jitter and a per-role restart-rate limit. If a role repeatedly crashes, its
+circuit opens and the Master reports the role as degraded instead of creating a
+fork storm.
+
+Worker replacement is safe because Workers are disposable. A new Worker gets a
+new `worker_id` and `boot_id`, loads no ownership from its predecessor, and
+reacquires all work from `JobStore`. Every claim and write remains protected by
+lease, revision, and fencing checks. Planned upgrades start a new Worker
+generation, wait for readiness, drain the old generation, and preserve reserved
+capacity for control traffic throughout the transition.
+
+The Master itself is managed by an external supervisor such as the host service
+manager or container runtime. The external supervisor provides automatic
+restart, exponential backoff with jitter, a restart-rate limit, and last-exit
+diagnostics. A Master cannot recover itself from an out-of-memory kill, deadlock,
+runtime failure, or machine restart. If the Master dies, surviving Workers are
+terminated or adopted according to one explicit platform contract; they must
+never continue indefinitely as unmonitored orphan processes.
+
+While the Control Master is unavailable, the independently supervised Executor
+service continues its owned commands, persists bounded output where possible,
+and retries status reporting. If a deployment deliberately places both service
+trees in one failure domain, it accepts the weaker behavior that a shared
+failure can produce `executor_lost`.
+
+Each Master start gets an `instance_id`; each Worker start gets a `worker_id` and
+`boot_id`. Durable claims include these identities, a lease deadline, and an
+epoch. Writes from an old or paused Worker are rejected by revision and fencing
+checks.
+
+### Startup, shutdown, and recovery
+
+Startup is safe only after configuration is valid, the schema version is
+compatible, the `JobStore` is writable, and role-specific ownership is acquired.
+Schema migration uses a database lock and is a separate administrative action;
+ordinary replicas do not race to migrate. The service exposes:
+
+```text
+GET /health/live   process event loop and watchdog are making progress
+GET /health/ready  this role can safely accept its class of traffic
+GET /health/state  dependency, queue, lease, and reconciliation diagnostics
+```
+
+Liveness must not fail merely because the database is temporarily unavailable,
+which would create a restart storm. Readiness fails when the role cannot safely
+serve, while diagnostic state reports saturation and dependency failures.
+
+On graceful shutdown, the API first stops admitting new Jobs, controllers stop
+claiming new work, outstanding database transactions finish within a deadline,
+and owned leases are either released or allowed to expire. On an ungraceful
+exit, database transactions roll back atomically. After restart, controllers
+perform a full resync before normal scheduling, then reconcile unfinished Jobs,
+expired claims, and pending Outbox records. No in-memory checkpoint is required
+for correctness.
+
+SQLite mode permits exactly one control-plane instance. An exclusive process
+lock prevents accidental double start. This mode provides durable restart
+recovery, not uninterrupted availability. Multi-instance availability requires
+PostgreSQL: API replicas are stateless, controller replicas actively share work
+through short database claims, and any singleton maintenance operation uses a
+renewable lease plus fencing epoch. Local mutexes are never used for distributed
+ownership.
+
+### Overload protection
+
+The control plane must shed load before memory, file descriptors, threads, or
+database connections are exhausted:
+
+- bound HTTP connections, request bodies, request duration, and per-tenant
+  submission rate;
+- keep the database connection pool fixed and small, transactions short, and
+  pool-wait time bounded;
+- bound every controller work queue, resync batch, callback batch, retry set,
+  and in-flight asynchronous task count;
+- stream output directly to `OutputStore`; never accumulate command output or
+  complete result sets in API/controller memory;
+- reserve separate concurrency budgets for submission, status/cancel, Executor
+  heartbeat/result updates, and notification delivery;
+- prioritize heartbeat, cancellation, and completion writes over new Job
+  admission so overload cannot hide running work;
+- apply global and per-tenant quotas and fair scheduling so one caller cannot
+  starve recovery traffic or other tenants.
+
+When admission capacity is full, new submissions receive `429 Too Many Requests`
+with `Retry-After`. When a required dependency is unavailable, they receive
+`503 Service Unavailable`. The server must reject before creating partial state.
+Already accepted Jobs remain durable and are reconciled later. Status and cancel
+traffic retain a reserved budget and must not share an unbounded queue with new
+submissions.
+
+Exceptions are isolated at request and Job boundaries. A malformed or repeatedly
+failing Job receives a stable failure Condition and is quarantined after a
+bounded retry count; it must not crash a controller loop or create a hot retry
+cycle. Repeated process crashes trigger supervisor backoff and an operator-visible
+degraded state rather than an immediate infinite restart loop.
+
+### Detection and reliability tests
+
+Monitor process RSS, CPU, file descriptors, event-loop lag, thread count,
+database pool wait, request rejection, work-queue depth, reconciliation lag,
+oldest lease age, Outbox age, restart count, and time since each controller last
+made progress. A watchdog may terminate a deadlocked process after recording
+bounded diagnostics; external supervision then restarts it.
+
+The control plane is not release-ready until automated tests demonstrate:
+
+| Injection | Required evidence |
+| --- | --- |
+| Kill API/controller during admission | No `202` without a durable Job; committed Jobs survive |
+| Kill or deadlock one Worker | Master replaces only that Worker; durable work is reacquired |
+| Kill the Control Master | External supervisor restarts it; no indefinite orphan Workers; full resync converges |
+| Force repeated Worker crashes | Per-role backoff and circuit breaker prevent a fork storm |
+| Kill controller after external action but before status write | Reconcile is idempotent or reports execution uncertainty |
+| Saturate submissions | New work gets bounded `429`; status, cancel, and heartbeats still progress |
+| Exhaust output rate | Memory remains bounded and output truncation/degradation is explicit |
+| Slow or disconnect the database | Admission stops, transactions remain bounded, recovery does not stampede |
+| Crash notification workers repeatedly | Job outcome remains unchanged; Outbox resumes without loss |
+| Start a second SQLite control plane | Startup is rejected before either instance can corrupt ownership |
+| Restart all control-plane roles | Full resync converges Jobs, leases, and notifications without manual repair |
 
 ## API
 
@@ -490,6 +662,9 @@ example:
 ### Phase 1: single-node durable service
 
 - REST submit, inspect, output, result, and cancel APIs;
+- separate Control/Executor Masters, bounded role-specific Worker pools,
+  heartbeat, drain, replacement, restart backoff, and external-supervisor
+  examples for supported platforms;
 - `JobStore`/`OutputStore` interfaces, SQLite/local-file defaults, migrations,
   backups, and idempotent admission;
 - declarative `spec`/`status`, revision checks, durable events, conditions, and
@@ -497,13 +672,16 @@ example:
 - one controller set and executor using the existing `SessionManager`;
 - local-file `OutputStore`;
 - transactional Outbox, signed webhook, retry, and dead letters;
-- restart, duplicate-submit, duplicate-reconcile, missed-event, callback-failure,
-  SQLite disk-full/corruption, and crash-injection tests.
+- Master/Worker restart storms, duplicate-submit, duplicate-reconcile,
+  missed-event, callback-failure, SQLite disk-full/corruption, overload, and
+  crash-injection tests.
 
 ### Phase 2: multi-executor reliability
 
 - PostgreSQL `JobStore`, S3-compatible `OutputStore`, and backend conformance
   tests;
+- multiple Control Masters, active-active Controller Workers, rolling Worker
+  generations, and fenced singleton maintenance;
 - executor registration, capability matching, lease, heartbeat, and fencing;
 - reconciler for expired leases and uncertain attempts;
 - tenant quotas, fair scheduling, queue deadlines, and draining;
