@@ -119,6 +119,53 @@ transition time. They explain states such as accepted, scheduled, running,
 output degraded, executor lost, result available, and notification delivered
 without multiplying the primary phase into ambiguous combinations.
 
+## Configuration discovery and installation
+
+The server reads one system configuration file by default:
+
+| Environment | Active configuration | Installed example |
+| --- | --- | --- |
+| Linux and other Unix services | `/etc/sharkrail/sharkrail.toml` | `/etc/sharkrail/sharkrail.toml.example` |
+| Windows system service | `%ProgramData%\SharkRail\sharkrail.toml` | `%ProgramData%\SharkRail\sharkrail.toml.example` |
+| Container | `/etc/sharkrail/sharkrail.toml` | included in the image and source distribution |
+
+The Windows location follows the system-wide convention used by
+[Docker Engine](https://docs.docker.com/engine/daemon/) and
+[Git for Windows](https://git-scm.com/book/en/v2/Getting-Started-First-Time-Git-Setup).
+The implementation resolves `FOLDERID_ProgramData` through the Windows Known
+Folder API; it must not assume that the system drive is `C:`. A service does not
+implicitly read a login user's `%APPDATA%`, because its identity may differ from
+the installing user's identity.
+
+`--config <path>` has highest precedence, followed by
+`SHARKRAIL_CONFIG_FILE`, then the platform system path. A missing implicit file
+is valid and uses built-in defaults. A missing explicitly requested file,
+invalid TOML, unknown key, conflicting setting, insecure permission, or invalid
+value fails startup with a precise error; it must not be mistaken for an
+unconfigured database.
+
+Configuration values use the precedence CLI flags, environment variables,
+configuration file, then built-in defaults. The server reports the selected
+file, non-secret effective settings, and origin of each value through
+`sharkrail config show`; `sharkrail config validate` validates without starting
+the service.
+
+Every async-service distribution must include
+[`configs/sharkrail.toml.example`](../configs/sharkrail.toml.example). Native
+system packages and the Windows installer place a copy at the installed example
+path without overwriting an existing file. A Python wheel cannot safely write to
+a privileged system directory, so it embeds the same resource and provides:
+
+```text
+sharkrail config sample
+sharkrail config init --system
+```
+
+`sample` writes to stdout. `init --system` copies the example atomically to the
+platform system path, requests the platform's normal elevation when needed, and
+refuses to overwrite an existing file unless `--force` is explicit. Package
+removal must not delete an operator-modified active configuration.
+
 ## Persistence configuration
 
 Persistence is replaceable behind two independent contracts:
@@ -127,18 +174,17 @@ Persistence is replaceable behind two independent contracts:
   events, and callback Outbox records;
 - `OutputStore`: stdout/stderr objects and checksums.
 
-The zero-configuration default is SQLite plus local files. Configuration is
-read with the precedence CLI flags, environment variables, configuration file,
-then defaults:
+When no database URL is configured, SharkRail starts with SQLite's in-memory
+mode. This is the availability-first, zero-configuration mode:
 
 ```text
-SHARKRAIL_STATE_DIR=<operating-system user state directory>/sharkrail
-SHARKRAIL_JOB_STORE_URL=sqlite:///sharkrail.db
-SHARKRAIL_OUTPUT_STORE_URL=file://./output
+SHARKRAIL_JOB_STORE_URL=sqlite:///:memory:
+SHARKRAIL_OUTPUT_STORE_URL=file://<runtime-directory>/output
 ```
 
-Relative SQLite and file URLs resolve under `SHARKRAIL_STATE_DIR`. An absolute
-single-node server configuration may use:
+Command output still uses bounded temporary files rather than unbounded process
+memory. The runtime directory is private to the service instance and may be
+removed after restart. To enable durable single-host state, configure SQLite:
 
 ```text
 SHARKRAIL_STATE_DIR=/var/lib/sharkrail
@@ -154,18 +200,63 @@ SHARKRAIL_JOB_STORE_URL=postgresql://user:password@db/sharkrail
 SHARKRAIL_OUTPUT_STORE_URL=s3://sharkrail-output/jobs
 ```
 
+On Windows, a relative SQLite or file URL resolves under
+`%ProgramData%\SharkRail\data`; on Unix it resolves under
+`SHARKRAIL_STATE_DIR`, whose service default is `/var/lib/sharkrail`.
 `SHARKRAIL_JOB_STORE_URL_FILE` should also be supported for a DSN mounted from a
-secret; it is mutually exclusive with the direct environment variable. Unknown
-schemes must fail startup. A backend is supported only after passing the same
+secret; it is mutually exclusive with the direct URL. Unknown schemes must fail
+startup. A backend is supported only after passing the same
 transaction, revision, lease, migration, crash-recovery, and Outbox conformance
 suite; a generic database driver alone is not a reliability guarantee.
 
-SQLite is a supported default for local and single-instance operation, not a
-multi-node database. Enable foreign keys, WAL, busy timeout, explicit
-transactions, and a documented durability setting; perform schema migrations
-and backups. The database and output directories must be on durable storage.
-Never let multiple server instances share one SQLite file over NFS, SMB, or
-another network filesystem.
+SQLite is the recommended durable store for local and single-instance
+operation, not a multi-node database. Enable foreign keys, WAL, busy timeout,
+explicit transactions, and a documented durability setting; perform schema
+migrations and backups. The database and output directories must be on durable
+storage. Never let multiple server instances share one SQLite file over NFS,
+SMB, or another network filesystem.
+
+### Volatile SQLite memory mode
+
+SQLite memory mode keeps the program usable without database setup, but it is
+an explicitly degraded durability class:
+
+- Job state, idempotency keys, leases, status history, and pending callbacks are
+  lost when the in-memory SQLite State Worker or its host exits;
+- restart recovery, multi-instance ownership, durable callbacks, and accepted-
+  Job durability are not claimed;
+- Job count, metadata bytes, event history, TTL, and temporary-output bytes are
+  bounded; overload is rejected with `429` rather than risking OOM;
+- submit and status responses include `"durability": "volatile"`, startup logs
+  emit one prominent warning, and `/health/state` reports
+  `DEGRADED_VOLATILE_STORE`;
+- a caller that needs disconnect-and-return reliability must configure SQLite
+  or PostgreSQL.
+
+The Master must not become the memory database. In memory mode it starts exactly
+one dedicated SQLite State Worker with one authoritative in-memory database;
+all API, Controller, and Notification Workers use bounded local IPC to access
+it. The State Worker owns connection creation so separate `:memory:` databases
+cannot accidentally be created per Worker. It generates a new `store_epoch` on
+every start. If it is replaced, the Control Master first asks the Executor
+Master to terminate all commands from the old epoch and confirms cleanup before
+accepting new Jobs; otherwise invisible orphan commands could continue after
+their Job records disappeared.
+
+An absent database setting selects SQLite memory mode. An explicit
+`sqlite:///:memory:` selects it intentionally. By contrast, an invalid or
+unreachable configured file SQLite or PostgreSQL database must never trigger
+automatic memory fallback: the service becomes unready and returns `503` for
+admission until the configured source of truth recovers. Silent fallback would
+create split state and false success.
+
+H2 is not used. It is a strong embedded database for JVM applications, but in a
+Python runtime it would add a JVM, JDBC integration, another server process for
+cross-process access, and a second operational toolchain without improving the
+volatile durability guarantee. In-memory SQLite preserves SQL transactions,
+constraints, and most of the same schema path as durable file SQLite with no
+new runtime dependency. Backend-independent conformance tests still protect
+against dialect-specific behavior.
 
 ## Deployment portability
 
@@ -173,7 +264,8 @@ The same architecture must run on a bare-metal host, a virtual machine, or in a
 container. Platform packaging may change, but the persistence and recovery
 contract does not:
 
-- a single-instance installation may use SQLite and local output on a durable
+- a zero-configuration installation uses bounded volatile memory state; a
+  single-instance durable installation uses SQLite and local output on a durable
   host directory;
 - a container must mount `SHARKRAIL_STATE_DIR` from durable host or volume
   storage because its writable layer may be replaced;
@@ -659,22 +751,25 @@ example:
 
 ## Delivery plan
 
-### Phase 1: single-node durable service
+### Phase 1: single-node service
 
 - REST submit, inspect, output, result, and cancel APIs;
+- system configuration discovery, validation/show/init commands, and the
+  installed example configuration;
 - separate Control/Executor Masters, bounded role-specific Worker pools,
   heartbeat, drain, replacement, restart backoff, and external-supervisor
   examples for supported platforms;
-- `JobStore`/`OutputStore` interfaces, SQLite/local-file defaults, migrations,
-  backups, and idempotent admission;
+- `JobStore`/`OutputStore` interfaces, bounded in-memory SQLite and temporary-
+  file defaults, durable file SQLite, migrations, backups, and idempotent
+  admission;
 - declarative `spec`/`status`, revision checks, durable events, conditions, and
   periodic full resynchronization;
 - one controller set and executor using the existing `SessionManager`;
 - local-file `OutputStore`;
 - transactional Outbox, signed webhook, retry, and dead letters;
-- Master/Worker restart storms, duplicate-submit, duplicate-reconcile,
-  missed-event, callback-failure, SQLite disk-full/corruption, overload, and
-  crash-injection tests.
+- Master/Worker restart storms, volatile-store epoch cleanup, duplicate-submit,
+  duplicate-reconcile, missed-event, callback-failure, SQLite disk-full/
+  corruption, overload, and crash-injection tests.
 
 ### Phase 2: multi-executor reliability
 

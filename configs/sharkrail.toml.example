@@ -1,0 +1,66 @@
+# SharkRail asynchronous service configuration example.
+#
+# The asynchronous service is a design proposal and is not implemented in v0.1.
+# Future service distributions must install this example without overwriting an
+# operator-managed active configuration.
+
+[server]
+listen = "127.0.0.1:8765"
+request_body_max_bytes = 1048576
+request_timeout_seconds = 30
+
+[job_store]
+# Zero-configuration default: transactional, but volatile across State Worker
+# or host restarts. Omit this key to select the same built-in default.
+url = "sqlite:///:memory:"
+
+# Durable single-host alternative. Relative paths resolve below state_dir.
+# url = "sqlite:///sharkrail.db"
+
+# Multi-host alternative. Prefer url_file so credentials are not stored here.
+# url = "postgresql://sharkrail:replace-me@db.example/sharkrail"
+# url_file = "/run/secrets/sharkrail-database-url"
+
+[output_store]
+# Output is never accumulated without a bound in control-plane memory.
+# In volatile mode this resolves below a private runtime directory. With a
+# durable JobStore, configure a durable directory or an S3-compatible URL.
+url = "file://./output"
+# url = "s3://sharkrail-output/jobs"
+
+[control]
+api_workers = 2
+controller_workers = 1
+notification_workers = 1
+worker_heartbeat_seconds = 5
+worker_progress_timeout_seconds = 30
+worker_drain_timeout_seconds = 20
+worker_restart_limit = 5
+worker_restart_window_seconds = 60
+
+[executor]
+workers = 2
+heartbeat_seconds = 5
+lease_seconds = 30
+
+[admission]
+max_concurrent_requests = 128
+max_queued_jobs = 1000
+max_queued_jobs_per_tenant = 100
+
+[volatile_store]
+# These bounds apply only to sqlite:///:memory: mode.
+max_jobs = 1000
+max_metadata_bytes = 67108864
+max_event_records = 10000
+job_ttl_seconds = 3600
+max_temporary_output_bytes = 1073741824
+
+[notifications]
+max_concurrent_deliveries = 16
+request_timeout_seconds = 10
+max_attempts = 12
+
+[logging]
+level = "INFO"
+format = "json"

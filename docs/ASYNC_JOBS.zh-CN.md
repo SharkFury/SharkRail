@@ -104,6 +104,45 @@ Condition 使用稳定、机器可读的 `type`、`status`、`reason` 和状态�
 已调度、运行中、输出降级、Executor 丢失、结果可用和通知已送达等事实，避免把所有组合
 塞进一个含义模糊的 phase。
 
+## 配置发现与安装
+
+Server 默认读取一个系统级配置文件：
+
+| 环境 | 生效配置 | 安装后的示例 |
+| --- | --- | --- |
+| Linux 与其他 Unix 服务 | `/etc/sharkrail/sharkrail.toml` | `/etc/sharkrail/sharkrail.toml.example` |
+| Windows 系统服务 | `%ProgramData%\SharkRail\sharkrail.toml` | `%ProgramData%\SharkRail\sharkrail.toml.example` |
+| 容器 | `/etc/sharkrail/sharkrail.toml` | 包含在镜像与源码发行包中 |
+
+Windows 路径遵循 [Docker Engine](https://docs.docker.com/engine/daemon/) 和
+[Git for Windows](https://git-scm.com/book/en/v2/Getting-Started-First-Time-Git-Setup)
+等系统服务软件的惯例。实现必须通过 Windows Known Folder API 解析
+`FOLDERID_ProgramData`，不能假定系统盘一定是 `C:`。系统服务不会隐式读取登录用户的
+`%APPDATA%`，因为服务账号可能与安装用户不同。
+
+配置路径优先级为：`--config <path>`、`SHARKRAIL_CONFIG_FILE`、平台系统路径。隐式路径
+不存在属于合法情况，此时使用内置默认值；显式指定的文件不存在、TOML 无效、包含未知
+字段、配置冲突、权限不安全或值非法时，必须带精确错误拒绝启动，不能误判成“未配置
+数据库”。
+
+配置项优先级为：命令行参数、环境变量、配置文件、内置默认值。`sharkrail config show`
+显示最终选中的文件、非敏感有效配置以及每一项的来源；`sharkrail config validate` 只做
+校验，不启动服务。
+
+每一种异步服务发行物都必须包含
+[`configs/sharkrail.toml.example`](../configs/sharkrail.toml.example)。原生系统包和
+Windows Installer 会把副本放到上述示例路径，但不能覆盖已有文件。Python wheel 不能
+安全写入需要管理员权限的系统目录，因此把相同文件嵌入包中，并提供：
+
+```text
+sharkrail config sample
+sharkrail config init --system
+```
+
+`sample` 输出到 stdout；`init --system` 以原子方式复制到平台系统路径，需要时使用平台
+正常提权流程，并且除非显式传入 `--force`，否则拒绝覆盖已有文件。卸载软件不能删除已被
+操作人员修改的生效配置。
+
 ## 可配置持久层
 
 持久层拆成两个独立接口：
@@ -111,16 +150,16 @@ Condition 使用稳定、机器可读的 `type`、`status`、`reason` 和状态�
 - `JobStore`：事务保存 Resource、Attempt、Lease、revision、持久事件与回调 Outbox；
 - `OutputStore`：保存 stdout/stderr 正文与 checksum。
 
-零配置默认使用 SQLite 和本地文件。配置优先级为：命令行参数、环境变量、配置文件、
-默认值：
+没有配置数据库 URL 时，SharkRail 使用 SQLite 内存模式启动。这是可用性优先的零配置
+模式：
 
 ```text
-SHARKRAIL_STATE_DIR=<操作系统用户状态目录>/sharkrail
-SHARKRAIL_JOB_STORE_URL=sqlite:///sharkrail.db
-SHARKRAIL_OUTPUT_STORE_URL=file://./output
+SHARKRAIL_JOB_STORE_URL=sqlite:///:memory:
+SHARKRAIL_OUTPUT_STORE_URL=file://<运行时目录>/output
 ```
 
-相对路径统一基于 `SHARKRAIL_STATE_DIR` 解析。单节点服务器可以配置绝对路径：
+命令输出仍写入有界临时文件，不能无限累积在进程内存中。运行时目录只属于当前服务实例，
+重启后可以被删除。需要单机持久化时配置 SQLite：
 
 ```text
 SHARKRAIL_STATE_DIR=/var/lib/sharkrail
@@ -135,22 +174,54 @@ SHARKRAIL_JOB_STORE_URL=postgresql://user:password@db/sharkrail
 SHARKRAIL_OUTPUT_STORE_URL=s3://sharkrail-output/jobs
 ```
 
-同时支持 `SHARKRAIL_JOB_STORE_URL_FILE`，用于读取挂载为文件的 Secret；它与直接设置
-URL 的环境变量互斥。遇到未知 scheme 必须拒绝启动。只有通过相同的事务、revision、
-lease、migration、崩溃恢复和 Outbox 一致性测试，适配器才能被标记为受支持；能连接某种
-数据库不代表已经获得可靠性保证。
+Windows 上相对 SQLite 或文件 URL 基于 `%ProgramData%\SharkRail\data` 解析；Unix 上
+基于 `SHARKRAIL_STATE_DIR` 解析，其系统服务默认值为 `/var/lib/sharkrail`。同时支持
+`SHARKRAIL_JOB_STORE_URL_FILE` 读取挂载为文件的 Secret，它与直接 URL 互斥。遇到未知
+scheme 必须拒绝启动。只有通过相同的事务、revision、lease、migration、崩溃恢复和
+Outbox 一致性测试，适配器才能被标记为受支持；能连接数据库不代表已经获得可靠性保证。
 
-SQLite 是正式支持的本地、单实例默认方案，不是多节点数据库。应启用 foreign key、
+SQLite 是本地和单实例场景推荐的持久化方案，不是多节点数据库。应启用 foreign key、
 WAL、busy timeout、显式事务和有文档说明的 durability 级别，并提供 migration 与备份。
-数据库和输出目录必须位于持久磁盘。禁止多个 Server 实例通过 NFS、SMB 或其他网络
-文件系统共享同一个 SQLite 文件。
+数据库和输出目录必须位于持久磁盘。禁止多个 Server 实例通过 NFS、SMB 或其他网络文件
+系统共享同一个 SQLite 文件。
+
+### 易失 SQLite 内存模式
+
+SQLite 内存模式让程序在没有数据库配置时仍可使用，但它属于明确的降级持久性等级：
+
+- SQLite State Worker 或宿主退出后，Job 状态、幂等键、lease、状态历史和待投递回调
+  全部丢失；
+- 不承诺重启恢复、多实例 ownership、持久回调和已接收 Job 的持久性；
+- Job 数量、metadata 字节、事件历史、TTL 和临时输出字节都有上限，过载时返回 `429`，
+  不能冒险触发 OOM；
+- 提交和状态响应包含 `"durability": "volatile"`，启动日志输出一次醒目警告，
+  `/health/state` 报告 `DEGRADED_VOLATILE_STORE`；
+- 需要“客户端断开后任务仍可靠”的调用方必须配置 SQLite 或 PostgreSQL。
+
+Master 不能成为内存数据库。内存模式下，它只启动一个专用 SQLite State Worker，并由
+该 Worker 持有唯一权威的内存数据库；所有 API、Controller 和 Notification Worker 通过
+有界本地 IPC 访问。State Worker 统一创建连接，避免每个 Worker 意外得到彼此隔离的
+`:memory:` 数据库。Store 每次启动生成新的 `store_epoch`。Store 被替换后，Control
+Master 必须先要求 Executor Master 终止属于旧 epoch 的全部命令，并确认清理成功后才接收
+新 Job，否则记录已经消失的命令可能成为不可见孤儿进程。
+
+数据库配置缺失时选择 SQLite 内存模式；显式配置 `sqlite:///:memory:` 表示主动选择。
+相反，已经配置的文件 SQLite 或 PostgreSQL 无效或不可连接时，绝不能自动回退内存：
+服务进入 unready，并对新任务返回 `503`，直到原事实源恢复。静默回退会产生状态分裂和
+假成功。
+
+不采用 H2。H2 很适合 JVM 应用，但在 Python 运行时中会额外引入 JVM、JDBC 集成、用于
+跨进程访问的数据库 Server 进程和第二套运维工具链，却不会改善内存数据的易失性。
+SQLite 内存模式无需新增运行时依赖，同时保留 SQL 事务、约束，并尽可能复用文件 SQLite
+的 schema 与 migration 路径；后端无关的一致性测试继续覆盖方言差异。
 
 ## 部署可移植性
 
 同一套架构必须能够部署在裸金属机、虚拟机或容器中。打包方式可以不同，但持久化和
 恢复契约保持一致：
 
-- 单实例可以使用 SQLite，并把输出写入持久化的主机目录；
+- 零配置安装使用有界易失内存状态；需要单机持久化时使用 SQLite，并把输出写入持久化
+  主机目录；
 - 容器必须把 `SHARKRAIL_STATE_DIR` 挂载到持久化主机目录或数据卷，因为容器可写层可能
   被替换；
 - 升级期间必须避免两个 Server 实例同时打开同一个 SQLite 数据库；
@@ -557,19 +628,20 @@ resync，不能猜测遗漏了哪些事件。
 
 ## 实施顺序
 
-### 第一阶段：单节点持久化服务
+### 第一阶段：单节点服务
 
 - REST 提交、查询、输出、结果和取消接口；
+- 系统配置发现、validate/show/init 命令和安装后的示例配置；
 - 独立的 Control/Executor Master、有界的按角色 Worker Pool、heartbeat、drain、替换、
   重启退避，以及适用于受支持平台的外部 Supervisor 配置示例；
-- `JobStore`/`OutputStore` 接口、SQLite/本地文件默认实现、migration、备份与幂等
-  admission；
+- `JobStore`/`OutputStore` 接口、有界 SQLite 内存/临时文件默认实现、持久化文件 SQLite、
+  migration、备份与幂等 admission；
 - 声明式 `spec`/`status`、revision 校验、持久事件、Condition 和周期性 full resync；
 - 一组 Controller 和一个 Executor，复用现有 `SessionManager`；
 - 本地文件 `OutputStore`；
 - 事务 Outbox、签名 Webhook、重试和死信；
-- Master/Worker 重启风暴、重复提交、重复调谐、漏事件、回调失败、SQLite 磁盘满/损坏、
-  过载和崩溃注入测试。
+- Master/Worker 重启风暴、易失 store epoch 清理、重复提交、重复调谐、漏事件、回调失败、
+  SQLite 磁盘满/损坏、过载和崩溃注入测试。
 
 ### 第二阶段：多 Executor 可靠性
 

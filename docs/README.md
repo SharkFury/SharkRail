@@ -22,6 +22,8 @@ integrating, operating, or contributing to the runtime.
 - [Protocol reference](PROTOCOL.md): JSON-RPC methods, events, results, and errors
 - [Agent integrations](INTEGRATIONS.md): MCP, JSON-RPC, and Python entry points
 - [Configuration and limits](CONFIGURATION.md): CLI controls and runtime defaults
+- [Future service configuration example](../configs/sharkrail.toml.example):
+  proposed system-service, persistence, Worker, and overload settings
 - [Versioning policy](VERSIONING.md): package, protocol, and compatibility rules
 
 ## Operate
