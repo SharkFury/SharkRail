@@ -1,27 +1,51 @@
 # 可靠异步任务架构
 
-状态：设计提案；SharkRail v0.1 尚未实现。
+状态：`Unreleased` 已提供实验性的单机实现；本文中的多机架构仍是设计方向。
 
-本方案在现有运行时之上增加一个可选、自托管的 C/S 控制面。客户端声明期望状态，API
-将它持久化，多个可重入 Controller 持续比较期望状态与实际状态并执行调谐。客户端得到
-持久化 `job_id` 后即可断开，不需要关注执行连接和中间过程，任务结束后由 SharkRail
-可靠通知。
+该功能在现有运行时之上增加一个可选、自托管的 C/S 控制面。客户端声明期望状态，API
+将它写入状态存储，多个可重入 Controller 持续比较期望状态与实际状态并执行调谐。客户端
+得到 `job_id` 后即可断开，不需要关注执行连接和中间过程，任务结束后由 SharkRail 通知。
+跨重启保留状态需要使用文件 SQLite 模式。
 
 它不是工作流引擎或商业托管服务。一个 Job 只监督一个命令或交互会话；DAG、定时
 调度、业务重试、凭据系统和沙箱供应仍属于上层系统或执行目标。
 
 英文规范见 [ASYNC_JOBS.md](ASYNC_JOBS.md)。
 
+## 当前实现边界
+
+当前版本已经实现最有用的单机闭环：
+
+| 当前已实现 | 明确尚未实现 |
+| --- | --- |
+| HTTP 提交、查询、结果、输出和取消 API | 多机调度与故障切换 |
+| 必填幂等键与带 fencing 的 Attempt 所有权 | PostgreSQL 与 S3 兼容适配器 |
+| 默认 SQLite 内存模式与持久化文件 SQLite | 独立 Executor Master 与进程池 |
+| 有界本地输出文件 | 增量持久化输出流与 SSE |
+| 一个 Control Master 监督一个可替换 Worker | 命令启动后的自动重试 |
+| 有界请求、调谐、执行和通知并发 | 交互式 PTY Job 与远程 Executor |
+| 事务 Outbox、HMAC 签名、重试与死信 | 工作流编排与多语言 SDK |
+
+Worker 持有唯一的 SQLite 连接，并使用有界的角色线程。Master 同时检查 heartbeat 和
+调谐进度；Worker 崩溃或失去进展时，Master 会按有界指数退避替换它，并尽力清理 Worker
+最后上报的进程组。操作系统级进程树所有权仍是主要清理机制。
+
+内存模式明确是易失模式。只有文件 SQLite 模式承诺已接受的资源记录能够跨服务重启保留。
+输出在命令结束时一次性提交，尚不支持执行中的持久化分块流。下文涉及独立
+Control/Executor Master、PostgreSQL、对象存储、多机 lease 或 SSE 的内容都是目标设计，
+不是当前已经交付的能力。
+
 ## 目标与承诺
 
-- 持久化资源记录是真实来源，内存队列不是；
-- 只有任务持久化成功后才返回已接受；
+- SQLite 资源记录是在其存储生命周期内的事实源，应用内存队列不是；
+- 文件 SQLite 模式下，只有任务持久化成功后才返回已接受；
 - 相同幂等键的重复请求不会创建重复任务；
 - 同一 Job 最多只有一个当前执行尝试能够更新结果；
 - 每个已启动 Attempt 都进入明确终态或 `executor_lost`；
 - 终态结果与通知意图在同一个事务中提交；
 - Webhook 至少投递一次，接收方可以可靠去重；
-- Client、API、Scheduler 和通知进程重启不会丢失已接受任务；
+- 文件 SQLite 模式下，服务重启不会丢失已接受的资源记录与待投递通知；中断的运行中
+  Attempt 会进入 `executor_lost`；
 - 输出丢失、Executor 丢失、重试和回调失败都必须显式可见。
 
 Controller 承诺的是最终收敛，不是瞬时成功。每一个调谐动作都必须能够在崩溃后安全
@@ -31,7 +55,18 @@ Controller 承诺的是最终收敛，不是瞬时成功。每一个调谐动作
 此时无法证明带外部副作用的命令是否已经执行。因此默认只允许启动前重试；启动后不
 自动重试，除非调用方明确声明命令幂等。
 
-## 总体架构
+## 当前单机架构
+
+```text
+Client --HTTP--> Control Master --> 集成 Worker
+                                    |--> 有界请求线程
+                                    |--> 调谐线程
+                                    |--> 有界执行线程 --> SessionManager --> OS 进程
+                                    |--> 通知线程 --> 签名 Webhook
+                                    +--> SQLite JobStore + 本地 OutputStore
+```
+
+## 目标多机架构
 
 ```text
 Client
@@ -167,7 +202,7 @@ SHARKRAIL_JOB_STORE_URL=sqlite:////var/lib/sharkrail/sharkrail.db
 SHARKRAIL_OUTPUT_STORE_URL=file:///var/lib/sharkrail/output
 ```
 
-多节点部署使用受支持的适配器，第一批提供 PostgreSQL 和 S3 兼容对象存储：
+未来多节点部署预计使用 PostgreSQL 和 S3 兼容对象存储；当前版本不接受这些 URL：
 
 ```text
 SHARKRAIL_JOB_STORE_URL=postgresql://user:password@db/sharkrail
@@ -196,19 +231,15 @@ SQLite 内存模式让程序在没有数据库配置时仍可使用，但它属�
   不能冒险触发 OOM；
 - 提交和状态响应包含 `"durability": "volatile"`，启动日志输出一次醒目警告，
   `/health/state` 报告 `DEGRADED_VOLATILE_STORE`；
-- 需要“客户端断开后任务仍可靠”的调用方必须配置 SQLite 或 PostgreSQL。
+- 需要跨服务重启保留状态的调用方必须配置文件 SQLite。
 
-Master 不能成为内存数据库。内存模式下，它只启动一个专用 SQLite State Worker，并由
-该 Worker 持有唯一权威的内存数据库；所有 API、Controller 和 Notification Worker 通过
-有界本地 IPC 访问。State Worker 统一创建连接，避免每个 Worker 意外得到彼此隔离的
-`:memory:` 数据库。Store 每次启动生成新的 `store_epoch`。Store 被替换后，Control
-Master 必须先要求 Executor Master 终止属于旧 epoch 的全部命令，并确认清理成功后才接收
-新 Job，否则记录已经消失的命令可能成为不可见孤儿进程。
+集成 Worker 持有唯一权威的内存 SQLite 连接，其有界角色线程共享该连接。Worker 每次
+启动生成新的 `store_epoch`。Worker 故障时，Master 根据最后一次 heartbeat 上报的信息
+尽力清理进程组，然后再启动拥有全新空状态和 epoch 的 Worker。
 
 数据库配置缺失时选择 SQLite 内存模式；显式配置 `sqlite:///:memory:` 表示主动选择。
-相反，已经配置的文件 SQLite 或 PostgreSQL 无效或不可连接时，绝不能自动回退内存：
-服务进入 unready，并对新任务返回 `503`，直到原事实源恢复。静默回退会产生状态分裂和
-假成功。
+相反，已经配置的文件 SQLite 无法使用时绝不能自动回退内存：Worker 启动失败，Master
+执行有界重启策略。静默回退会产生状态分裂和假成功。
 
 不采用 H2。H2 很适合 JVM 应用，但在 Python 运行时中会额外引入 JVM、JDBC 集成、用于
 跨进程访问的数据库 Server 进程和第二套运维工具链，却不会改善内存数据的易失性。
@@ -513,7 +544,7 @@ OS 进程创建和持久化启动确认之间存在不可消除的崩溃窗口�
 Attempt，使用 fencing token，并将不确定性明确报告，不能静默重复执行可能有副作用的
 命令。
 
-## 持久化输出
+## 增量持久化输出（目标扩展）
 
 长任务输出不能只保存在 `SessionManager` 内存中。新增输出存储接口：
 
@@ -626,22 +657,25 @@ resync，不能猜测遗漏了哪些事件。
 - Executor lease 过期检测时间有明确上界；
 - 公开回调投递延迟分位数和死信率。
 
-## 实施顺序
+## 交付状态与后续顺序
 
-### 第一阶段：单节点服务
+### 已交付的实验性单机子集
 
 - REST 提交、查询、输出、结果和取消接口；
 - 系统配置发现、validate/show/init 命令和安装后的示例配置；
-- 独立的 Control/Executor Master、有界的按角色 Worker Pool、heartbeat、drain、替换、
-  重启退避，以及适用于受支持平台的外部 Supervisor 配置示例；
+- 一个 Control Master 和一个集成 Worker、有界角色线程、heartbeat/进度检查、drain、
+  替换与重启退避；
 - `JobStore`/`OutputStore` 接口、有界 SQLite 内存/临时文件默认实现、持久化文件 SQLite、
   migration、备份与幂等 admission；
-- 声明式 `spec`/`status`、revision 校验、持久事件、Condition 和周期性 full resync；
+- 声明式 `spec`/`status`、revision 校验、持久事件、Condition 与状态驱动调谐；
 - 一组 Controller 和一个 Executor，复用现有 `SessionManager`；
 - 本地文件 `OutputStore`；
 - 事务 Outbox、签名 Webhook、重试和死信；
-- Master/Worker 重启风暴、易失 store epoch 清理、重复提交、重复调谐、漏事件、回调失败、
-  SQLite 磁盘满/损坏、过载和崩溃注入测试。
+- Master/Worker 启动与重启上界、重复提交、所有权 fencing、回调签名、取消、超时、
+  过载限制、持久化重启恢复和实例锁回归测试。
+
+单机模式仍需继续加强：增量输出持久化、各平台孤儿进程故障注入、磁盘满/损坏测试、
+周期性 full resync 指标，以及独立 Executor 进程隔离。
 
 ### 第二阶段：多 Executor 可靠性
 
@@ -660,5 +694,5 @@ resync，不能猜测遗漏了哪些事件。
 - 有界 soak 测试和公开可靠性证据；
 - 仅当数据库 Outbox 吞吐成为实测瓶颈时增加消息队列适配器。
 
-从提案升级为支持契约之前，每一个状态迁移都必须有故障注入测试，Windows、Linux 和
+从实验功能升级为支持契约之前，每一个状态迁移都必须有故障注入测试，Windows、Linux 和
 macOS 必须有真实进程泄漏测试，并公开恢复证据。代码完成不等于可靠性已经得到证明。

@@ -49,6 +49,15 @@ cleanly with an explanation when the capability is unavailable.
 | MCP host | [`mcp_stdio_client.py`](integrations/mcp_stdio_client.py) | MCP initialize, tool discovery, and capability call |
 | ACP client terminal | [`acp_terminal_adapter.py`](integrations/acp_terminal_adapter.py) | ACP terminal create, output, wait, and release |
 
+### Asynchronous service
+
+| Scenario | Example | What it demonstrates |
+| --- | --- | --- |
+| Embedded Job service | [`asynchronous_job.py`](service/asynchronous_job.py) | Submit a Job in-process and retrieve retained output |
+| Disconnecting HTTP client | [`http_job_client.py`](service/http_job_client.py) | Submit over HTTP, close the connection, and inspect the result later |
+| Durable local restart | [`durable_restart.py`](service/durable_restart.py) | Persist state/output in file SQLite and recover it in a new Worker |
+| Signed completion callback | [`completion_webhook.py`](service/completion_webhook.py) | Verify HMAC and use the event ID for receiver deduplication |
+
 ### Platform adapters
 
 | Scenario | Example | What it demonstrates |
@@ -83,6 +92,11 @@ sharkrail run --event-log sharkrail-events.jsonl -- python -V
 # Start an integration server.
 sharkrail serve
 sharkrail mcp
+
+# Inspect configuration and start the asynchronous HTTP service.
+sharkrail config paths
+sharkrail config sample
+sharkrail server
 ```
 
 On Windows, replace `python` with the appropriate interpreter command when it

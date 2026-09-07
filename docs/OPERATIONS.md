@@ -1,7 +1,36 @@
 # Operations guide
 
-This guide covers a long-lived local SharkRail stdio service embedded in an
-agent host. The host remains responsible for service supervision and isolation.
+This guide covers both the long-lived local stdio integration and the optional
+self-hosted asynchronous HTTP service. The host remains responsible for outer
+service supervision and isolation.
+
+## Run the asynchronous service
+
+Inspect the effective settings before startup:
+
+```bash
+sharkrail config validate --config /etc/sharkrail/sharkrail.toml
+sharkrail config show --config /etc/sharkrail/sharkrail.toml
+sharkrail server --config /etc/sharkrail/sharkrail.toml
+```
+
+On Windows, use `%ProgramData%\SharkRail\sharkrail.toml`. By default the
+Control Master supervises one integrated Worker. It checks heartbeat and
+reconciliation progress, gracefully drains on shutdown, restarts a failed or
+stalled Worker with bounded exponential backoff, and stops after a restart
+storm so an outer supervisor can alert and decide what to do. Use
+`--single-process` only for diagnostics and tests.
+
+Probe `/health/live`, `/health/ready`, and `/health/state`. Volatile mode is
+ready but reports `DEGRADED_VOLATILE_STORE`; it is suitable for zero-config
+use, not restart survival. Configure file SQLite and a durable output directory
+before relying on disconnect-and-return behavior across restarts.
+
+Non-loopback listening requires `server.auth_token` or
+`SHARKRAIL_AUTH_TOKEN`. This is bearer authentication, not transport security;
+terminate TLS at a trusted local reverse proxy and restrict network access.
+Callback targets are operator-registered by ID and can use HMAC secrets. Alert
+when `pending_callbacks` grows or `dead_callbacks` is nonzero.
 
 ## Production checklist
 
@@ -15,6 +44,8 @@ agent host. The host remains responsible for service supervision and isolation.
 6. Give the service an outer process/memory limit and restart policy.
 7. Test shutdown, cancellation, descendant cleanup, and disk-full behavior in
    the deployment environment.
+8. For HTTP Jobs, verify idempotency-key reuse, callback deduplication, Worker
+   restart, SQLite backup/restore, and output capacity before production use.
 
 ## Health and alert signals
 
@@ -47,9 +78,11 @@ budgets, pending RPC requests, and OS process/handle limits. Load-test the real
 mix of pipe and PTY commands. Backpressure or reject work before SharkRail's
 hard limit rather than retrying immediately.
 
-Sessions are process-local and intentionally not durable. After a host crash,
+Native sessions are process-local and intentionally not durable. After a host crash,
 start a new runtime, reconcile any externally visible work, and treat previous
-session IDs as lost. SharkRail does not replay commands.
+session IDs as lost. Async Job resource records can survive a Worker restart
+only in file-SQLite mode; interrupted running attempts are marked
+`executor_lost` and are not silently replayed.
 
 ## Upgrade and rollback
 

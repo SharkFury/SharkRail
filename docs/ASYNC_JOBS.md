@@ -1,35 +1,64 @@
 # Reliable asynchronous jobs
 
-Status: design proposal; not implemented in v0.1.
+Status: experimental single-host implementation in `Unreleased`; the
+multi-host architecture in this document remains a design direction.
 
-This document proposes an optional, self-hosted client/server layer for long-
+This document defines an optional, self-hosted client/server layer for long-
 running SharkRail commands. Clients declare desired state, the API persists it,
 and idempotent controllers continuously reconcile observed state toward that
-desired state. A client can submit a command, receive a durable job ID,
-disconnect, and later receive a terminal notification without supervising the
-execution connection.
+desired state. A client can submit a command, receive a job ID, disconnect, and
+later receive a terminal notification without supervising the execution
+connection. Persistence across restart requires file SQLite mode.
 
-The proposal does not turn SharkRail into a workflow engine or hosted service.
+This service does not turn SharkRail into a workflow engine or hosted service.
 It supervises one command or interactive session per job. DAGs, schedules,
 business retries, credentials, and sandbox provisioning remain outside the
 execution core.
 
 See [ASYNC_JOBS.zh-CN.md](ASYNC_JOBS.zh-CN.md) for the Chinese translation.
 
+## Current implementation boundary
+
+The current release implements the useful single-host core:
+
+| Implemented now | Deliberately deferred |
+| --- | --- |
+| HTTP submit, inspect, result, output, and cancel APIs | Multi-host scheduling and failover |
+| Required idempotency keys and fenced attempt ownership | PostgreSQL and S3-compatible adapters |
+| SQLite memory default and durable file SQLite | Independent Executor Master and process pool |
+| Local bounded output files | Incremental durable output streaming and SSE |
+| One Control Master supervising one replaceable Worker | Automatic retry after a command starts |
+| Bounded controller, executor, request, and notification concurrency | Interactive PTY Jobs and remote executors |
+| Transactional callback Outbox, HMAC signatures, retry, and dead letters | Language SDKs and workflow orchestration |
+
+The Worker owns one authoritative SQLite connection and uses bounded role
+threads. The Master monitors heartbeat and reconciliation progress, replaces a
+failed or stalled Worker with bounded exponential backoff, and makes a
+best-effort cleanup of process groups reported by the failed Worker. Native OS
+process-tree ownership remains the primary cleanup mechanism.
+
+Memory mode is intentionally volatile. Only file SQLite mode claims that an
+accepted resource survives a service restart. Output is committed when the
+command completes; live durable chunk streaming is not implemented. All later
+sections that describe separate Control/Executor Masters, PostgreSQL, object
+storage, multi-host leases, or SSE are target design, not shipped behavior.
+
 ## Goals and guarantees
 
-The design aims to guarantee that:
+Within the current implementation boundary and selected durability class,
+SharkRail guarantees that:
 
-- the durable resource record, rather than an in-memory queue, is the source of
-  truth;
-- an accepted job has been durably recorded;
+- the SQLite resource record, rather than an application queue, is the source
+  of truth while its configured store exists;
+- in file-SQLite mode, an accepted job has been durably recorded;
 - duplicate submissions with the same idempotency key do not create duplicate
   jobs;
 - at most one current execution attempt can update a job;
 - every started attempt reaches an explicit terminal or lost state;
 - the terminal result and notification intent are committed atomically;
 - notifications are delivered at least once and can be deduplicated;
-- client, API, scheduler, and notification restarts do not lose accepted work;
+- file-SQLite service restarts do not lose accepted resource records or pending
+  notifications; interrupted running attempts become `executor_lost`;
 - output loss, executor loss, retry, and callback failure are never silent.
 
 Controllers provide eventual convergence, not instantaneous success. Every
@@ -42,7 +71,18 @@ effects may therefore be unsafe to retry. The default is no automatic retry
 after an attempt has started; callers may opt in only for commands they know to
 be idempotent.
 
-## Architecture
+## Implemented single-host architecture
+
+```text
+Client --HTTP--> Control Master --> integrated Worker
+                                    |--> bounded request threads
+                                    |--> reconciliation threads
+                                    |--> bounded execution threads --> SessionManager --> OS process
+                                    |--> notification threads --> signed webhook
+                                    +--> SQLite JobStore + local OutputStore
+```
+
+## Target multi-host architecture
 
 ```text
 Client
@@ -192,8 +232,8 @@ SHARKRAIL_JOB_STORE_URL=sqlite:////var/lib/sharkrail/sharkrail.db
 SHARKRAIL_OUTPUT_STORE_URL=file:///var/lib/sharkrail/output
 ```
 
-Multi-node installations use a supported adapter, initially PostgreSQL and an
-S3-compatible output store:
+Future multi-node installations are expected to use PostgreSQL and an
+S3-compatible output store; these URLs are not accepted by the current release:
 
 ```text
 SHARKRAIL_JOB_STORE_URL=postgresql://user:password@db/sharkrail
@@ -203,7 +243,7 @@ SHARKRAIL_OUTPUT_STORE_URL=s3://sharkrail-output/jobs
 On Windows, a relative SQLite or file URL resolves under
 `%ProgramData%\SharkRail\data`; on Unix it resolves under
 `SHARKRAIL_STATE_DIR`, whose service default is `/var/lib/sharkrail`.
-`SHARKRAIL_JOB_STORE_URL_FILE` should also be supported for a DSN mounted from a
+`SHARKRAIL_JOB_STORE_URL_FILE` supports a DSN mounted from a
 secret; it is mutually exclusive with the direct URL. Unknown schemes must fail
 startup. A backend is supported only after passing the same
 transaction, revision, lease, migration, crash-recovery, and Outbox conformance
@@ -230,25 +270,19 @@ an explicitly degraded durability class:
 - submit and status responses include `"durability": "volatile"`, startup logs
   emit one prominent warning, and `/health/state` reports
   `DEGRADED_VOLATILE_STORE`;
-- a caller that needs disconnect-and-return reliability must configure SQLite
-  or PostgreSQL.
+- a caller that needs restart survival must configure file SQLite.
 
-The Master must not become the memory database. In memory mode it starts exactly
-one dedicated SQLite State Worker with one authoritative in-memory database;
-all API, Controller, and Notification Workers use bounded local IPC to access
-it. The State Worker owns connection creation so separate `:memory:` databases
-cannot accidentally be created per Worker. It generates a new `store_epoch` on
-every start. If it is replaced, the Control Master first asks the Executor
-Master to terminate all commands from the old epoch and confirms cleanup before
-accepting new Jobs; otherwise invisible orphan commands could continue after
-their Job records disappeared.
+The integrated Worker owns exactly one authoritative in-memory SQLite
+connection shared by its bounded role threads. It generates a new `store_epoch`
+on every start. If the Worker fails, the Master uses its latest heartbeat to
+make a best-effort process-group cleanup before replacement; the new Worker has
+a new empty store and epoch.
 
 An absent database setting selects SQLite memory mode. An explicit
 `sqlite:///:memory:` selects it intentionally. By contrast, an invalid or
-unreachable configured file SQLite or PostgreSQL database must never trigger
-automatic memory fallback: the service becomes unready and returns `503` for
-admission until the configured source of truth recovers. Silent fallback would
-create split state and false success.
+unusable configured file SQLite database never triggers automatic memory
+fallback: Worker startup fails and the Master applies its bounded restart
+policy. Silent fallback would create split state and false success.
 
 H2 is not used. It is a strong embedded database for JVM applications, but in a
 Python runtime it would add a JVM, JDBC integration, another server process for
@@ -623,7 +657,7 @@ start confirmation. SharkRail records an attempt before starting the process,
 uses an executor-generated fencing token, and reports uncertainty rather than
 silently rerunning a command that may have side effects.
 
-## Durable output
+## Incremental durable output (target extension)
 
 Long-running output must not live only in `SessionManager` memory. Add an output
 store contract:
@@ -749,27 +783,30 @@ example:
 - bounded detection time for expired executor leases;
 - published callback-delivery latency percentiles and dead-letter rate.
 
-## Delivery plan
+## Delivery status and plan
 
-### Phase 1: single-node service
+### Shipped experimental single-node subset
 
 - REST submit, inspect, output, result, and cancel APIs;
 - system configuration discovery, validation/show/init commands, and the
   installed example configuration;
-- separate Control/Executor Masters, bounded role-specific Worker pools,
-  heartbeat, drain, replacement, restart backoff, and external-supervisor
-  examples for supported platforms;
+- one Control Master and one integrated Worker, bounded role threads,
+  heartbeat/progress checks, drain, replacement, and restart backoff;
 - `JobStore`/`OutputStore` interfaces, bounded in-memory SQLite and temporary-
   file defaults, durable file SQLite, migrations, backups, and idempotent
   admission;
 - declarative `spec`/`status`, revision checks, durable events, conditions, and
-  periodic full resynchronization;
+  state-driven reconciliation;
 - one controller set and executor using the existing `SessionManager`;
 - local-file `OutputStore`;
 - transactional Outbox, signed webhook, retry, and dead letters;
-- Master/Worker restart storms, volatile-store epoch cleanup, duplicate-submit,
-  duplicate-reconcile, missed-event, callback-failure, SQLite disk-full/
-  corruption, overload, and crash-injection tests.
+- regression tests for Master/Worker startup and restart bounds, duplicate
+  submission, ownership fencing, callback signing, cancellation, timeout,
+  overload limits, durable restart recovery, and instance locking.
+
+Remaining single-host hardening includes incremental output persistence,
+platform-native orphan-process fault injection, disk-full/corruption tests,
+periodic full resync metrics, and independent Executor process isolation.
 
 ### Phase 2: multi-executor reliability
 
@@ -790,7 +827,7 @@ example:
 - optional message-broker adapter only when database Outbox throughput is a
   measured constraint.
 
-Promotion from proposal to supported contract requires failure-injection tests
+Promotion from experimental to supported contract requires failure-injection tests
 for every claimed transition, native process-leak tests on Windows/Linux/macOS,
 and documented recovery evidence. Implementation progress alone is not a
 reliability claim.

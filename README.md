@@ -27,8 +27,9 @@ cleanup, or one honest contract across operating systems.
 **Positioning: SharkRail provides bounded, observable, and verifiable command
 supervision for long-running and concurrent processes started by cross-platform
 agent workflows.** It supervises each process session; it does not provide
-workflow orchestration, retries, cross-session memory, checkpoints, runtime
-restart recovery, or LLM context management.
+workflow orchestration, cross-session memory, checkpoints, or LLM context
+management. Its optional single-host Job service adds asynchronous submission
+and file-SQLite restart recovery without changing that boundary.
 
 ## Why SharkRail?
 
@@ -69,6 +70,8 @@ shared infrastructure. Read the [public value design](docs/VALUE.md).
 - MCP and JSON-RPC 2.0 over stdio plus an asynchronous Python API
 - Runtime health, statistics, trace IDs, redacted audit logs, and OpenTelemetry hooks
 - Runtime-probed capability negotiation and active `doctor` diagnostics
+- Optional self-hosted HTTP Jobs with idempotent submission, SQLite state,
+  supervised Master/Worker recovery, and signed completion webhooks
 
 ## Quick start
 
@@ -155,6 +158,26 @@ See [agent integrations](docs/INTEGRATIONS.md) for MCP configuration and
 Runnable examples for every supported integration surface and core execution
 scenario are indexed in [`examples/README.md`](examples/README.md).
 
+## Submit a long-running Job and disconnect
+
+Start the optional service. With no configuration it runs in explicitly
+volatile SQLite memory mode; use the example file to configure durable local
+state.
+
+```bash
+sharkrail config sample
+sharkrail server
+
+curl -X POST http://127.0.0.1:8765/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: build-42' \
+  -d '{"command":["python","-c","print(42)"],"timeout_seconds":300}'
+```
+
+The response contains `job_id`, `status_url`, `result_url`, and `durability`.
+The client may disconnect, poll later, or select an operator-configured signed
+callback. See [reliable asynchronous Jobs](docs/ASYNC_JOBS.md).
+
 ## Cross-platform contract
 
 | Capability | Windows | Linux | macOS |
@@ -195,7 +218,7 @@ Start with the [documentation index](docs/README.md), or go directly to:
 - [Product scope and principles](docs/PRODUCT.md)
 - [Public value, stewardship, and evidence](docs/VALUE.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Reliable asynchronous jobs proposal](docs/ASYNC_JOBS.md)
+- [Reliable asynchronous jobs](docs/ASYNC_JOBS.md)
 - [Protocol reference](docs/PROTOCOL.md)
 - [Runnable examples by use case](examples/README.md)
 - [Configuration and limits](docs/CONFIGURATION.md)

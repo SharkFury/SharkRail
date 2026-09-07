@@ -84,6 +84,9 @@ sharkrail --version
 sharkrail run --json -- python -c "print('hello')"
 sharkrail capabilities --json
 sharkrail doctor
+sharkrail config validate
+sharkrail config sample
+sharkrail server --help
 sharkrail serve
 ```
 

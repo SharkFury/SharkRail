@@ -18,6 +18,15 @@ def test_source_modules_follow_architecture_layers() -> None:
         },
         "integrations": {"acp.py", "mcp.py", "protocol.py", "schema.py"},
         "observability": {"telemetry.py"},
+        "service": {
+            "config.py",
+            "http.py",
+            "master.py",
+            "models.py",
+            "output.py",
+            "server.py",
+            "store.py",
+        },
     }
 
     for package, modules in expected_packages.items():

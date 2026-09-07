@@ -12,13 +12,23 @@ from . import __version__
 from .core.models import CommandMode, ResourceLimits
 from .integrations.mcp import McpRuntime
 from .integrations.protocol import JsonRpcRuntime, serve_stdio
-from .observability.telemetry import EventRecorder
+from .observability.telemetry import EventRecorder, configure_logging
 from .runtime.capabilities import collect
 from .runtime.doctor import diagnose, format_report, write_diagnostic_bundle
 from .runtime.executor import CommandRunner
 from .runtime.policy import ExecutionPolicy
 from .runtime.routing import Shell, Target, WslOptions, direct_command, shell_command
 from .runtime.sessions import SessionManager
+from .service.config import (
+    ConfigError,
+    example_config_text,
+    initialize_config,
+    load_config,
+    system_config_path,
+)
+from .service.http import serve_http
+from .service.master import ControlMaster
+from .service.server import JobService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,6 +116,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument(
         "--bundle", metavar="PATH", help="Write a secret-free diagnostic bundle"
+    )
+
+    config = subparsers.add_parser("config", help="Inspect service configuration")
+    config_actions = config.add_subparsers(dest="config_action", required=True)
+    config_actions.add_parser(
+        "sample", help="Print the installed configuration example"
+    )
+    config_actions.add_parser("paths", help="Print the default configuration paths")
+    config_show = config_actions.add_parser(
+        "show", help="Print effective configuration"
+    )
+    config_show.add_argument("--config", metavar="PATH", default=None)
+    config_validate = config_actions.add_parser(
+        "validate", help="Validate configuration"
+    )
+    config_validate.add_argument("--config", metavar="PATH", default=None)
+    config_init = config_actions.add_parser(
+        "init", help="Install an example configuration"
+    )
+    config_init.add_argument("--system", action="store_true")
+    config_init.add_argument("--path", metavar="PATH", default=None)
+    config_init.add_argument("--force", action="store_true")
+
+    server = subparsers.add_parser("server", help="Run the asynchronous Job service")
+    server.add_argument("--config", metavar="PATH", default=None)
+    server.add_argument(
+        "--single-process",
+        action="store_true",
+        help="Run one Worker directly for diagnostics and tests",
     )
 
     return parser
@@ -322,8 +361,68 @@ def main() -> int:
             print(format_report(report))
         return 0 if report.healthy else 1
 
+    if ns.command == "config":
+        return _config_command(ns, parser)
+
+    if ns.command == "server":
+        try:
+            config_path = Path(ns.config) if ns.config else None
+            config = load_config(config_path, require_explicit=config_path is not None)
+        except ConfigError as err:
+            parser.error(str(err))
+        configure_logging(config.logging.level)
+        if ns.single_process:
+            try:
+                serve_http(JobService(config))
+            except KeyboardInterrupt:
+                pass
+            return 0
+        return ControlMaster(config, config.config_path).run()
+
     parser.print_help()
     return 1
+
+
+def _config_command(ns: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if ns.config_action == "sample":
+        print(example_config_text(), end="")
+        return 0
+    if ns.config_action == "paths":
+        active = system_config_path()
+        print(
+            json.dumps(
+                {
+                    "system": str(active),
+                    "example": str(active) + ".example",
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if ns.config_action in {"show", "validate"}:
+        try:
+            config_path = Path(ns.config) if ns.config else None
+            config = load_config(config_path, require_explicit=config_path is not None)
+        except ConfigError as err:
+            parser.error(str(err))
+        if ns.config_action == "show":
+            print(json.dumps(config.public_dict(), ensure_ascii=False, indent=2))
+        else:
+            print(f"configuration valid ({config.durability})")
+        return 0
+    if ns.config_action == "init":
+        if not ns.system and ns.path is None:
+            parser.error("config init requires --system or --path")
+        if ns.system and ns.path is not None:
+            parser.error("config init accepts only one of --system or --path")
+        target = system_config_path() if ns.system else Path(ns.path)
+        try:
+            initialize_config(target, force=ns.force)
+        except (ConfigError, OSError) as err:
+            parser.error(str(err))
+        print(target)
+        return 0
+    parser.error("unknown config action")
 
 
 if __name__ == "__main__":
