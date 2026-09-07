@@ -3,11 +3,11 @@
 Status: design proposal; not implemented in v0.1.
 
 This document proposes an optional, self-hosted client/server layer for long-
-running SharkRail commands. It borrows Kubernetes' state-management pattern:
-clients declare desired state, the API persists it, and idempotent controllers
-continuously reconcile observed state toward that desired state. A client can
-submit a command, receive a durable job ID, disconnect, and later receive a
-terminal notification without supervising the execution connection.
+running SharkRail commands. Clients declare desired state, the API persists it,
+and idempotent controllers continuously reconcile observed state toward that
+desired state. A client can submit a command, receive a durable job ID,
+disconnect, and later receive a terminal notification without supervising the
+execution connection.
 
 The proposal does not turn SharkRail into a workflow engine or hosted service.
 It supervises one command or interactive session per job. DAGs, schedules,
@@ -32,9 +32,9 @@ The design aims to guarantee that:
 - client, API, scheduler, and notification restarts do not lose accepted work;
 - output loss, executor loss, retry, and callback failure are never silent.
 
-As in Kubernetes, controllers provide eventual convergence, not instantaneous
-success. Every reconciliation action must be repeatable after a crash, and all
-externally visible state changes must use optimistic concurrency and fencing.
+Controllers provide eventual convergence, not instantaneous success. Every
+reconciliation action must be repeatable after a crash, and all externally
+visible state changes must use optimistic concurrency and fencing.
 
 SharkRail must not claim exactly-once command execution. A host can fail after a
 process starts but before durable confirmation. Commands with external side
@@ -70,23 +70,6 @@ not pass ownership through an in-memory queue; the queue is a query over durable
 resources that still require reconciliation. `SessionManager` remains the
 semantic execution core. A new `JobManager` implements resource validation and
 controller coordination without duplicating process lifecycle logic.
-
-The Kubernetes concepts map as follows:
-
-| Kubernetes | SharkRail |
-| --- | --- |
-| API Server | Job API |
-| etcd | `JobStore` (SQLite by default, PostgreSQL for multi-node) |
-| Resource `spec` / `status` | Job desired state / observed state |
-| Controller reconciliation loop | Job, lease, notification, and retention reconcilers |
-| Scheduler | Executor placement controller |
-| kubelet | Executor agent and `SessionManager` |
-| `resourceVersion` / `generation` | Revision / desired-state generation |
-| Pod lease and UID | Attempt lease, epoch, and immutable attempt ID |
-
-This is an architectural analogy, not a dependency. SharkRail must not use the
-Kubernetes control plane's etcd, ConfigMaps, Secrets, or custom resources as its
-job database.
 
 ## Declarative resource model
 
@@ -178,25 +161,32 @@ SQLite is a supported default for local and single-instance operation, not a
 multi-node database. Enable foreign keys, WAL, busy timeout, explicit
 transactions, and a documented durability setting; perform schema migrations
 and backups. The database and output directories must be on durable storage.
-Never let multiple server pods share one SQLite file over NFS, SMB, or a
-multi-writer volume.
+Never let multiple server instances share one SQLite file over NFS, SMB, or
+another network filesystem.
 
-## Deployment on Kubernetes
+## Deployment portability
 
-Kubernetes persists its own cluster state in etcd, but SharkRail application
-state remains in `JobStore`. A Pod's writable layer is disposable. For a
-single-replica SQLite deployment, mount one CSI-backed PersistentVolumeClaim at
-`/var/lib/sharkrail`, use `ReadWriteOncePod` where available, and ensure rollout
-cannot run old and new replicas concurrently. A StatefulSet provides stable Pod
-identity and stable volume attachment, but does not make SQLite highly
-available. Volume snapshots and restore tests are still required.
+The same architecture must run on a bare-metal host, a virtual machine, or in a
+container. Platform packaging may change, but the persistence and recovery
+contract does not:
 
-For multiple API/controller replicas or executors on multiple nodes, use an
-external or operator-managed PostgreSQL service. Put large output in
-S3-compatible object storage. Database credentials should come from a mounted
-Secret via `SHARKRAIL_JOB_STORE_URL_FILE`. PersistentVolumes preserve files;
-controllers and leases preserve logical correctness. Neither mechanism replaces
-the other.
+- a single-instance installation may use SQLite and local output on a durable
+  host directory;
+- a container must mount `SHARKRAIL_STATE_DIR` from durable host or volume
+  storage because its writable layer may be replaced;
+- upgrades must prevent two server instances from opening the same SQLite
+  database concurrently;
+- multiple API/controller instances or executors on multiple hosts require a
+  shared PostgreSQL `JobStore`; large output should use S3-compatible object
+  storage;
+- database credentials may be supplied through
+  `SHARKRAIL_JOB_STORE_URL_FILE`, regardless of the process supervisor or
+  container runtime.
+
+Files surviving a process or machine restart and controllers restoring logical
+state are separate requirements. Operators need tested database backups,
+output retention, restart procedures, and restore drills in every deployment
+form.
 
 ## API
 

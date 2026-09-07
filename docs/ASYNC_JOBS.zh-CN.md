@@ -2,10 +2,10 @@
 
 状态：设计提案；SharkRail v0.1 尚未实现。
 
-本方案在现有运行时之上增加一个可选、自托管的 C/S 控制面，并借鉴 Kubernetes 的
-状态管理模式：客户端声明期望状态，API 将它持久化，多个可重入 Controller 持续比较
-期望状态与实际状态并执行调谐。客户端得到持久化 `job_id` 后即可断开，不需要关注执行
-连接和中间过程，任务结束后由 SharkRail 可靠通知。
+本方案在现有运行时之上增加一个可选、自托管的 C/S 控制面。客户端声明期望状态，API
+将它持久化，多个可重入 Controller 持续比较期望状态与实际状态并执行调谐。客户端得到
+持久化 `job_id` 后即可断开，不需要关注执行连接和中间过程，任务结束后由 SharkRail
+可靠通知。
 
 它不是工作流引擎或商业托管服务。一个 Job 只监督一个命令或交互会话；DAG、定时
 调度、业务重试、凭据系统和沙箱供应仍属于上层系统或执行目标。
@@ -24,8 +24,8 @@
 - Client、API、Scheduler 和通知进程重启不会丢失已接受任务；
 - 输出丢失、Executor 丢失、重试和回调失败都必须显式可见。
 
-与 Kubernetes 一样，Controller 承诺的是最终收敛，不是瞬时成功。每一个调谐动作都
-必须能够在崩溃后安全重做；所有对外可见的状态更新都必须校验 revision 和 fencing。
+Controller 承诺的是最终收敛，不是瞬时成功。每一个调谐动作都必须能够在崩溃后安全
+重做；所有对外可见的状态更新都必须校验 revision 和 fencing。
 
 系统不能承诺命令严格 Exactly Once。主机可能在启动进程后、持久化启动确认前宕机，
 此时无法证明带外部副作用的命令是否已经执行。因此默认只允许启动前重试；启动后不
@@ -58,22 +58,6 @@ API 与 Controller 除 `JobStore` 外都不保存状态。Controller 之间不�
 任务所有权；所谓队列，只是对“尚未收敛的持久化资源”的查询。`SessionManager` 继续
 作为进程生命周期的语义核心；新增 `JobManager` 负责资源校验和 Controller 协调，不
 复制进程监督逻辑。
-
-Kubernetes 概念与 SharkRail 的对应关系：
-
-| Kubernetes | SharkRail |
-| --- | --- |
-| API Server | Job API |
-| etcd | `JobStore`（默认 SQLite，多节点使用 PostgreSQL） |
-| Resource 的 `spec` / `status` | Job 期望状态 / 实际状态 |
-| Controller reconciliation loop | Job、Lease、通知和保留期 Reconciler |
-| Scheduler | Executor 调度 Controller |
-| kubelet | Executor Agent 与 `SessionManager` |
-| `resourceVersion` / `generation` | revision / 期望状态 generation |
-| Pod lease 与 UID | Attempt lease、epoch 与不可变 Attempt ID |
-
-这里借鉴的是架构，不依赖 Kubernetes。SharkRail 不能把 Kubernetes 控制面的 etcd、
-ConfigMap、Secret 或 CRD 当成自己的 Job 数据库。
 
 ## 声明式资源模型
 
@@ -155,21 +139,25 @@ lease、migration、崩溃恢复和 Outbox 一致性测试，适配器才能被�
 
 SQLite 是正式支持的本地、单实例默认方案，不是多节点数据库。应启用 foreign key、
 WAL、busy timeout、显式事务和有文档说明的 durability 级别，并提供 migration 与备份。
-数据库和输出目录必须位于持久磁盘。禁止多个 Server Pod 通过 NFS、SMB 或多写卷共享
-同一个 SQLite 文件。
+数据库和输出目录必须位于持久磁盘。禁止多个 Server 实例通过 NFS、SMB 或其他网络
+文件系统共享同一个 SQLite 文件。
 
-## 部署在 Kubernetes 上
+## 部署可移植性
 
-Kubernetes 使用 etcd 保存自己的集群状态，但 SharkRail 的业务状态仍然保存在
-`JobStore`。Pod 可写层随时可能丢失。SQLite 单副本部署需要把 CSI 提供的 PVC 挂载到
-`/var/lib/sharkrail`，尽可能使用 `ReadWriteOncePod`，并保证滚动升级时新旧实例不会同时
-访问数据库。StatefulSet 能提供稳定 Pod 身份和卷绑定，但不会自动让 SQLite 具备高可用；
-仍然需要卷快照和恢复演练。
+同一套架构必须能够部署在裸金属机、虚拟机或容器中。打包方式可以不同，但持久化和
+恢复契约保持一致：
 
-如果 API/Controller 有多个副本，或 Executor 分布在多个节点，应使用外部托管或 Operator
-管理的 PostgreSQL，并把大体积输出写入 S3 兼容对象存储。数据库连接信息通过挂载的
-Secret 和 `SHARKRAIL_JOB_STORE_URL_FILE` 提供。PV 解决文件存活问题，Controller 和
-Lease 解决逻辑状态收敛问题，两者不能互相替代。
+- 单实例可以使用 SQLite，并把输出写入持久化的主机目录；
+- 容器必须把 `SHARKRAIL_STATE_DIR` 挂载到持久化主机目录或数据卷，因为容器可写层可能
+  被替换；
+- 升级期间必须避免两个 Server 实例同时打开同一个 SQLite 数据库；
+- 多 API/Controller 实例或跨主机 Executor 必须使用共享的 PostgreSQL `JobStore`，大
+  体积输出建议使用 S3 兼容对象存储；
+- 无论使用哪一种进程管理器或容器运行时，都可以通过
+  `SHARKRAIL_JOB_STORE_URL_FILE` 提供数据库凭据。
+
+文件在进程或机器重启后仍然存在，以及 Controller 能恢复逻辑状态，是两个独立要求。
+每一种部署形态都需要经过验证的数据库备份、输出保留、重启流程和恢复演练。
 
 ## 客户端 API
 
