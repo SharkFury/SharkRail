@@ -12,16 +12,16 @@ Release. Do not upload the generated distributions to PyPI manually.
 
 ## Create a release
 
-1. Update `version` in `pyproject.toml` and `__version__` in
-   `src/sharkrail/__init__.py` to the same `MAJOR.MINOR.PATCH` value.
+1. Update `__version__` in `src/sharkrail/_version.py`. This is the single
+   version source used by both package metadata and the runtime API.
 2. Move the release notes in `CHANGELOG.md` under that version and date.
 3. Open a pull request and wait for the full CI matrix to pass on the release
    commit.
 4. Create and push an annotated tag for that exact commit:
 
    ```bash
-   git tag -a v0.1.1 -m "SharkRail 0.1.1"
-   git push origin v0.1.1
+   git tag -a vMAJOR.MINOR.PATCH -m "SharkRail MAJOR.MINOR.PATCH"
+   git push origin vMAJOR.MINOR.PATCH
    ```
 
 The `release` workflow validates the tag, reruns the complete test suite on
@@ -39,7 +39,7 @@ artifact, but its tag guards prevent both PyPI and GitHub publication.
 Locally, the equivalent checks are:
 
 ```bash
-python3 .github/scripts/check_release.py v0.1.1
+python3 .github/scripts/check_release.py vMAJOR.MINOR.PATCH
 python -m ruff check .
 python -m ruff format --check .
 python -m mypy src/sharkrail
@@ -55,7 +55,7 @@ After the GitHub Release is created, download an artifact and verify that GitHub
 attested it from this repository's release workflow:
 
 ```bash
-gh attestation verify sharkrail-0.1.1-py3-none-any.whl --repo SharkFury/SharkRail
+gh attestation verify sharkrail-MAJOR.MINOR.PATCH-py3-none-any.whl --repo SharkFury/SharkRail
 ```
 
 Inspect the attached `*.sbom.cdx.json` and verify its root component hash against

@@ -29,5 +29,6 @@ def test_source_modules_follow_architecture_layers() -> None:
     assert {path.name for path in PACKAGE_ROOT.glob("*.py")} == {
         "__init__.py",
         "__main__.py",
+        "_version.py",
         "cli.py",
     }
