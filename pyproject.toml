@@ -21,6 +21,7 @@ classifiers = [
     "Topic :: System :: Shells",
 ]
 dependencies = [
+    "tomli>=2.0; python_version < '3.11'",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
 ]
 
@@ -71,4 +72,4 @@ where = ["src"]
 version = {attr = "sharkrail._version.__version__"}
 
 [tool.setuptools.package-data]
-sharkrail = ["py.typed", "schemas/*.json"]
+sharkrail = ["py.typed", "resources/*.toml.example", "schemas/*.json"]

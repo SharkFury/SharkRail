@@ -22,7 +22,8 @@ SharkRail 是执行基础设施，不是终端模拟器、远程 Shell 或安全
 
 **定位：SharkRail 为跨平台 Agent 工作流启动的长任务与并发进程，提供有界、可观察、
 可验证的命令执行监督。** 它监督每个独立进程会话，不提供工作流编排、重试、跨会话记忆、
-checkpoint、运行时重启恢复或大模型上下文管理。
+checkpoint 或大模型上下文管理。可选的单机 Job 服务提供异步提交与文件 SQLite 重启恢复，
+但不会改变这个边界。
 
 ## 为什么需要 SharkRail？
 
@@ -58,6 +59,7 @@ SharkRail 将这些答案转化为结构化结果、有序事件、稳定错误�
 - MCP、stdio JSON-RPC 2.0 服务和异步 Python API
 - health/stats、trace ID、脱敏审计日志和 OpenTelemetry 接口
 - 运行时 capability negotiation 与主动 `doctor` 诊断
+- 可选的自托管 HTTP Job：幂等提交、SQLite 状态、Master/Worker 故障恢复与签名完成回调
 
 ## 快速开始
 
@@ -116,6 +118,24 @@ sharkrail serve
 所有支持的集成入口和核心执行场景，都可以在
 [`examples/README.md`](examples/README.md) 中找到可运行示例。
 
+## 提交长任务后断开
+
+启动可选服务。没有配置时会使用明确标记为易失的 SQLite 内存模式；需要跨重启保留状态时，
+请从示例配置启用文件 SQLite。
+
+```bash
+sharkrail config sample
+sharkrail server
+
+curl -X POST http://127.0.0.1:8765/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: build-42' \
+  -d '{"command":["python","-c","print(42)"],"timeout_seconds":300}'
+```
+
+响应包含 `job_id`、`status_url`、`result_url` 与 `durability`。客户端可以断开后再查询，
+也可以选择由运维人员预先配置的签名回调。详见[可靠异步任务](docs/ASYNC_JOBS.zh-CN.md)。
+
 ## 跨平台契约
 
 | 能力 | Windows | Linux | macOS |
@@ -146,7 +166,7 @@ PTY/ConPTY 本身是合并终端流，因此 SharkRail 不会伪造不存在的 
 - [产品范围与原则](docs/PRODUCT.md)
 - [公共价值、维护承诺与证据](docs/VALUE.zh-CN.md)
 - [系统架构](docs/ARCHITECTURE.md)
-- [可靠异步任务架构提案](docs/ASYNC_JOBS.zh-CN.md)
+- [可靠异步任务架构](docs/ASYNC_JOBS.zh-CN.md)
 - [协议参考](docs/PROTOCOL.md)
 - [按使用场景组织的可运行示例](examples/README.md)
 - [配置与限制](docs/CONFIGURATION.md)

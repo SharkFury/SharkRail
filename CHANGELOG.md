@@ -8,12 +8,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Document the proposed reliable, self-hosted asynchronous job architecture,
-  using portable declarative resources and reconciliation, volatile and durable
-  SQLite/PostgreSQL `JobStore` modes, system configuration discovery, a shipped
-  configuration example, supervised Master/Worker process isolation, overload
-  protection, executor leases, transactional webhooks, and explicit failure
-  semantics.
+- Add an experimental, self-hosted asynchronous Job service with REST submit,
+  inspect, result, output, and cancel APIs; required idempotency keys; bounded
+  admission and execution; and explicit volatile/durable response state.
+- Add default in-memory SQLite and durable file-SQLite Job stores, local output
+  storage, attempt fencing, lease renewal, restart recovery, transactional
+  callback Outbox records, HMAC-signed delivery, retry, and dead-letter state.
+- Add a Control Master that supervises one replaceable integrated Worker using
+  heartbeat/progress checks, graceful drain, bounded restart backoff, and
+  best-effort orphan-process cleanup.
+- Add strict platform-aware TOML discovery, environment overrides, packaged and
+  repository configuration examples, and `config sample/paths/show/validate/init`
+  commands.
+- Document the portable long-term architecture and clearly separate unshipped
+  PostgreSQL, object-storage, multi-host, and independent Executor work.
 
 ## 0.1.2 - 2026-09-07
 

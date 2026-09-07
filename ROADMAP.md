@@ -30,15 +30,15 @@ in [CHANGELOG.md](CHANGELOG.md); decision criteria belong in the
 - Keep the README, protocol, schema, examples, and implementation aligned with
   what has actually shipped. MCP and ACP adapters are current integrations, not
   future roadmap items.
+- Harden the experimental single-host asynchronous Job service now that HTTP
+  resources, bounded memory/file SQLite, system configuration, reconciliation,
+  Master/Worker supervision, and transactional callbacks are implemented.
 
 ## Next: make the contract independently useful
 
-- Validate the optional self-hosted asynchronous job design with a single-node
-  prototype: declarative Job resources, bounded in-memory and durable file
-  SQLite modes, system configuration discovery, idempotent reconciliation,
-  periodic full resync, transactional Outbox delivery, and explicit executor-
-  loss semantics. It must reuse the execution contract and remain separate from
-  workflow orchestration.
+- Add incremental durable output, stronger platform-native crash injection,
+  periodic full-resync evidence, and independent Executor process isolation to
+  the optional self-hosted asynchronous Job service.
 - Extract the failure corpus and conformance runner so they can test an
   implementation without importing the Python reference runtime.
 - Validate ACP terminal and MCP tool mappings with their upstream schemas and

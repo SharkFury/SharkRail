@@ -1,3 +1,4 @@
+from importlib import resources
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -49,3 +50,13 @@ def test_package_version_has_one_configuration_source() -> None:
     assert 'dynamic = ["version"]' in project
     assert 'version = {attr = "sharkrail._version.__version__"}' in project
     assert "from ._version import __version__" in package_init
+
+
+def test_service_configuration_example_is_packaged() -> None:
+    example = (
+        resources.files("sharkrail.resources")
+        .joinpath("sharkrail.toml.example")
+        .read_text(encoding="utf-8")
+    )
+    assert "[job_store]" in example
+    assert 'url = "sqlite:///:memory:"' in example

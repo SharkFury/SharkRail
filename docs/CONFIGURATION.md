@@ -4,6 +4,61 @@ SharkRail favors explicit request options and constructor arguments over hidden
 global configuration. Limits are enforced by the shared session runtime, so the
 CLI, Python API, and JSON-RPC service observe the same core behavior.
 
+## Asynchronous service configuration
+
+`sharkrail server` reads strict TOML from `/etc/sharkrail/sharkrail.toml` on
+Unix or `%ProgramData%\SharkRail\sharkrail.toml` on Windows. An explicitly
+selected missing or invalid file fails startup; an absent implicit system file
+is valid and selects bounded SQLite memory mode.
+
+```bash
+sharkrail config paths
+sharkrail config sample
+sharkrail config init --system
+sharkrail config validate
+sharkrail config show
+```
+
+Use `--config PATH` for a specific file or `SHARKRAIL_CONFIG_FILE` for a process
+default. CLI selection has precedence over environment, which has precedence
+over the system path. The following environment values override individual
+TOML settings:
+
+| Environment variable | Setting |
+| --- | --- |
+| `SHARKRAIL_JOB_STORE_URL` | `job_store.url` |
+| `SHARKRAIL_JOB_STORE_URL_FILE` | `job_store.url_file` |
+| `SHARKRAIL_OUTPUT_STORE_URL` | `output_store.url` |
+| `SHARKRAIL_LISTEN` | `server.listen` |
+| `SHARKRAIL_AUTH_TOKEN` | `server.auth_token` |
+| `SHARKRAIL_STATE_DIR` | Base directory for relative durable paths |
+
+Without a database setting, `sqlite:///:memory:` keeps the service immediately
+usable but loses jobs, idempotency records, and callbacks when the Worker
+restarts. Responses and `/health/state` identify this as `volatile`. For
+single-host restart recovery use:
+
+```toml
+[job_store]
+url = "sqlite:///sharkrail.db"
+
+[output_store]
+url = "file://./output"
+max_total_bytes = 1073741824
+```
+
+Relative paths resolve under `/var/lib/sharkrail` on Unix and
+`%ProgramData%\SharkRail\data` on Windows, unless `SHARKRAIL_STATE_DIR` is set.
+File SQLite uses WAL, full synchronous writes, foreign keys, and a local
+single-instance lock. The current release supports SQLite JobStore and local
+file OutputStore only; unsupported schemes fail startup instead of silently
+falling back to memory.
+
+The complete installed example is
+[`configs/sharkrail.toml.example`](../configs/sharkrail.toml.example). Unknown
+keys, invalid values, a non-loopback listener without a bearer token, and a
+group/world-writable Unix configuration are rejected.
+
 ## Command controls
 
 | Control | CLI | JSON-RPC `session.start` | Meaning |
