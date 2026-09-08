@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -61,6 +62,34 @@ def test_config_rejects_world_readable_secrets(tmp_path):
 
     with pytest.raises(ConfigError, match="permissions are too broad"):
         load_config(path)
+
+
+def test_config_enforces_windows_private_dacl(monkeypatch, tmp_path):
+    path = _write_config(tmp_path / "service.toml", "[server]\n")
+    monkeypatch.setattr("sharkrail.service.config.os.name", "nt")
+    denied = PermissionError("Everyone has read access")
+
+    def reject(_path):
+        raise denied
+
+    monkeypatch.setattr(
+        "sharkrail.service.config.validate_private_path",
+        reject,
+    )
+
+    with pytest.raises(ConfigError, match="protected DACL") as error:
+        load_config(path)
+
+    assert error.value.__cause__ is denied
+
+
+def test_initialize_config_hardens_windows_acl(tmp_path):
+    target = tmp_path / "service.toml"
+
+    with patch("sharkrail.service.config.secure_private_path") as secure:
+        initialize_config(target)
+
+    assert any(call.args[0] == target for call in secure.call_args_list)
 
 
 def test_tenant_tokens_are_validated_and_redacted(tmp_path):

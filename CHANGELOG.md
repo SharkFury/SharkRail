@@ -30,6 +30,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listeners with a same-host TLS reverse proxy for remote exposure.
 - Give every Job a bounded default deadline and output budget, reject unknown
   request fields, and scope registered callback endpoints to one tenant.
+- Start Windows pipe processes suspended and fail closed unless SharkRail can
+  assign them to their Job Object before resuming user code.
 
 ### Fixed
 
@@ -48,6 +50,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Repair the MCP `session_read` input schema, avoid reverse DNS during HTTP
   binding, select IPv6 for IPv6 listeners, keep Python 3.9 mypy checks active,
   and emit unique runtime-only SBOM components.
+
+### Security
+
+- Enforce protected Windows DACLs for sensitive configuration, durable state,
+  SQLite sidecars, locks, and persisted output.
 
 ## 0.1.2 - 2026-09-07
 

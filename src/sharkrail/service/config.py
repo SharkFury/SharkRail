@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from .windows_security import secure_private_path, validate_private_path
+
 if sys.version_info >= (3, 11):  # pragma: no cover - selected by interpreter
     import tomllib
 else:  # pragma: no cover - exercised on supported Python 3.9/3.10
@@ -326,12 +328,14 @@ def initialize_config(path: Path, *, force: bool = False) -> Path:
     descriptor, temporary = tempfile.mkstemp(prefix=".sharkrail.", dir=str(path.parent))
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            secure_private_path(Path(temporary), directory=False)
             handle.write(example_config_text())
             handle.flush()
             os.fsync(handle.fileno())
         if os.name != "nt":
             os.chmod(temporary, 0o640)
         os.replace(temporary, path)
+        secure_private_path(path, directory=False)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -518,6 +522,14 @@ def _positive_values(config: ServiceConfig) -> None:
 
 def _validate_permissions(path: Path) -> None:
     if os.name == "nt":
+        try:
+            validate_private_path(path)
+        except OSError as err:
+            raise ConfigError(
+                f"sensitive file permissions are too broad: {path}; "
+                "expected a protected DACL limited to the service identity, "
+                "SYSTEM, and Administrators"
+            ) from err
         return
     try:
         mode = path.stat().st_mode

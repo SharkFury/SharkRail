@@ -27,6 +27,9 @@ if os.name != "nt":
     import struct
     import termios
 
+_WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+_WINDOWS_CREATE_SUSPENDED = getattr(subprocess, "CREATE_SUSPENDED", 0x4)
+
 
 def _child_environment(spec: CommandSpec) -> dict[str, str]:
     """Build a child environment with the Windows process bootstrap minimum."""
@@ -152,7 +155,7 @@ class PipeBackend(ExecutionBackend):
             "stderr": asyncio.subprocess.PIPE,
         }
         if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+            kwargs["creationflags"] = self._windows_creation_flags()
         else:
             kwargs["start_new_session"] = True
             kwargs["preexec_fn"] = _resource_limiter(spec)
@@ -161,6 +164,9 @@ class PipeBackend(ExecutionBackend):
             process=process,
             process_tree="taskkill_fallback" if os.name == "nt" else "process_group",
         )
+
+    def _windows_creation_flags(self) -> int:
+        return _WINDOWS_NEW_PROCESS_GROUP
 
     async def write(self, handle: ProcessHandle, data: bytes) -> None:
         if handle.stdin_closed or handle.process.stdin is None:
@@ -250,10 +256,15 @@ class PipeBackend(ExecutionBackend):
 class WindowsPipeBackend(PipeBackend):
     """Windows pipe backend backed by a kill-on-close Job Object."""
 
+    def _windows_creation_flags(self) -> int:
+        # The user's entry point cannot execute or create descendants before
+        # the root process has been placed in its owning Job Object.
+        return _WINDOWS_NEW_PROCESS_GROUP | _WINDOWS_CREATE_SUSPENDED
+
     async def start(self, spec: CommandSpec) -> WindowsProcessHandle:
         # Acquire tree ownership before launching. If Job construction fails,
         # no process exists yet and therefore no fast-exiting child can escape
-        # the cleanup fallback before it has an owner.
+        # before it has an owner.
         job = WindowsJob(
             memory_bytes=spec.resources.memory_bytes,
             cpu_time_seconds=spec.resources.cpu_time_seconds,
@@ -266,29 +277,17 @@ class WindowsPipeBackend(PipeBackend):
             raise
         try:
             job.assign(handle.pid)
-        except OSError:
-            job.close()
-            if _has_resource_limits(spec):
-                await self._reap_unassigned_process(handle)
-                raise
-            # Hosted Windows runners and other parent Job environments can
-            # reject nested assignment. An ultra-short process may also exit
-            # between CreateProcess and AssignProcessToJobObject. Commands
-            # without Job-backed resource limits can still use the portable
-            # taskkill /T fallback implemented by PipeBackend.kill_tree.
-            return WindowsProcessHandle(
-                process=handle.process,
-                process_tree="taskkill_fallback",
-                degraded_reasons=(
-                    (
-                        "Job Object assignment failed; process-tree cleanup uses "
-                        "taskkill /T only while the root process is running"
-                    ),
-                ),
-            )
         except BaseException:
-            job.close()
+            try:
+                job.close()
+            except OSError:
+                pass
             await self._reap_unassigned_process(handle)
+            raise
+        try:
+            job.resume(handle.pid)
+        except BaseException:
+            await self._reap_assigned_process(handle, job)
             raise
         return WindowsProcessHandle(
             process=handle.process,
@@ -327,6 +326,30 @@ class WindowsPipeBackend(PipeBackend):
                 except ProcessLookupError:
                     pass
             await handle.process.wait()
+
+    @staticmethod
+    async def _reap_assigned_process(handle: ProcessHandle, job: WindowsJob) -> None:
+        """Fail closed if a Job-owned suspended process cannot be resumed."""
+
+        try:
+            await asyncio.to_thread(job.terminate)
+            await asyncio.to_thread(job.wait_empty, 1000)
+        except OSError:
+            pass
+        finally:
+            try:
+                job.close()
+            except OSError:
+                pass
+        if handle.process.returncode is None:
+            try:
+                handle.process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(handle.process.wait(), 1.0)
+        except asyncio.TimeoutError:
+            pass
 
 
 def pipe_backend() -> PipeBackend:
@@ -514,6 +537,12 @@ class WindowsPtyBackend(ExecutionBackend):
         return WindowsPtyProcessHandle(
             process=process,
             process_tree="job_object",
+            degraded_reasons=(
+                (
+                    "ConPTY Job assignment occurs after pywinpty spawn; use pipe "
+                    "mode when pre-execution Job containment is required"
+                ),
+            ),
             native_pty=native,
             job=job,
         )
@@ -622,18 +651,6 @@ def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:
             )
 
     return apply_limits
-
-
-def _has_resource_limits(spec: CommandSpec) -> bool:
-    limits = spec.resources
-    return any(
-        value is not None
-        for value in (
-            limits.memory_bytes,
-            limits.cpu_time_seconds,
-            limits.process_count,
-        )
-    )
 
 
 def _as_pty(handle: ProcessHandle) -> PtyProcessHandle:

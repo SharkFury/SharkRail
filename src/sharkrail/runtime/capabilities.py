@@ -50,6 +50,10 @@ def collect() -> Capability:
         degraded: list[str] = []
         if pty_available:
             features.extend(("pty", "resize"))
+            degraded.append(
+                "ConPTY Job assignment occurs immediately after pywinpty spawn; "
+                "suspended-create isolation is available only in pipe mode"
+            )
         else:
             degraded.append("pywinpty is unavailable; ConPTY is disabled")
         if not wsl_available:
@@ -57,7 +61,7 @@ def collect() -> Capability:
         return Capability(
             contract_version="1.0.0",
             platform_name="windows",
-            process_tree="job_object_or_taskkill",
+            process_tree="job_object",
             modes=modes,
             max_output_bytes=16 * 1024 * 1024,
             supports_timeout=True,
@@ -65,7 +69,7 @@ def collect() -> Capability:
             targets=("native", "wsl") if wsl_available else ("native",),
             shells=shells,
             degraded_reasons=tuple(degraded),
-            process_tree_fallbacks=("taskkill_fallback",),
+            process_tree_fallbacks=(),
             resource_limits=("memory_bytes", "cpu_time_seconds", "process_count"),
             verification={
                 "report": "discovery_only",

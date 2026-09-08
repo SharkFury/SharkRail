@@ -434,6 +434,24 @@ def test_sqlite_database_and_sidecars_are_private_under_common_umask(tmp_path: P
         store.close()
 
 
+def test_durable_store_hardens_state_database_and_lock_paths(monkeypatch, tmp_path):
+    secured = []
+
+    def record(path, *, directory):
+        secured.append((Path(path), directory))
+
+    monkeypatch.setattr("sharkrail.service.store.secure_private_path", record)
+    state_dir = tmp_path / "state"
+    store = SqliteJobStore("sqlite:///jobs.db", state_dir=state_dir)
+    try:
+        database = state_dir / "jobs.db"
+        assert (state_dir, True) in secured
+        assert (database, False) in secured
+        assert (Path(f"{database}.lock"), False) in secured
+    finally:
+        store.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
 def test_existing_sqlite_sidecars_are_secured_before_connect(monkeypatch, tmp_path):
     database = tmp_path / "jobs.db"

@@ -60,7 +60,10 @@ The complete installed example is
 keys, invalid values, any non-loopback listener, and a
 world-readable or group/world-writable Unix configuration are rejected. Files
 referenced by `job_store.url_file` and callback `secret_file` use the same
-permission rule (`0640` or stricter).
+permission rule (`0640` or stricter). On Windows, sensitive files must have a
+protected DACL limited to the service identity, LocalSystem, and the built-in
+Administrators group. SharkRail applies the same DACL to its state directory,
+SQLite database and sidecars, lock file, and persisted output paths.
 
 Bearer credentials determine tenant identity; `X-SharkRail-Tenant` is only an
 optional consistency check and cannot select another tenant. A legacy

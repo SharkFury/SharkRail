@@ -10,7 +10,7 @@ Returns the runtime name, package version, and protocol version.
 
 ### `runtime.capabilities`
 
-Returns runtime-probed platform, modes, targets, available shells, process-tree mechanisms and fallbacks, granular resource limits, output limit, feature flags, and degradation reasons. Clients must use this response rather than infer support from the OS name. A started session reports the mechanism it actually acquired; for example, Windows pipe execution can report `taskkill_fallback` when Job Object assignment is rejected by a parent job.
+Returns runtime-probed platform, modes, targets, available shells, process-tree mechanisms and fallbacks, granular resource limits, output limit, feature flags, and degradation reasons. Clients must use this response rather than infer support from the OS name. A started Windows pipe session reports `job_object`; assignment failure is fail-closed before the suspended entry point can run.
 
 The `verification` object marks this response as `discovery_only` and labels
 each capability as present-but-not-probed, selected at session start, or
