@@ -26,11 +26,18 @@ ready but reports `DEGRADED_VOLATILE_STORE`; it is suitable for zero-config
 use, not restart survival. Configure file SQLite and a durable output directory
 before relying on disconnect-and-return behavior across restarts.
 
-Non-loopback listening requires `server.auth_token` or
-`SHARKRAIL_AUTH_TOKEN`. This is bearer authentication, not transport security;
-terminate TLS at a trusted local reverse proxy and restrict network access.
-Callback targets are operator-registered by ID and can use HMAC secrets. Alert
-when `pending_callbacks` grows or `dead_callbacks` is nonzero.
+The built-in HTTP server accepts loopback listeners only because it does not
+terminate TLS. To expose it beyond the host, bind SharkRail to loopback and put
+a same-host TLS reverse proxy in front of it; never forward the plaintext port.
+A single legacy token maps only to tenant `default`; multi-tenant deployments
+must assign a distinct token to each tenant under `server.tenant_tokens` and a
+separate `server.admin_token` for detailed health state.
+With no token configured, the loopback server is an unauthenticated,
+single-tenant local-development mode; do not proxy or deploy that mode in
+production.
+Callback targets are operator-registered by ID, public-network-only by default,
+never follow redirects, and can use HMAC secrets. Alert when `pending_callbacks`
+grows or `dead_callbacks` is nonzero.
 
 ## Production checklist
 
@@ -46,6 +53,8 @@ when `pending_callbacks` grows or `dead_callbacks` is nonzero.
    the deployment environment.
 8. For HTTP Jobs, verify idempotency-key reuse, callback deduplication, Worker
    restart, SQLite backup/restore, and output capacity before production use.
+9. Protect configuration and secret files with mode `0640` or stricter and
+   verify the SQLite database, WAL, SHM, and lock files remain `0600`.
 
 ## Health and alert signals
 

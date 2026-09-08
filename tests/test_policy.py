@@ -10,6 +10,7 @@ from sharkrail.core.errors import ErrorCode, SharkRailError
 from sharkrail.core.models import CommandSpec, ResourceLimits
 from sharkrail.runtime.executor import CommandRunner
 from sharkrail.runtime.policy import ExecutionPolicy, PolicyViolation
+from sharkrail.runtime.routing import Target, WslOptions, direct_command
 from sharkrail.runtime.sessions import SessionManager
 
 
@@ -116,6 +117,109 @@ def test_policy_rejects_working_directory_escape(tmp_path: Path):
             timeout_ms=1,
             max_output_bytes=1,
         )
+
+
+def test_wsl_policy_allowlist_checks_effective_linux_executable():
+    spec = direct_command(
+        "python3",
+        ("-V",),
+        target=Target.WSL,
+        wsl=WslOptions(cwd="/workspace/project"),
+    )
+
+    ExecutionPolicy(allowed_executables=frozenset({"python3"})).enforce(
+        spec, timeout_ms=1, max_output_bytes=1
+    )
+    with pytest.raises(PolicyViolation) as raised:
+        ExecutionPolicy(allowed_executables=frozenset({"wsl.exe"})).enforce(
+            spec, timeout_ms=1, max_output_bytes=1
+        )
+    assert raised.value.rule == "allowed_executables"
+
+
+@pytest.mark.parametrize("denied", ["wsl.exe", "python3"])
+def test_wsl_policy_denylist_checks_launcher_and_linux_executable(denied: str):
+    spec = direct_command(
+        "python3",
+        ("-V",),
+        target=Target.WSL,
+        wsl=WslOptions(cwd="/workspace"),
+    )
+
+    with pytest.raises(PolicyViolation) as raised:
+        ExecutionPolicy(denied_executables=frozenset({denied})).enforce(
+            spec, timeout_ms=1, max_output_bytes=1
+        )
+    assert raised.value.rule == "denied_executables"
+
+
+def test_wsl_policy_checks_linux_working_directory_lexically():
+    policy = ExecutionPolicy(allowed_cwd_roots=(Path("/workspace"),))
+    allowed = direct_command(
+        "python3",
+        target=Target.WSL,
+        wsl=WslOptions(cwd="/workspace/project"),
+    )
+    escaped = direct_command(
+        "python3",
+        target=Target.WSL,
+        wsl=WslOptions(cwd="/workspace/project/../../outside"),
+    )
+
+    policy.enforce(allowed, timeout_ms=1, max_output_bytes=1)
+    with pytest.raises(PolicyViolation) as raised:
+        policy.enforce(escaped, timeout_ms=1, max_output_bytes=1)
+    assert raised.value.rule == "allowed_cwd_roots"
+
+
+@pytest.mark.parametrize("cwd", [None, "workspace/project", "~"])
+def test_wsl_policy_rejects_unverifiable_working_directory(cwd):
+    spec = direct_command("python3", target=Target.WSL, wsl=WslOptions(cwd=cwd))
+    policy = ExecutionPolicy(allowed_cwd_roots=(Path("/workspace"),))
+
+    with pytest.raises(PolicyViolation) as raised:
+        policy.enforce(spec, timeout_ms=1, max_output_bytes=1)
+    assert raised.value.rule == "allowed_cwd_roots"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("python3", "-V"),
+        ("--exec",),
+        ("--shell-type", "login", "--exec", "python3"),
+    ],
+)
+def test_wsl_policy_fails_closed_for_noncanonical_manual_spec(argv):
+    policy = ExecutionPolicy(allowed_executables=frozenset({"python3"}))
+
+    with pytest.raises(PolicyViolation) as raised:
+        policy.enforce(CommandSpec("wsl.exe", argv), timeout_ms=1, max_output_bytes=1)
+    assert raised.value.rule == "wsl_command"
+
+
+def test_wsl_policy_recognizes_absolute_launcher_and_requires_absolute_inner():
+    policy = ExecutionPolicy(
+        allowed_executables=frozenset({"python3"}),
+        require_absolute_executable=True,
+    )
+    relative_inner = CommandSpec(
+        r"C:\Windows\System32\wsl.exe", ("--exec", "python3", "-V")
+    )
+    absolute_inner = CommandSpec(
+        r"C:\Windows\System32\wsl.exe", ("--exec", "/usr/bin/python3", "-V")
+    )
+
+    with pytest.raises(PolicyViolation) as raised:
+        policy.enforce(relative_inner, timeout_ms=1, max_output_bytes=1)
+    assert raised.value.rule == "require_absolute_executable"
+    policy.enforce(absolute_inner, timeout_ms=1, max_output_bytes=1)
+
+    with pytest.raises(PolicyViolation) as raised:
+        ExecutionPolicy(denied_executables=frozenset({"wsl.exe"})).enforce(
+            absolute_inner, timeout_ms=1, max_output_bytes=1
+        )
+    assert raised.value.rule == "denied_executables"
 
 
 def test_policy_loads_strict_json(tmp_path: Path):

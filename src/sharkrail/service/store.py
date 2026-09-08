@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from .models import JobPhase, JobRecord, JobSpec, OutboxRecord, utc_now
@@ -64,14 +64,22 @@ class SqliteJobStore:
         self._max_queued_jobs = max_queued_jobs
         self._max_queued_jobs_per_tenant = max_queued_jobs_per_tenant
         self._lock = threading.RLock()
+        self._output_cleaner: Optional[
+            Callable[[str, Optional[str], Optional[str]], None]
+        ] = None
         self._closed = False
         location = _sqlite_location(url, state_dir=state_dir)
+        self._database_path: Optional[Path] = None
         self._instance_lock: Optional[_InstanceLock] = None
         if location != ":memory:":
-            Path(location).parent.mkdir(parents=True, exist_ok=True)
+            self._database_path = Path(location)
+            self._database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self._instance_lock = _InstanceLock(Path(location + ".lock"))
             self._instance_lock.acquire()
         try:
+            if self._database_path is not None:
+                _secure_file(self._database_path)
+                _secure_sqlite_files(self._database_path)
             self._connection = sqlite3.connect(
                 location,
                 check_same_thread=False,
@@ -86,6 +94,8 @@ class SqliteJobStore:
             self._connection.row_factory = sqlite3.Row
             self._configure()
             self._migrate()
+            if self._database_path is not None:
+                _secure_sqlite_files(self._database_path)
             if not self.volatile:
                 persisted = self._metadata("store_id")
                 if persisted is None:
@@ -106,6 +116,11 @@ class SqliteJobStore:
             if self._instance_lock is not None:
                 self._instance_lock.release()
             self._closed = True
+
+    def set_output_cleaner(
+        self, cleaner: Callable[[str, Optional[str], Optional[str]], None]
+    ) -> None:
+        self._output_cleaner = cleaner
 
     def _configure(self) -> None:
         with self._lock:
@@ -176,6 +191,7 @@ class SqliteJobStore:
                     state TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at REAL NOT NULL,
+                    delivery_attempt_id TEXT,
                     last_error TEXT,
                     created_at TEXT NOT NULL,
                     delivered_at TEXT
@@ -184,7 +200,17 @@ class SqliteJobStore:
                     ON callback_outbox (state, next_attempt_at);
                 """
             )
-            self._set_metadata("schema_version", "1")
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute(
+                    "PRAGMA table_info(callback_outbox)"
+                ).fetchall()
+            }
+            if "delivery_attempt_id" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE callback_outbox ADD COLUMN delivery_attempt_id TEXT"
+                )
+            self._set_metadata("schema_version", "2")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -216,6 +242,7 @@ class SqliteJobStore:
         self, tenant_id: str, idempotency_key: str, spec: JobSpec
     ) -> tuple[JobRecord, bool]:
         spec.validate()
+        self.prune_expired()
         if (
             not isinstance(tenant_id, str)
             or not tenant_id
@@ -241,7 +268,6 @@ class SqliteJobStore:
         ]
         conditions_json = json.dumps(conditions, separators=(",", ":"))
         with self._transaction():
-            self._prune_expired()
             existing = self._connection.execute(
                 "SELECT * FROM jobs WHERE tenant_id = ? AND idempotency_key = ?",
                 (tenant_id, idempotency_key),
@@ -430,6 +456,10 @@ class SqliteJobStore:
                 return self._row_to_job(row)
             if current_phase not in {JobPhase.ASSIGNED, JobPhase.RUNNING}:
                 raise StoreError("attempt is not in a finishable phase")
+            spec_data = json.loads(row["spec_json"])
+            if spec_data.get("desired_state") == "cancelled":
+                phase = JobPhase.CANCELED
+                reason = "cancelled"
             revision = int(row["revision"]) + 1
             now = utc_now()
             conditions = json.loads(row["conditions_json"])
@@ -483,6 +513,9 @@ class SqliteJobStore:
             phase = JobPhase(row["phase"])
             if phase.terminal:
                 return self._row_to_job(row)
+            spec_data = json.loads(row["spec_json"])
+            if spec_data.get("desired_state") == "cancelled":
+                return self._row_to_job(row)
             revision = int(row["revision"]) + 1
             generation = int(row["generation"]) + 1
             now = utc_now()
@@ -496,7 +529,6 @@ class SqliteJobStore:
                 completed_at = None
                 observed = int(row["observed_generation"])
                 reason = row["reason"]
-            spec_data = json.loads(row["spec_json"])
             spec_data["desired_state"] = "cancelled"
             self._connection.execute(
                 """
@@ -529,6 +561,11 @@ class SqliteJobStore:
 
     def recover_interrupted(self) -> int:
         with self._transaction():
+            self._connection.execute(
+                "UPDATE callback_outbox SET state = 'pending', next_attempt_at = ?, "
+                "delivery_attempt_id = NULL WHERE state = 'delivering'",
+                (time.time(),),
+            )
             rows = self._connection.execute(
                 "SELECT * FROM jobs WHERE phase IN (?, ?)",
                 (JobPhase.ASSIGNED.value, JobPhase.RUNNING.value),
@@ -536,19 +573,24 @@ class SqliteJobStore:
             for row in rows:
                 revision = int(row["revision"]) + 1
                 now = utc_now()
+                spec_data = json.loads(row["spec_json"])
+                cancelled = spec_data.get("desired_state") == "cancelled"
+                phase = JobPhase.CANCELED if cancelled else JobPhase.EXECUTOR_LOST
+                reason = "cancelled" if cancelled else "service_restarted"
                 self._connection.execute(
-                    "UPDATE jobs SET phase = ?, revision = ?, completed_at = ?, "
-                    "updated_at = ?, reason = ?, lease_expires_at = NULL WHERE id = ?",
+                    "UPDATE jobs SET phase = ?, observed_generation = generation, "
+                    "revision = ?, completed_at = ?, updated_at = ?, reason = ?, "
+                    "lease_expires_at = NULL WHERE id = ?",
                     (
-                        JobPhase.EXECUTOR_LOST.value,
+                        phase.value,
                         revision,
                         now,
                         now,
-                        "service_restarted",
+                        reason,
                         row["id"],
                     ),
                 )
-                self._event(str(row["id"]), revision, "job.executor_lost")
+                self._event(str(row["id"]), revision, f"job.{phase.value}")
                 updated = self._connection.execute(
                     "SELECT * FROM jobs WHERE id = ?", (row["id"],)
                 ).fetchone()
@@ -560,7 +602,8 @@ class SqliteJobStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT * FROM callback_outbox
+                SELECT callback_outbox.*, jobs.tenant_id AS tenant_id
+                FROM callback_outbox JOIN jobs ON jobs.id = callback_outbox.job_id
                 WHERE state = 'pending' AND next_attempt_at <= ?
                 ORDER BY next_attempt_at LIMIT ?
                 """,
@@ -570,6 +613,7 @@ class SqliteJobStore:
             OutboxRecord(
                 event_id=row["event_id"],
                 job_id=row["job_id"],
+                tenant_id=row["tenant_id"],
                 endpoint_id=row["endpoint_id"],
                 payload=json.loads(row["payload_json"]),
                 attempts=row["attempts"],
@@ -578,28 +622,92 @@ class SqliteJobStore:
             for row in rows
         )
 
-    def outbox_delivered(self, event_id: str) -> None:
-        with self._lock:
+    def claim_outbox_due(
+        self, limit: int = 100, *, lease_seconds: float = 30.0
+    ) -> tuple[OutboxRecord, ...]:
+        """Atomically reserve due callback records for one delivery attempt."""
+
+        if limit <= 0:
+            return ()
+        now = time.time()
+        claimed_rows: list[tuple[sqlite3.Row, str]] = []
+        with self._transaction():
             self._connection.execute(
-                "UPDATE callback_outbox SET state = 'delivered', delivered_at = ? "
-                "WHERE event_id = ?",
-                (utc_now(), event_id),
+                "UPDATE callback_outbox SET state = 'pending', "
+                "delivery_attempt_id = NULL "
+                "WHERE state = 'delivering' AND next_attempt_at <= ?",
+                (now,),
             )
+            rows = self._connection.execute(
+                """
+                SELECT callback_outbox.*, jobs.tenant_id AS tenant_id
+                FROM callback_outbox JOIN jobs ON jobs.id = callback_outbox.job_id
+                WHERE state = 'pending' AND next_attempt_at <= ?
+                ORDER BY next_attempt_at LIMIT ?
+                """,
+                (now, limit),
+            ).fetchall()
+            for row in rows:
+                delivery_attempt_id = f"delivery_{uuid4().hex}"
+                updated = self._connection.execute(
+                    "UPDATE callback_outbox SET state = 'delivering', "
+                    "next_attempt_at = ?, delivery_attempt_id = ? "
+                    "WHERE event_id = ? AND state = 'pending'",
+                    (now + lease_seconds, delivery_attempt_id, row["event_id"]),
+                )
+                if updated.rowcount == 1:
+                    claimed_rows.append((row, delivery_attempt_id))
+        return tuple(
+            OutboxRecord(
+                event_id=row["event_id"],
+                job_id=row["job_id"],
+                tenant_id=row["tenant_id"],
+                endpoint_id=row["endpoint_id"],
+                payload=json.loads(row["payload_json"]),
+                attempts=row["attempts"],
+                next_attempt_at=row["next_attempt_at"],
+                delivery_attempt_id=delivery_attempt_id,
+            )
+            for row, delivery_attempt_id in claimed_rows
+        )
+
+    def outbox_delivered(
+        self, event_id: str, delivery_attempt_id: Optional[str]
+    ) -> bool:
+        with self._lock:
+            updated = self._connection.execute(
+                "UPDATE callback_outbox SET state = 'delivered', delivered_at = ?, "
+                "delivery_attempt_id = NULL "
+                "WHERE event_id = ? AND state = 'delivering' "
+                "AND delivery_attempt_id = ?",
+                (utc_now(), event_id, delivery_attempt_id),
+            )
+        return updated.rowcount == 1
 
     def outbox_failed(
-        self, event_id: str, error: str, *, next_attempt_at: float, permanent: bool
-    ) -> None:
+        self,
+        event_id: str,
+        delivery_attempt_id: Optional[str],
+        error: str,
+        *,
+        next_attempt_at: float,
+        permanent: bool,
+    ) -> bool:
         with self._lock:
-            self._connection.execute(
+            updated = self._connection.execute(
                 "UPDATE callback_outbox SET state = ?, attempts = attempts + 1, "
-                "next_attempt_at = ?, last_error = ? WHERE event_id = ?",
+                "next_attempt_at = ?, last_error = ?, delivery_attempt_id = NULL "
+                "WHERE event_id = ? AND state = 'delivering' "
+                "AND delivery_attempt_id = ?",
                 (
                     "dead" if permanent else "pending",
                     next_attempt_at,
                     error[:1000],
                     event_id,
+                    delivery_attempt_id,
                 ),
             )
+        return updated.rowcount == 1
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
@@ -611,7 +719,8 @@ class SqliteJobStore:
             }
             pending_callbacks = int(
                 self._connection.execute(
-                    "SELECT COUNT(*) FROM callback_outbox WHERE state = 'pending'"
+                    "SELECT COUNT(*) FROM callback_outbox "
+                    "WHERE state IN ('pending', 'delivering')"
                 ).fetchone()[0]
             )
             dead_callbacks = int(
@@ -663,18 +772,43 @@ class SqliteJobStore:
                 (self._max_event_records,),
             )
 
-    def _prune_expired(self) -> None:
+    def prune_expired(self) -> int:
         if not self.volatile:
-            return
+            return 0
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=self._job_ttl_seconds)
         ).isoformat()
         terminal = tuple(phase.value for phase in JobPhase if phase.terminal)
         placeholders = ",".join("?" for _ in terminal)
-        self._connection.execute(
-            f"DELETE FROM jobs WHERE phase IN ({placeholders}) AND completed_at < ?",
-            (*terminal, cutoff),
-        )
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, stdout_path, stderr_path FROM jobs "
+                f"WHERE phase IN ({placeholders}) AND completed_at < ?",
+                (*terminal, cutoff),
+            ).fetchall()
+        cleaned_ids: list[str] = []
+        for row in rows:
+            stdout_path = row["stdout_path"]
+            stderr_path = row["stderr_path"]
+            if self._output_cleaner is None:
+                if stdout_path is not None or stderr_path is not None:
+                    continue
+            else:
+                try:
+                    self._output_cleaner(str(row["id"]), stdout_path, stderr_path)
+                except OSError:
+                    continue
+            cleaned_ids.append(str(row["id"]))
+        deleted = 0
+        with self._transaction():
+            for job_id in cleaned_ids:
+                result = self._connection.execute(
+                    f"DELETE FROM jobs WHERE id = ? AND phase IN ({placeholders}) "
+                    "AND completed_at < ?",
+                    (job_id, *terminal, cutoff),
+                )
+                deleted += result.rowcount
+        return deleted
 
     def _insert_outbox(self, row: sqlite3.Row) -> None:
         spec = JobSpec.from_dict(json.loads(row["spec_json"]))
@@ -750,6 +884,25 @@ def _sqlite_location(url: str, *, state_dir: Optional[Path]) -> str:
     return str(path)
 
 
+def _secure_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
+def _secure_sqlite_files(database: Path) -> None:
+    if os.name == "nt":  # chmod does not express Windows ACLs.
+        return
+    for path in (database, Path(f"{database}-wal"), Path(f"{database}-shm")):
+        try:
+            path.chmod(0o600)
+        except FileNotFoundError:
+            pass
+
+
 class _InstanceLock:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -758,6 +911,8 @@ class _InstanceLock:
     def acquire(self) -> None:
         descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
+            if os.name != "nt":
+                os.fchmod(descriptor, 0o600)
             if os.name == "nt":  # pragma: no cover - exercised on Windows CI
                 import msvcrt
 

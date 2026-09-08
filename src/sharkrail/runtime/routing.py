@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -29,6 +30,67 @@ class WslOptions:
     distribution: Optional[str] = None
     user: Optional[str] = None
     cwd: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class WslInvocation:
+    """The Linux-side execution context encoded in a WSL command line."""
+
+    executable: str
+    cwd: Optional[str]
+
+
+def is_wsl_launcher(executable: str) -> bool:
+    """Return whether an executable name targets the Windows WSL launcher."""
+
+    return ntpath.basename(executable).casefold() in {"wsl", "wsl.exe"}
+
+
+def parse_wsl_invocation(spec: CommandSpec) -> Optional[WslInvocation]:
+    """Return the effective WSL command, rejecting non-canonical launch syntax.
+
+    SharkRail emits long-form WSL options followed by an explicit ``--exec``
+    delimiter. Policy enforcement uses this parser too, so a caller cannot evade
+    checks by constructing a ``CommandSpec`` for ``wsl.exe`` directly.
+    """
+
+    if not is_wsl_launcher(spec.executable):
+        return None
+
+    value_options = {"--distribution", "--user", "--cd"}
+    seen: set[str] = set()
+    cwd: Optional[str] = None
+    index = 0
+    while index < len(spec.argv):
+        option = spec.argv[index]
+        if not isinstance(option, str):
+            raise TypeError("WSL launcher options must be strings")
+        if option == "--exec":
+            if index + 1 >= len(spec.argv):
+                raise ValueError("WSL --exec requires an executable")
+            executable = spec.argv[index + 1]
+            if not isinstance(executable, str):
+                raise TypeError("WSL --exec executable must be a string")
+            if not executable:
+                raise ValueError("WSL --exec requires an executable")
+            return WslInvocation(executable=executable, cwd=cwd)
+        if option not in value_options:
+            raise ValueError(f"unsupported WSL launcher option: {option}")
+        if option in seen:
+            raise ValueError(f"duplicate WSL launcher option: {option}")
+        if index + 1 >= len(spec.argv):
+            raise ValueError(f"WSL launcher option requires a value: {option}")
+        value = spec.argv[index + 1]
+        if not isinstance(value, str):
+            raise TypeError(f"WSL launcher option value must be a string: {option}")
+        if not value:
+            raise ValueError(f"WSL launcher option requires a value: {option}")
+        seen.add(option)
+        if option == "--cd":
+            cwd = value
+        index += 2
+
+    raise ValueError("WSL command requires an explicit --exec delimiter")
 
 
 def shell_command(

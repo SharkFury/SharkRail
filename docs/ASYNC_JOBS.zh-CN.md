@@ -115,7 +115,7 @@ API 与 Controller 除 `JobStore` 外都不保存状态。Controller 之间不�
     "cwd": "/workspace/project",
     "desired_state": "active",
     "timeout_seconds": 3600,
-    "retry_policy": {"before_start": 3, "after_start": 0},
+    "max_output_bytes": 16777216,
     "callback_endpoint_id": "build-system"
   },
   "status": {
@@ -193,8 +193,9 @@ SHARKRAIL_JOB_STORE_URL=sqlite:///:memory:
 SHARKRAIL_OUTPUT_STORE_URL=file://<运行时目录>/output
 ```
 
-命令输出仍写入有界临时文件，不能无限累积在进程内存中。运行时目录只属于当前服务实例，
-重启后可以被删除。需要单机持久化时配置 SQLite：
+命令输出先按硬字节上限在内存中捕获，命令结束后再写入本地 OutputStore；当前尚未实现
+增量持久化输出。易失运行时目录只属于当前服务实例，重启后可以被删除。需要单机持久化时
+配置 SQLite：
 
 ```text
 SHARKRAIL_STATE_DIR=/var/lib/sharkrail
@@ -407,8 +408,8 @@ Content-Type: application/json
   "command": ["pytest", "-q"],
   "cwd": "/workspace/project",
   "timeout_seconds": 3600,
-  "callback": {"endpoint_id": "build-system"},
-  "retry_policy": {"before_start": 3, "after_start": 0}
+  "max_output_bytes": 16777216,
+  "callback": {"endpoint_id": "build-system"}
 }
 ```
 
@@ -609,9 +610,11 @@ COMMIT;
 登记时检查协议、主机、端口、DNS、重定向和租户归属；生产投递必须阻止 loopback、
 link-local、云元数据地址、未授权私网地址和 DNS rebinding。
 
+零配置回环模式明确不启用认证，并把所有请求固定为单一租户 `default`；它只适合本地开发。
+任何生产部署或同机 TLS 代理都必须配置互不相同的租户 Bearer 凭据和独立管理员 token。
 系统还需要：
 
-- 调用方认证、租户隔离和 Job 所有权检查；
+- 配置认证后由凭据绑定租户身份，并执行 Job 所有权检查；
 - 调用方无法放宽的宿主执行策略；
 - command、cwd、env、运行时间、输出和并发限制；
 - 回调密钥与凭据引用加密；

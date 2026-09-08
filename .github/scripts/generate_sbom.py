@@ -19,6 +19,19 @@ def _dependency_name(requirement: str) -> str:
     return match.group(0)
 
 
+def _canonical_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _is_optional(requirement: str) -> bool:
+    """Return whether a wheel requirement is activated only by an extra."""
+
+    _, separator, marker = requirement.partition(";")
+    return bool(
+        separator and re.search(r"\bextra\s*(?:==|!=|\bin\b|\bnot\s+in\b)", marker)
+    )
+
+
 def generate(wheel: Path) -> dict[str, object]:
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     with zipfile.ZipFile(wheel) as archive:
@@ -33,13 +46,23 @@ def generate(wheel: Path) -> dict[str, object]:
     version = metadata["Version"]
     if not name or not version:
         raise ValueError("wheel metadata must contain Name and Version")
-    root_ref = f"pkg:pypi/{name.lower()}@{version}"
-    requirements = sorted(set(metadata.get_all("Requires-Dist", [])))
+    root_ref = f"pkg:pypi/{_canonical_name(name)}@{version}"
+    requirements = sorted(set(metadata.get_all("Requires-Dist", []) or []))
     components = []
     dependency_refs = []
+    runtime_requirements: dict[str, tuple[str, list[str]]] = {}
     for requirement in requirements:
+        if _is_optional(requirement):
+            continue
         dependency = _dependency_name(requirement)
-        reference = f"pkg:pypi/{dependency.lower()}"
+        canonical = _canonical_name(dependency)
+        _display_name, declarations = runtime_requirements.setdefault(
+            canonical, (dependency, [])
+        )
+        declarations.append(requirement)
+
+    for canonical, (dependency, declarations) in sorted(runtime_requirements.items()):
+        reference = f"pkg:pypi/{canonical}"
         dependency_refs.append(reference)
         components.append(
             {
@@ -47,8 +70,12 @@ def generate(wheel: Path) -> dict[str, object]:
                 "bom-ref": reference,
                 "name": dependency,
                 "purl": reference,
+                "scope": "required",
                 "properties": [
-                    {"name": "sharkrail:declared-requirement", "value": requirement}
+                    {
+                        "name": "sharkrail:declared-requirements",
+                        "value": json.dumps(declarations, separators=(",", ":")),
+                    }
                 ],
             }
         )

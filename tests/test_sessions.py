@@ -9,9 +9,26 @@ import pytest
 
 from sharkrail.core.errors import ErrorCode, ErrorStage, SharkRailError
 from sharkrail.core.models import CommandMode, CommandSpec, ResourceLimits
-from sharkrail.runtime.backends import PipeBackend, ProcessHandle, PtyProcessHandle
+from sharkrail.runtime.backends import (
+    CancellationPolicy,
+    ExecutionBackend,
+    PipeBackend,
+    ProcessHandle,
+    PtyProcessHandle,
+)
 from sharkrail.runtime.executor import CompletionReason, LifecycleEventType
 from sharkrail.runtime.sessions import SessionManager, SessionState
+
+
+async def _wait_for_pid_exit(pid: int, timeout: float = 2) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.01)
+    return False
 
 
 def test_session_streams_input_output_and_events():
@@ -199,6 +216,40 @@ def test_session_manager_enforces_input_limit():
     asyncio.run(_run())
 
 
+def test_timed_out_input_is_still_charged_to_the_session_quota():
+    async def _run() -> None:
+        backend = PipeBackend()
+        manager = SessionManager(
+            backend=backend,
+            max_input_bytes=4,
+            max_total_input_bytes=5,
+            termination_timeout_ms=10,
+        )
+        session = await manager.start(
+            CommandSpec(
+                executable=sys.executable, argv=("-c", "import time; time.sleep(30)")
+            )
+        )
+
+        async def stalled_write(_handle: ProcessHandle, _data: bytes) -> None:
+            await asyncio.Event().wait()
+
+        try:
+            with patch.object(backend, "write", side_effect=stalled_write):
+                with pytest.raises(asyncio.TimeoutError):
+                    await manager.write(session.id, b"123")
+                assert session.input_bytes == 3
+                assert manager.stats()["io"]["input_bytes"] == 3
+
+                with pytest.raises(SharkRailError) as raised:
+                    await manager.write(session.id, b"456")
+                assert raised.value.error.code == ErrorCode.RESOURCE_LIMITED
+        finally:
+            await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
 def test_session_manager_limits_output_event_count():
     async def _run() -> None:
         manager = SessionManager(max_output_events=1)
@@ -364,6 +415,90 @@ def test_drain_timeout_kills_descendants_holding_output_open():
     asyncio.run(_run())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group fixture")
+def test_normal_root_exit_reaps_descendants_that_close_output_streams():
+    async def _run() -> None:
+        manager = SessionManager()
+        code = (
+            "import subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL); "
+            "print(child.pid, flush=True)"
+        )
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", code))
+        )
+        child_pid = -1
+        try:
+            result = await asyncio.wait_for(manager.wait(session.id), timeout=5)
+            assert result is not None
+            assert result.reason == CompletionReason.SUCCESS
+            child_pid = int(result.stdout.strip())
+            assert await _wait_for_pid_exit(child_pid)
+        finally:
+            await manager.shutdown()
+            if child_pid > 0:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    asyncio.run(_run())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group fixture")
+def test_sigint_root_exit_reaps_descendant_that_ignores_interrupt(tmp_path):
+    async def _run() -> None:
+        manager = SessionManager()
+        ready_path = tmp_path / "child-ready"
+        child_code = (
+            "import os,signal,sys,time; "
+            "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+            "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)"
+        )
+        parent_code = (
+            "import os,subprocess,sys,time; "
+            "child=subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL); "
+            "deadline=time.monotonic()+5; "
+            "\nwhile not os.path.exists(sys.argv[1]) and time.monotonic()<deadline: time.sleep(.01)\n"
+            "time.sleep(30)"
+        )
+        session = await manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", parent_code, str(ready_path), child_code),
+            )
+        )
+        child_pid = -1
+        try:
+            deadline = asyncio.get_running_loop().time() + 2
+            while (
+                not ready_path.exists() and asyncio.get_running_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.01)
+            child_pid = int(ready_path.read_text())
+            await manager.cancel(
+                session.id,
+                CancellationPolicy(interrupt_grace_ms=500, terminate_grace_ms=100),
+            )
+            result = await asyncio.wait_for(manager.wait(session.id), timeout=5)
+            assert result is not None
+            assert result.reason == CompletionReason.CANCELLED, result.error
+            assert await _wait_for_pid_exit(child_pid)
+        finally:
+            await manager.shutdown()
+            if child_pid > 0:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    asyncio.run(_run())
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows process fixture")
 def test_windows_drain_timeout_attempts_descendant_cleanup_after_root_exit():
     async def _run() -> None:
@@ -442,6 +577,226 @@ def test_cancel_and_dispose_are_idempotent():
         )
         await manager.wait(session.id)
         await manager.dispose(session.id)
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_cancelled_cancel_call_still_finishes_process_cleanup():
+    class ControlledProcess:
+        pid = 123
+        returncode = None
+        stdin = None
+        stdout = None
+        stderr = None
+
+        async def wait(self) -> int:
+            while self.returncode is None:
+                await asyncio.sleep(0)
+            return self.returncode
+
+    class ControlledBackend(ExecutionBackend):
+        def __init__(self) -> None:
+            self.process = ControlledProcess()
+            self.interrupt_started = asyncio.Event()
+            self.release_interrupt = asyncio.Event()
+            self.tree_killed = asyncio.Event()
+
+        async def start(self, spec: CommandSpec) -> ProcessHandle:
+            return ProcessHandle(process=self.process, process_tree="process_group")
+
+        async def write(self, handle: ProcessHandle, data: bytes) -> None:
+            pass
+
+        async def close_stdin(self, handle: ProcessHandle) -> None:
+            pass
+
+        async def interrupt(self, handle: ProcessHandle) -> None:
+            self.interrupt_started.set()
+            await self.release_interrupt.wait()
+            self.process.returncode = -signal.SIGINT
+
+        async def terminate(self, handle: ProcessHandle) -> None:
+            self.process.returncode = -signal.SIGTERM
+
+        async def kill_tree(self, handle: ProcessHandle) -> None:
+            self.tree_killed.set()
+            if self.process.returncode is None:
+                self.process.returncode = -signal.SIGKILL
+
+        async def dispose(self, handle: ProcessHandle) -> None:
+            pass
+
+    async def _run() -> None:
+        backend = ControlledBackend()
+        manager = SessionManager(backend=backend)
+        session = await manager.start(CommandSpec(executable="fake", argv=()))
+        cancellation = asyncio.create_task(
+            manager.cancel(
+                session.id,
+                CancellationPolicy(interrupt_grace_ms=10, terminate_grace_ms=10),
+            )
+        )
+        await backend.interrupt_started.wait()
+
+        cancellation.cancel()
+        backend.release_interrupt.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancellation
+
+        assert backend.tree_killed.is_set()
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=1)
+        assert result is not None
+        assert result.reason == CompletionReason.CANCELLED
+        assert session.state == SessionState.COMPLETED
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_stalled_cancellation_backend_hits_hard_deadline_and_kills_tree():
+    class WaitingProcess:
+        pid = 123
+        returncode = None
+        stdin = None
+        stdout = None
+        stderr = None
+
+        async def wait(self) -> int:
+            while self.returncode is None:
+                await asyncio.sleep(0)
+            return self.returncode
+
+    class StalledBackend(ExecutionBackend):
+        def __init__(self) -> None:
+            self.process = WaitingProcess()
+            self.tree_killed = False
+
+        async def start(self, spec: CommandSpec) -> ProcessHandle:
+            return ProcessHandle(process=self.process, process_tree="process_group")
+
+        async def write(self, handle: ProcessHandle, data: bytes) -> None:
+            pass
+
+        async def close_stdin(self, handle: ProcessHandle) -> None:
+            pass
+
+        async def interrupt(self, handle: ProcessHandle) -> None:
+            await asyncio.Event().wait()
+
+        async def terminate(self, handle: ProcessHandle) -> None:
+            await asyncio.Event().wait()
+
+        async def kill_tree(self, handle: ProcessHandle) -> None:
+            self.tree_killed = True
+            self.process.returncode = -signal.SIGKILL
+
+        async def dispose(self, handle: ProcessHandle) -> None:
+            pass
+
+    async def _run() -> None:
+        backend = StalledBackend()
+        manager = SessionManager(backend=backend, termination_timeout_ms=20)
+        session = await manager.start(CommandSpec(executable="fake", argv=()))
+        started = asyncio.get_running_loop().time()
+
+        with pytest.raises(SharkRailError) as raised:
+            await asyncio.wait_for(
+                manager.cancel(
+                    session.id,
+                    CancellationPolicy(
+                        interrupt_grace_ms=10,
+                        terminate_grace_ms=10,
+                        kill_tree_grace_ms=10,
+                    ),
+                ),
+                timeout=0.5,
+            )
+
+        assert raised.value.error.code == ErrorCode.TERMINATION_FAILED
+        assert asyncio.get_running_loop().time() - started < 0.5
+        assert backend.tree_killed is True
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=1)
+        assert result is not None
+        assert result.reason == CompletionReason.CANCELLED
+        assert session.state == SessionState.COMPLETED
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_cancellation_deadline_does_not_wait_for_backend_to_accept_cancel():
+    class WaitingProcess:
+        pid = 123
+        returncode = None
+        stdin = None
+        stdout = None
+        stderr = None
+
+        async def wait(self) -> int:
+            while self.returncode is None:
+                await asyncio.sleep(0)
+            return self.returncode
+
+    class CancellationResistantBackend(ExecutionBackend):
+        def __init__(self) -> None:
+            self.process = WaitingProcess()
+            self.release_interrupt = asyncio.Event()
+            self.interrupt_cancelled = asyncio.Event()
+            self.tree_killed = False
+
+        async def start(self, spec: CommandSpec) -> ProcessHandle:
+            return ProcessHandle(process=self.process, process_tree="process_group")
+
+        async def write(self, handle: ProcessHandle, data: bytes) -> None:
+            pass
+
+        async def close_stdin(self, handle: ProcessHandle) -> None:
+            pass
+
+        async def interrupt(self, handle: ProcessHandle) -> None:
+            while not self.release_interrupt.is_set():
+                try:
+                    await self.release_interrupt.wait()
+                except asyncio.CancelledError:
+                    self.interrupt_cancelled.set()
+
+        async def terminate(self, handle: ProcessHandle) -> None:
+            pass
+
+        async def kill_tree(self, handle: ProcessHandle) -> None:
+            self.tree_killed = True
+            self.process.returncode = -signal.SIGKILL
+
+        async def dispose(self, handle: ProcessHandle) -> None:
+            pass
+
+    async def _run() -> None:
+        backend = CancellationResistantBackend()
+        manager = SessionManager(backend=backend, termination_timeout_ms=20)
+        session = await manager.start(CommandSpec(executable="fake", argv=()))
+        started = asyncio.get_running_loop().time()
+
+        with pytest.raises(SharkRailError) as raised:
+            await manager.cancel(
+                session.id,
+                CancellationPolicy(
+                    interrupt_grace_ms=10,
+                    terminate_grace_ms=10,
+                    kill_tree_grace_ms=10,
+                ),
+            )
+
+        assert raised.value.error.code == ErrorCode.TERMINATION_FAILED
+        assert asyncio.get_running_loop().time() - started < 0.25
+        assert backend.interrupt_cancelled.is_set()
+        assert backend.tree_killed is True
+
+        backend.release_interrupt.set()
+        await asyncio.sleep(0)
+        result = await asyncio.wait_for(manager.wait(session.id), timeout=1)
+        assert result is not None
+        assert result.reason == CompletionReason.CANCELLED
         await manager.dispose(session.id)
 
     asyncio.run(_run())
@@ -588,6 +943,62 @@ def test_streaming_utf8_decoder_handles_character_split_between_chunks():
 
         assert result is not None and result.stdout == "中"
         assert "".join(str(event.payload["text"]) for event in output_events) == "中"
+        assert not any(event.payload["decoding_errors"] for event in output_events)
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_streaming_utf8_decoder_flushes_an_incomplete_character_at_eof():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=(
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'\\xe4'); sys.stdout.flush()",
+                ),
+            )
+        )
+        result = await manager.wait(session.id)
+        output_events = [
+            event for event in session.events if event.kind == LifecycleEventType.STDOUT
+        ]
+
+        assert result is not None
+        assert result.stdout == "\ufffd"
+        assert result.decoding_errors is True
+        assert (
+            "".join(str(event.payload["text"]) for event in output_events) == "\ufffd"
+        )
+        assert output_events[-1].payload["bytes"] == 0
+        assert output_events[-1].payload["decoding_errors"] is True
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_literal_replacement_character_is_not_a_decoding_error():
+    async def _run() -> None:
+        manager = SessionManager()
+        session = await manager.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=(
+                    "-c",
+                    "import sys; sys.stdout.write('\\ufffd'); sys.stdout.flush()",
+                ),
+            )
+        )
+        result = await manager.wait(session.id)
+        output_events = [
+            event for event in session.events if event.kind == LifecycleEventType.STDOUT
+        ]
+
+        assert result is not None
+        assert result.stdout == "\ufffd"
+        assert result.decoding_errors is False
         assert not any(event.payload["decoding_errors"] for event in output_events)
         await manager.dispose(session.id)
 

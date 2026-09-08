@@ -70,6 +70,43 @@ class FileOutputStore:
             return b""
         return Path(path).read_bytes()
 
+    def delete_job(
+        self,
+        job_id: str,
+        stdout_path: Optional[str],
+        stderr_path: Optional[str],
+    ) -> None:
+        """Delete one Job's output without allowing paths to escape the store."""
+
+        if not job_id or Path(job_id).name != job_id:
+            raise OSError("invalid output Job ID")
+        root = self.root.resolve()
+        target_dir = self.root / job_id
+        resolved_target = target_dir.resolve()
+        if resolved_target.parent != root:
+            raise OSError("Job output directory escapes output store")
+        expected_names = {"stdout.bin", "stderr.bin"}
+        for value in (stdout_path, stderr_path):
+            if value is None:
+                continue
+            supplied = Path(value)
+            if (
+                supplied.name not in expected_names
+                or supplied.parent.resolve() != resolved_target
+            ):
+                raise OSError("persisted output path escapes Job output directory")
+
+        with self._lock:
+            try:
+                children = tuple(target_dir.iterdir())
+            except FileNotFoundError:
+                return
+            for child in children:
+                if not child.is_file() and not child.is_symlink():
+                    raise OSError("unexpected directory in Job output")
+                child.unlink()
+            target_dir.rmdir()
+
     def close(self) -> None:
         if not self._temporary:
             return

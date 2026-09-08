@@ -13,7 +13,7 @@ import socket
 import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
@@ -56,6 +56,11 @@ class ProcessHandle:
     stdin_closed: bool = False
     process_tree: str = "unknown"
     degraded_reasons: tuple[str, ...] = ()
+    _disposed: bool = field(default=False, init=False, repr=False, compare=False)
+    _tree_killed: bool = field(default=False, init=False, repr=False, compare=False)
+    _tree_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
 
     @property
     def pid(self) -> int:
@@ -188,56 +193,83 @@ class PipeBackend(ExecutionBackend):
             os.killpg(handle.pid, signal.SIGTERM)
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
-        if os.name == "nt":
-            # taskkill is available on supported Windows versions and provides
-            # tree semantics when Job assignment is unavailable. Attempt it
-            # even after the root exits: descendants can still reference the
-            # root PID as their parent in the process snapshot.
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill",
-                "/PID",
-                str(handle.pid),
-                "/T",
-                "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await killer.wait()
-            if handle.process.returncode is None:
-                handle.process.kill()
-        else:
-            try:
-                os.killpg(handle.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        async with handle._tree_lock:
+            if handle._tree_killed:
+                return
+            if os.name == "nt":
+                # taskkill is available on supported Windows versions and provides
+                # tree semantics when Job assignment is unavailable. It is unsafe
+                # to target an exited root by its reusable PID, and taskkill cannot
+                # reliably reconstruct descendants after that root disappears.
+                if handle.process.returncode is not None:
+                    handle._tree_killed = True
+                    return
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(handle.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await killer.wait()
+                if handle.process.returncode is None:
+                    try:
+                        handle.process.kill()
+                    except ProcessLookupError:
+                        pass
+            else:
+                try:
+                    os.killpg(handle.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            handle._tree_killed = True
 
     async def dispose(self, handle: ProcessHandle) -> None:
-        if not handle.stdin_closed and handle.process.stdin is not None:
-            handle.stdin_closed = True
-            handle.process.stdin.close()
-            try:
-                await handle.process.stdin.wait_closed()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+        if handle._disposed:
+            return
+        # A root process can exit while descendants in a stably identified
+        # process group or Job continue running. Disposal is the final
+        # ownership boundary for those trees; the taskkill fallback itself
+        # guards against targeting an exited, reusable root PID.
+        try:
+            if handle.process_tree != "unknown":
+                await self.kill_tree(handle)
+        finally:
+            if not handle.stdin_closed and handle.process.stdin is not None:
+                handle.stdin_closed = True
+                handle.process.stdin.close()
+                try:
+                    await handle.process.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        handle._disposed = True
 
 
 class WindowsPipeBackend(PipeBackend):
     """Windows pipe backend backed by a kill-on-close Job Object."""
 
     async def start(self, spec: CommandSpec) -> WindowsProcessHandle:
-        handle = await super().start(spec)
+        # Acquire tree ownership before launching. If Job construction fails,
+        # no process exists yet and therefore no fast-exiting child can escape
+        # the cleanup fallback before it has an owner.
         job = WindowsJob(
             memory_bytes=spec.resources.memory_bytes,
             cpu_time_seconds=spec.resources.cpu_time_seconds,
             process_count=spec.resources.process_count,
         )
         try:
+            handle = await super().start(spec)
+        except BaseException:
+            job.close()
+            raise
+        try:
             job.assign(handle.pid)
         except OSError:
             job.close()
             if _has_resource_limits(spec):
-                handle.process.kill()
-                await handle.process.wait()
+                await self._reap_unassigned_process(handle)
                 raise
             # Hosted Windows runners and other parent Job environments can
             # reject nested assignment. An ultra-short process may also exit
@@ -248,13 +280,15 @@ class WindowsPipeBackend(PipeBackend):
                 process=handle.process,
                 process_tree="taskkill_fallback",
                 degraded_reasons=(
-                    "Job Object assignment failed; process-tree cleanup uses taskkill /T",
+                    (
+                        "Job Object assignment failed; process-tree cleanup uses "
+                        "taskkill /T only while the root process is running"
+                    ),
                 ),
             )
         except BaseException:
             job.close()
-            handle.process.kill()
-            await handle.process.wait()
+            await self._reap_unassigned_process(handle)
             raise
         return WindowsProcessHandle(
             process=handle.process,
@@ -264,16 +298,35 @@ class WindowsPipeBackend(PipeBackend):
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
         if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
-            await asyncio.to_thread(handle.job.terminate)
-            await asyncio.to_thread(handle.job.wait_empty, 1000)
+            async with handle._tree_lock:
+                if handle._tree_killed:
+                    return
+                await asyncio.to_thread(handle.job.terminate)
+                await asyncio.to_thread(handle.job.wait_empty, 1000)
+                handle._tree_killed = True
             return
         await super().kill_tree(handle)
 
     async def dispose(self, handle: ProcessHandle) -> None:
-        if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
-            handle.job.close()
-            handle.job = None
-        await super().dispose(handle)
+        try:
+            await super().dispose(handle)
+        finally:
+            if isinstance(handle, WindowsProcessHandle) and handle.job is not None:
+                handle.job.close()
+                handle.job = None
+
+    async def _reap_unassigned_process(self, handle: ProcessHandle) -> None:
+        """Reap a process that could not be placed in its owning Job Object."""
+
+        try:
+            await super().kill_tree(handle)
+        finally:
+            if handle.process.returncode is None:
+                try:
+                    handle.process.kill()
+                except ProcessLookupError:
+                    pass
+            await handle.process.wait()
 
 
 def pipe_backend() -> PipeBackend:
@@ -289,6 +342,7 @@ class PtyBackend(ExecutionBackend):
         environment = _child_environment(spec)
         master_fd, slave_fd = pty.openpty()
         try:
+            os.set_blocking(master_fd, False)
             process = await asyncio.create_subprocess_exec(
                 *spec.argv_list,
                 cwd=spec.cwd,
@@ -314,7 +368,7 @@ class PtyBackend(ExecutionBackend):
         pty_handle = _as_pty(handle)
         if pty_handle.stdin_closed:
             raise RuntimeError("stdin is closed")
-        await asyncio.to_thread(os.write, pty_handle.master_fd, data)
+        await _write_fd(pty_handle.master_fd, data)
 
     async def close_stdin(self, handle: ProcessHandle) -> None:
         pty_handle = _as_pty(handle)
@@ -322,7 +376,7 @@ class PtyBackend(ExecutionBackend):
             return
         pty_handle.stdin_closed = True
         # POSIX terminal EOF (VEOF) preserves the output side of the PTY.
-        await asyncio.to_thread(os.write, pty_handle.master_fd, b"\x04")
+        await _write_fd(pty_handle.master_fd, b"\x04")
 
     async def interrupt(self, handle: ProcessHandle) -> None:
         if handle.process.returncode is None:
@@ -333,22 +387,31 @@ class PtyBackend(ExecutionBackend):
             os.killpg(handle.pid, signal.SIGTERM)
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
-        try:
-            os.killpg(handle.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        async with handle._tree_lock:
+            if handle._tree_killed:
+                return
+            try:
+                os.killpg(handle.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            handle._tree_killed = True
 
     async def read(self, handle: PtyProcessHandle, size: int = 65536) -> bytes:
         if handle.output_closed:
             return b""
-        try:
-            return await asyncio.to_thread(os.read, handle.master_fd, size)
-        except OSError as err:
-            # Linux returns EIO after the PTY slave closes; macOS commonly
-            # returns an empty read. Both represent terminal EOF.
-            if err.errno == 5:
-                return b""
-            raise
+        while True:
+            try:
+                return os.read(handle.master_fd, size)
+            except BlockingIOError:
+                await _wait_for_fd(handle.master_fd, writable=False)
+            except InterruptedError:
+                continue
+            except OSError as err:
+                # Linux returns EIO after the PTY slave closes; macOS commonly
+                # returns an empty read. Both represent terminal EOF.
+                if err.errno == 5:
+                    return b""
+                raise
 
     async def resize(self, handle: PtyProcessHandle, cols: int, rows: int) -> None:
         if cols <= 0 or rows <= 0:
@@ -358,10 +421,15 @@ class PtyBackend(ExecutionBackend):
 
     async def dispose(self, handle: ProcessHandle) -> None:
         pty_handle = _as_pty(handle)
-        if pty_handle.output_closed:
+        if pty_handle._disposed:
             return
-        pty_handle.output_closed = True
-        os.close(pty_handle.master_fd)
+        try:
+            await self.kill_tree(handle)
+        finally:
+            if not pty_handle.output_closed:
+                pty_handle.output_closed = True
+                os.close(pty_handle.master_fd)
+        pty_handle._disposed = True
 
 
 class _WinPtyAsyncProcess:
@@ -409,31 +477,39 @@ class WindowsPtyBackend(ExecutionBackend):
         except ImportError as err:
             raise RuntimeError("Windows PTY support requires pywinpty") from err
         environment = _child_environment(spec)
-        native = await asyncio.to_thread(
-            PtyProcess.spawn,
-            spec.argv_list,
-            cwd=spec.cwd,
-            env=environment,
-            dimensions=(24, 80),
-        )
-        # pywinpty can leave its relay socket open after the child exits, so a
-        # permanently blocking read cannot reliably observe terminal EOF.
-        # A short socket deadline lets read() combine output availability with
-        # the authoritative child exit status.
-        relay = getattr(native, "fileobj", None)
-        if relay is not None and hasattr(relay, "settimeout"):
-            relay.settimeout(self._read_poll_seconds)
-        process = _WinPtyAsyncProcess(native)
+        # As with the pipe backend, construct the kill-on-close owner before
+        # starting a process so constructor failure cannot leak a process tree.
         job = WindowsJob(
             memory_bytes=spec.resources.memory_bytes,
             cpu_time_seconds=spec.resources.cpu_time_seconds,
             process_count=spec.resources.process_count,
         )
         try:
+            native = await asyncio.to_thread(
+                PtyProcess.spawn,
+                spec.argv_list,
+                cwd=spec.cwd,
+                env=environment,
+                dimensions=(24, 80),
+            )
+        except BaseException:
+            job.close()
+            raise
+        # pywinpty can leave its relay socket open after the child exits, so a
+        # permanently blocking read cannot reliably observe terminal EOF.
+        # A short socket deadline lets read() combine output availability with
+        # the authoritative child exit status.
+        try:
+            relay = getattr(native, "fileobj", None)
+            if relay is not None and hasattr(relay, "settimeout"):
+                relay.settimeout(self._read_poll_seconds)
+            process = _WinPtyAsyncProcess(native)
             job.assign(process.pid)
         except BaseException:
-            native.close(force=True)
-            job.close()
+            try:
+                await asyncio.to_thread(native.close, force=True)
+            finally:
+                job.close()
             raise
         return WindowsPtyProcessHandle(
             process=process,
@@ -469,11 +545,15 @@ class WindowsPtyBackend(ExecutionBackend):
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
-        if pty_handle.job is not None:
-            await asyncio.to_thread(pty_handle.job.terminate)
-            await asyncio.to_thread(pty_handle.job.wait_empty, 1000)
-        elif pty_handle.process.returncode is None:
-            await asyncio.to_thread(pty_handle.native_pty.terminate, True)
+        async with handle._tree_lock:
+            if handle._tree_killed:
+                return
+            if pty_handle.job is not None:
+                await asyncio.to_thread(pty_handle.job.terminate)
+                await asyncio.to_thread(pty_handle.job.wait_empty, 1000)
+            elif pty_handle.process.returncode is None:
+                await asyncio.to_thread(pty_handle.native_pty.terminate, True)
+            handle._tree_killed = True
 
     async def read(self, handle: WindowsPtyProcessHandle, size: int = 65536) -> bytes:
         del size  # pywinpty 3.x returns all currently available characters.
@@ -502,14 +582,18 @@ class WindowsPtyBackend(ExecutionBackend):
 
     async def dispose(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
-        if pty_handle.output_closed:
+        if pty_handle._disposed:
             return
-        pty_handle.output_closed = True
-        if pty_handle.native_pty.isalive():
-            await asyncio.to_thread(pty_handle.native_pty.close, True)
-        if pty_handle.job is not None:
-            pty_handle.job.close()
-            pty_handle.job = None
+        try:
+            await self.kill_tree(handle)
+        finally:
+            pty_handle.output_closed = True
+            if pty_handle.native_pty.isalive():
+                await asyncio.to_thread(pty_handle.native_pty.close, True)
+            if pty_handle.job is not None:
+                pty_handle.job.close()
+                pty_handle.job = None
+        pty_handle._disposed = True
 
 
 def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:
@@ -564,6 +648,47 @@ def _as_windows_pty(handle: ProcessHandle) -> WindowsPtyProcessHandle:
     return handle
 
 
+async def _wait_for_fd(fd: int, *, writable: bool) -> None:
+    """Wait for a non-blocking POSIX descriptor without occupying a worker thread."""
+
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future[None] = loop.create_future()
+
+    def mark_ready() -> None:
+        if not ready.done():
+            ready.set_result(None)
+
+    if writable:
+        loop.add_writer(fd, mark_ready)
+    else:
+        loop.add_reader(fd, mark_ready)
+    try:
+        await ready
+    finally:
+        if writable:
+            loop.remove_writer(fd)
+        else:
+            loop.remove_reader(fd)
+
+
+async def _write_fd(fd: int, data: bytes) -> None:
+    """Write all bytes to a non-blocking POSIX descriptor."""
+
+    remaining = memoryview(data)
+    while remaining:
+        try:
+            written = os.write(fd, remaining)
+        except BlockingIOError:
+            await _wait_for_fd(fd, writable=True)
+            continue
+        except InterruptedError:
+            continue
+        if written == 0:
+            await _wait_for_fd(fd, writable=True)
+            continue
+        remaining = remaining[written:]
+
+
 async def read_pty_output(backend: Any, handle: PtyProcessHandle) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -601,6 +726,8 @@ async def cancel_process(
     policy.validate()
     steps: list[CancellationStep] = []
     if handle.process.returncode is not None:
+        if handle.process_tree != "unknown":
+            await backend.kill_tree(handle)
         return ()
 
     if not policy.skip_interrupt:
@@ -609,6 +736,10 @@ async def cancel_process(
             await step_handler(CancellationStep.INTERRUPT)
         await backend.interrupt(handle)
         if await wait_for_exit(handle, policy.interrupt_grace_ms / 1000):
+            # Waiting for the root does not prove that descendants in the
+            # session-owned process tree exited with it.
+            if handle.process_tree != "unknown":
+                await backend.kill_tree(handle)
             return tuple(steps)
 
     steps.append(CancellationStep.TERMINATE)
@@ -616,6 +747,8 @@ async def cancel_process(
         await step_handler(CancellationStep.TERMINATE)
     await backend.terminate(handle)
     if await wait_for_exit(handle, policy.terminate_grace_ms / 1000):
+        if handle.process_tree != "unknown":
+            await backend.kill_tree(handle)
         return tuple(steps)
 
     steps.append(CancellationStep.KILL_TREE)

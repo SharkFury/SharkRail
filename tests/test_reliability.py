@@ -10,7 +10,7 @@ from sharkrail.core.models import CommandSpec
 from sharkrail.integrations.protocol import JsonRpcRuntime
 from sharkrail.runtime.backends import ExecutionBackend, PipeBackend, ProcessHandle
 from sharkrail.runtime.executor import LifecycleEventType
-from sharkrail.runtime.sessions import SessionManager
+from sharkrail.runtime.sessions import Session, SessionManager
 
 
 class _SlowStartBackend(ExecutionBackend):
@@ -53,6 +53,64 @@ class _SlowStartBackend(ExecutionBackend):
         pass
 
 
+class _StartedButBlockedBackend(ExecutionBackend):
+    def __init__(self) -> None:
+        self.created = asyncio.Event()
+        self.release = asyncio.Event()
+        self.killed = False
+        self.disposed = False
+        self.start_cancelled = False
+
+        async def wait() -> int:
+            while self.process.returncode is None:
+                await asyncio.sleep(0)
+            return self.process.returncode
+
+        self.process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdout=None,
+            stderr=None,
+            stdin=None,
+            wait=wait,
+        )
+
+    async def start(self, spec: CommandSpec) -> ProcessHandle:
+        handle = ProcessHandle(process=self.process, process_tree="process_group")
+        self.created.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            # A backend whose start has created a process must cooperate with
+            # cancellation when it cannot return the handle before the
+            # manager's bounded settle deadline.
+            self.start_cancelled = True
+            self.killed = True
+            self.disposed = True
+            self.process.returncode = -9
+            raise
+        return handle
+
+    async def write(self, handle: ProcessHandle, data: bytes) -> None:
+        pass
+
+    async def close_stdin(self, handle: ProcessHandle) -> None:
+        pass
+
+    async def interrupt(self, handle: ProcessHandle) -> None:
+        pass
+
+    async def terminate(self, handle: ProcessHandle) -> None:
+        pass
+
+    async def kill_tree(self, handle: ProcessHandle) -> None:
+        self.killed = True
+        self.process.returncode = -9
+
+    async def dispose(self, handle: ProcessHandle) -> None:
+        self.disposed = True
+
+
 def test_concurrent_session_admission_is_atomic():
     async def _run() -> None:
         backend = _SlowStartBackend()
@@ -69,6 +127,87 @@ def test_concurrent_session_admission_is_atomic():
         session = await first
         await manager.wait(session.id)
         await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
+def test_cancelled_start_reaps_process_created_before_backend_returns():
+    async def _run() -> None:
+        backend = _StartedButBlockedBackend()
+        manager = SessionManager(backend=backend, termination_timeout_ms=100)
+        starting = asyncio.create_task(
+            manager.start(CommandSpec(executable="fake", argv=()))
+        )
+        await backend.created.wait()
+
+        starting.cancel()
+        backend.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(starting, timeout=1)
+
+        assert backend.killed is True
+        assert backend.disposed is True
+        assert manager.session_count == 0
+        assert manager.stats()["sessions"]["starting"] == 0
+
+    asyncio.run(_run())
+
+
+def test_cancelled_start_has_a_hard_settle_deadline():
+    async def _run() -> None:
+        backend = _StartedButBlockedBackend()
+        manager = SessionManager(
+            backend=backend,
+            termination_timeout_ms=20,
+            shutdown_timeout_ms=50,
+        )
+        starting = asyncio.create_task(
+            manager.start(CommandSpec(executable="fake", argv=()))
+        )
+        await backend.created.wait()
+
+        started = asyncio.get_running_loop().time()
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(starting, timeout=0.5)
+
+        assert asyncio.get_running_loop().time() - started < 0.25
+        assert backend.start_cancelled is True
+        assert backend.killed is True
+        assert backend.disposed is True
+        assert manager.session_count == 0
+        assert manager.stats()["sessions"]["starting"] == 0
+
+    asyncio.run(_run())
+
+
+def test_cancelled_start_reaps_process_during_session_registration(monkeypatch):
+    async def _run() -> None:
+        backend = _StartedButBlockedBackend()
+        backend.release.set()
+        manager = SessionManager(backend=backend, termination_timeout_ms=100)
+        entered_emit = asyncio.Event()
+
+        async def stalled_emit(self, kind, payload=None):
+            if kind == LifecycleEventType.ACCEPTED:
+                entered_emit.set()
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(Session, "emit", stalled_emit)
+        starting = asyncio.create_task(
+            manager.start(CommandSpec(executable="fake", argv=()))
+        )
+        await entered_emit.wait()
+
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(starting, timeout=1)
+
+        assert backend.killed is True
+        assert backend.disposed is True
+        assert manager.session_count == 0
+        assert manager.stats()["sessions"]["starting"] == 0
+        assert manager.stats()["sessions"]["started"] == 0
 
     asyncio.run(_run())
 

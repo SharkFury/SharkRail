@@ -23,6 +23,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Document the portable long-term architecture and clearly separate unshipped
   PostgreSQL, object-storage, multi-host, and independent Executor work.
 
+### Changed
+
+- Bind HTTP tenant identity to distinct bearer credentials, reserve detailed
+  health state for a separate administrator token, and require loopback HTTP
+  listeners with a same-host TLS reverse proxy for remote exposure.
+- Give every Job a bounded default deadline and output budget, reject unknown
+  request fields, and scope registered callback endpoints to one tenant.
+
+### Fixed
+
+- Reap POSIX process groups after root exit and on caller cancellation, account
+  stdin before potentially blocking writes, make POSIX PTY I/O cancellable, and
+  flush incremental UTF-8 decoders at EOF without misclassifying valid U+FFFD.
+- Enforce executable and working-directory policy against the effective Linux
+  command inside canonical WSL invocations.
+- Close the Job cancel/start race, fence callback delivery attempts, deliver
+  callbacks concurrently under one hard DNS/connect/TLS/request deadline, pin
+  validated addresses, reject unsafe destinations by default, and never follow
+  callback redirects.
+- Create SQLite databases, journals, locks, and sensitive configuration files
+  with private permissions, and safely remove output files before pruning
+  expired volatile Job records.
+- Repair the MCP `session_read` input schema, avoid reverse DNS during HTTP
+  binding, select IPv6 for IPv6 listeners, keep Python 3.9 mypy checks active,
+  and emit unique runtime-only SBOM components.
+
 ## 0.1.2 - 2026-09-07
 
 ### Changed

@@ -5,24 +5,32 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import http.client
 import json
 import logging
+import socket
+import ssl
 import threading
 import time
-import urllib.error
-import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ..core.errors import SharkRailError
 from ..core.models import CommandMode, CommandSpec
 from ..runtime.executor import CompletionReason
 from ..runtime.sessions import SessionManager
-from .config import ServiceConfig, state_directory
+from .config import (
+    CallbackEndpoint,
+    ServiceConfig,
+    state_directory,
+    validate_callback_destination,
+    validate_service_config,
+)
 from .models import JobPhase, JobRecord, JobSpec, OutboxRecord
 from .output import FileOutputStore
 from .store import SqliteJobStore, StoreError
@@ -44,6 +52,7 @@ class JobService:
     def __init__(
         self, config: ServiceConfig, *, state_dir: Optional[Path] = None
     ) -> None:
+        config = validate_service_config(config, resolve_callbacks=False)
         self.config = config
         self.worker_id = f"worker_{uuid4().hex}"
         resolved_state_dir = state_dir or state_directory()
@@ -69,9 +78,22 @@ class JobService:
                 else config.output_store.max_total_bytes
             ),
         )
+        self.store.set_output_cleaner(self.output.delete_job)
         self._executor = ThreadPoolExecutor(
             max_workers=config.executor.workers,
             thread_name_prefix="sharkrail-executor",
+        )
+        self._notification_executor = ThreadPoolExecutor(
+            max_workers=config.notifications.max_concurrent_deliveries,
+            thread_name_prefix="sharkrail-callback",
+        )
+        self._notification_slots = threading.BoundedSemaphore(
+            config.notifications.max_concurrent_deliveries
+        )
+        self._notification_state_lock = threading.Lock()
+        self._notification_started: dict[str, float] = {}
+        self._callback_resolution_slots = threading.BoundedSemaphore(
+            config.notifications.max_concurrent_deliveries
         )
         self._active: dict[str, _ActiveRun] = {}
         self._inflight: set[str] = set()
@@ -94,7 +116,6 @@ class JobService:
             )
             for index in range(config.control.notification_workers)
         )
-        self._notification_delivery_lock = threading.Lock()
         self._started = False
         self._closed = False
         self._last_controller_progress = time.monotonic()
@@ -123,6 +144,8 @@ class JobService:
         if self._closed:
             return
         if not self._started:
+            self._notification_executor.shutdown(wait=True, cancel_futures=False)
+            self._executor.shutdown(wait=True, cancel_futures=False)
             self.output.close()
             self.store.close()
             self._closed = True
@@ -139,6 +162,7 @@ class JobService:
                 LOGGER.exception("failed to cancel session during service shutdown")
         for thread in (*self._controllers, *self._notification_workers):
             thread.join(timeout=self.config.control.worker_drain_timeout_seconds)
+        self._notification_executor.shutdown(wait=True, cancel_futures=False)
         self._executor.shutdown(wait=True, cancel_futures=False)
         self.output.close()
         self.store.close()
@@ -149,11 +173,10 @@ class JobService:
         self, tenant_id: str, idempotency_key: str, payload: dict[str, Any]
     ) -> tuple[JobRecord, bool]:
         spec = JobSpec.from_dict(payload)
-        if (
-            spec.callback_endpoint_id
-            and spec.callback_endpoint_id not in self.config.callback_endpoints
-        ):
-            raise ValueError("unknown callback endpoint_id")
+        if spec.callback_endpoint_id:
+            endpoint = self.config.callback_endpoints.get(spec.callback_endpoint_id)
+            if endpoint is None or endpoint.tenant_id != tenant_id:
+                raise ValueError("unknown callback endpoint_id for tenant")
         return self.store.submit(tenant_id, idempotency_key, spec)
 
     def get(self, job_id: str, tenant_id: Optional[str] = None) -> JobRecord:
@@ -176,10 +199,10 @@ class JobService:
         raise ValueError("stream must be stdout or stderr")
 
     def cancel(self, job_id: str, tenant_id: Optional[str] = None) -> JobRecord:
-        self.store.request_cancel(job_id, tenant_id)
         with self._active_lock:
+            requested = self.store.request_cancel(job_id, tenant_id)
             active = self._active.get(job_id)
-        if active is not None:
+        if active is not None and requested.spec.desired_state == "cancelled":
             try:
                 asyncio.run_coroutine_threadsafe(
                     active.manager.cancel(active.session_id), active.loop
@@ -205,6 +228,18 @@ class JobService:
                         "process_tree": inspected["process_tree"],
                     }
                 )
+        with self._notification_state_lock:
+            notification_inflight = len(self._notification_started)
+            oldest_notification_age = (
+                now - min(self._notification_started.values())
+                if self._notification_started
+                else None
+            )
+        notification_stalled = (
+            oldest_notification_age is not None
+            and oldest_notification_age
+            > self.config.notifications.request_timeout_seconds + 5.0
+        )
         degraded = self.config.durability == "volatile"
         return {
             "live": not self._stop.is_set(),
@@ -213,6 +248,7 @@ class JobService:
                 and not self._stop.is_set()
                 and all(thread.is_alive() for thread in self._controllers)
                 and all(thread.is_alive() for thread in self._notification_workers)
+                and not notification_stalled
             ),
             "degraded": degraded,
             "reason": "DEGRADED_VOLATILE_STORE" if degraded else None,
@@ -224,6 +260,13 @@ class JobService:
             ),
             "notification_progress_age_seconds": round(
                 now - self._last_notification_progress, 3
+            ),
+            "notification_inflight": notification_inflight,
+            "notification_stalled": notification_stalled,
+            "oldest_notification_age_seconds": (
+                round(oldest_notification_age, 3)
+                if oldest_notification_age is not None
+                else None
             ),
             "controller_errors": self._controller_errors,
             "notification_errors": self._notification_errors,
@@ -341,9 +384,11 @@ class JobService:
                     session_id=session.id,
                     attempt_id=claimed.attempt_id,
                 )
-            registered = True
-            self.store.mark_running(claimed.id, claimed.attempt_id, self.worker_id)
-            if self._stop.is_set():
+                registered = True
+                current = self.store.get(claimed.id)
+                self.store.mark_running(claimed.id, claimed.attempt_id, self.worker_id)
+                cancel_requested = current.spec.desired_state == "cancelled"
+            if self._stop.is_set() or cancel_requested:
                 loop.run_until_complete(manager.cancel(session.id))
             result = loop.run_until_complete(manager.wait(session.id))
             if result is None:
@@ -397,36 +442,112 @@ class JobService:
 
     def _notification_loop(self) -> None:
         while not self._stop.wait(0.1):
-            self._last_notification_progress = time.monotonic()
-            with self._notification_delivery_lock:
-                try:
-                    records = self.store.outbox_due(
-                        self.config.notifications.max_concurrent_deliveries
+            capacity = 0
+            for _ in range(self.config.notifications.max_concurrent_deliveries):
+                if not self._notification_slots.acquire(blocking=False):
+                    break
+                capacity += 1
+            if capacity == 0:
+                with self._notification_state_lock:
+                    oldest = (
+                        min(self._notification_started.values())
+                        if self._notification_started
+                        else None
                     )
-                except Exception:
+                if (
+                    oldest is None
+                    or time.monotonic() - oldest
+                    <= self.config.notifications.request_timeout_seconds + 5.0
+                ):
+                    self._last_notification_progress = time.monotonic()
+                continue
+            self._last_notification_progress = time.monotonic()
+            try:
+                records = self.store.claim_outbox_due(
+                    capacity,
+                    lease_seconds=(
+                        self.config.notifications.request_timeout_seconds
+                        + self.config.control.worker_progress_timeout_seconds
+                        + 10.0
+                    ),
+                )
+            except Exception:
+                for _ in range(capacity):
+                    self._notification_slots.release()
+                self._notification_errors += 1
+                LOGGER.exception("notification reconciliation failed")
+                self._stop.wait(min(5.0, 0.1 * self._notification_errors))
+                continue
+            for _ in range(capacity - len(records)):
+                self._notification_slots.release()
+            for record in records:
+                try:
+                    self._notification_executor.submit(self._deliver_boundary, record)
+                except Exception as err:
+                    self._notification_slots.release()
                     self._notification_errors += 1
-                    LOGGER.exception("notification reconciliation failed")
-                    self._stop.wait(min(5.0, 0.1 * self._notification_errors))
-                    continue
-                for record in records:
-                    try:
-                        self._deliver(record)
-                    except Exception as err:
-                        self._notification_errors += 1
-                        LOGGER.exception("notification delivery boundary failed")
-                        self.store.outbox_failed(
-                            record.event_id,
-                            str(err),
-                            next_attempt_at=time.time() + 30,
-                            permanent=False,
-                        )
+                    LOGGER.exception("notification scheduling failed")
+                    self._retry_delivery(record, str(err), permanent=False)
+
+    def _deliver_boundary(self, record: OutboxRecord) -> None:
+        tracking_id = record.delivery_attempt_id or record.event_id
+        with self._notification_state_lock:
+            self._notification_started[tracking_id] = time.monotonic()
+        try:
+            self._deliver(record)
+        except Exception as err:
+            self._notification_errors += 1
+            LOGGER.exception("notification delivery boundary failed")
+            self._retry_delivery(record, str(err), permanent=False)
+        finally:
+            with self._notification_state_lock:
+                self._notification_started.pop(tracking_id, None)
+            self._last_notification_progress = time.monotonic()
+            self._notification_slots.release()
+
+    def _resolve_callback_destination(
+        self, endpoint: CallbackEndpoint, *, timeout: float
+    ) -> tuple[str, int, tuple[str, ...]]:
+        if timeout <= 0 or not self._callback_resolution_slots.acquire(blocking=False):
+            raise TimeoutError("callback destination resolution deadline exceeded")
+        completed = threading.Event()
+        results: list[tuple[str, int, tuple[str, ...]]] = []
+        errors: list[Exception] = []
+
+        def resolve() -> None:
+            try:
+                results.append(validate_callback_destination(endpoint))
+            except Exception as err:  # noqa: BLE001 - resolver thread boundary
+                errors.append(err)
+            finally:
+                self._callback_resolution_slots.release()
+                completed.set()
+
+        resolver = threading.Thread(
+            target=resolve,
+            name="sharkrail-callback-resolver",
+            daemon=True,
+        )
+        try:
+            resolver.start()
+        except Exception:
+            self._callback_resolution_slots.release()
+            raise
+        if not completed.wait(timeout):
+            raise TimeoutError("callback destination resolution deadline exceeded")
+        if errors:
+            raise errors[0]
+        if not results:
+            raise RuntimeError("callback destination resolution failed")
+        return results[0]
 
     def _deliver(self, record: OutboxRecord) -> None:
         endpoint = self.config.callback_endpoints.get(record.endpoint_id)
-        if endpoint is None:
+        if endpoint is None or endpoint.tenant_id != record.tenant_id:
             self.store.outbox_failed(
                 record.event_id,
-                "callback endpoint no longer exists",
+                record.delivery_attempt_id,
+                "callback endpoint no longer belongs to Job tenant",
                 next_attempt_at=time.time(),
                 permanent=True,
             )
@@ -446,20 +567,34 @@ class JobService:
                 hashlib.sha256,
             ).hexdigest()
             headers["X-SharkRail-Signature"] = f"sha256={signature}"
-        request = urllib.request.Request(endpoint.url, body, headers, method="POST")
+        deadline = time.monotonic() + self.config.notifications.request_timeout_seconds
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.config.notifications.request_timeout_seconds
-            ) as response:
-                status = response.status
+            hostname, port, addresses = self._resolve_callback_destination(
+                endpoint, timeout=deadline - time.monotonic()
+            )
+            parsed = urlsplit(endpoint.url)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("callback request deadline exceeded")
+            status = _post_callback(
+                scheme=parsed.scheme,
+                hostname=hostname,
+                port=port,
+                addresses=addresses,
+                target=(parsed.path or "/")
+                + (f"?{parsed.query}" if parsed.query else ""),
+                body=body,
+                headers=headers,
+                timeout=remaining,
+            )
             if 200 <= status < 300:
-                self.store.outbox_delivered(record.event_id)
+                self.store.outbox_delivered(record.event_id, record.delivery_attempt_id)
                 return
             raise RuntimeError(f"callback returned HTTP {status}")
-        except urllib.error.HTTPError as err:
-            permanent = 400 <= err.code < 500 and err.code != 429
-            self._retry_delivery(record, f"HTTP {err.code}", permanent=permanent)
-        except (OSError, RuntimeError) as err:
+        except _CallbackHTTPError as err:
+            permanent = 400 <= err.status < 500 and err.status != 429
+            self._retry_delivery(record, str(err), permanent=permanent)
+        except (OSError, RuntimeError, http.client.HTTPException) as err:
             self._retry_delivery(record, str(err), permanent=False)
 
     def _retry_delivery(
@@ -470,6 +605,7 @@ class JobService:
         delay = min(3600.0, 5.0 * (2 ** min(attempts, 9)))
         self.store.outbox_failed(
             record.event_id,
+            record.delivery_attempt_id,
             error,
             next_attempt_at=time.time() + delay,
             permanent=permanent or exhausted,
@@ -488,3 +624,130 @@ def _phase_for_result(reason: CompletionReason, exit_code: int) -> JobPhase:
     if reason == CompletionReason.CANCELLED:
         return JobPhase.CANCELED
     return JobPhase.FAILED
+
+
+class _CallbackHTTPError(RuntimeError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"callback returned HTTP {status}")
+        self.status = status
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        address: str,
+        port: int,
+        *,
+        server_hostname: str,
+        timeout: float,
+        deadline: float,
+        context: ssl.SSLContext,
+    ) -> None:
+        super().__init__(server_hostname, port, timeout=timeout, context=context)
+        self._approved_address = address
+        self._callback_context = context
+        self._callback_deadline = deadline
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self._approved_address, self.port),
+            self.timeout,
+        )
+        self.sock = raw_socket
+        try:
+            tls_socket = self._callback_context.wrap_socket(
+                raw_socket,
+                server_hostname=self.host,
+                do_handshake_on_connect=False,
+            )
+        except BaseException:
+            raw_socket.close()
+            raise
+        self.sock = tls_socket
+        remaining = self._callback_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("callback TLS handshake deadline exceeded")
+        tls_socket.settimeout(remaining)
+        tls_socket.do_handshake()
+
+
+def _post_callback(
+    *,
+    scheme: str,
+    hostname: str,
+    port: int,
+    addresses: tuple[str, ...],
+    target: str,
+    body: bytes,
+    headers: dict[str, str],
+    timeout: float,
+) -> int:
+    encoded_hostname = hostname.encode("idna").decode("ascii")
+    default_port = 443 if scheme == "https" else 80
+    host_value = (
+        f"[{encoded_hostname}]" if ":" in encoded_hostname else encoded_hostname
+    )
+    if port != default_port:
+        host_value = f"{host_value}:{port}"
+    request_headers = {**headers, "Host": host_value}
+    last_error: Optional[BaseException] = None
+    deadline = time.monotonic() + timeout
+    https_context = ssl.create_default_context() if scheme == "https" else None
+    for address in addresses:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = TimeoutError("callback request deadline exceeded")
+            break
+        if scheme == "https":
+            assert https_context is not None
+            connection: http.client.HTTPConnection = _PinnedHTTPSConnection(
+                address,
+                port,
+                server_hostname=encoded_hostname,
+                timeout=remaining,
+                deadline=deadline,
+                context=https_context,
+            )
+        else:
+            connection = http.client.HTTPConnection(address, port, timeout=remaining)
+        timed_out = threading.Event()
+
+        def abort_connection(
+            connection_to_abort: http.client.HTTPConnection = connection,
+            timed_out_event: threading.Event = timed_out,
+        ) -> None:
+            timed_out_event.set()
+            sock = connection_to_abort.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            connection_to_abort.close()
+
+        deadline_timer = threading.Timer(remaining, abort_connection)
+        deadline_timer.daemon = True
+        deadline_timer.start()
+        try:
+            connection.connect()
+            if timed_out.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("callback request deadline exceeded")
+            connection.request("POST", target, body=body, headers=request_headers)
+            response = connection.getresponse()
+            status = response.status
+            if not 200 <= status < 300:
+                raise _CallbackHTTPError(status)
+            return status
+        except _CallbackHTTPError:
+            raise
+        except (OSError, ssl.SSLError, http.client.HTTPException) as err:
+            if timed_out.is_set() or time.monotonic() >= deadline:
+                last_error = TimeoutError("callback request deadline exceeded")
+                break
+            last_error = err
+        finally:
+            deadline_timer.cancel()
+            connection.close()
+    if last_error is None:
+        raise OSError("callback endpoint resolved to no approved addresses")
+    raise OSError(f"callback connection failed: {last_error}") from last_error

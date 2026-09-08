@@ -31,6 +31,7 @@ TOML settings:
 | `SHARKRAIL_OUTPUT_STORE_URL` | `output_store.url` |
 | `SHARKRAIL_LISTEN` | `server.listen` |
 | `SHARKRAIL_AUTH_TOKEN` | `server.auth_token` |
+| `SHARKRAIL_ADMIN_TOKEN` | `server.admin_token` |
 | `SHARKRAIL_STATE_DIR` | Base directory for relative durable paths |
 
 Without a database setting, `sqlite:///:memory:` keeps the service immediately
@@ -56,8 +57,61 @@ falling back to memory.
 
 The complete installed example is
 [`configs/sharkrail.toml.example`](../configs/sharkrail.toml.example). Unknown
-keys, invalid values, a non-loopback listener without a bearer token, and a
-group/world-writable Unix configuration are rejected.
+keys, invalid values, any non-loopback listener, and a
+world-readable or group/world-writable Unix configuration are rejected. Files
+referenced by `job_store.url_file` and callback `secret_file` use the same
+permission rule (`0640` or stricter).
+
+Bearer credentials determine tenant identity; `X-SharkRail-Tenant` is only an
+optional consistency check and cannot select another tenant. A legacy
+`server.auth_token` is bound to the fixed `default` tenant. Configure distinct
+tokens for multiple tenants:
+
+```toml
+[server.tenant_tokens]
+build_system = "replace-with-a-long-random-token"
+release_system = "replace-with-another-random-token"
+```
+
+Tokens must be unique. A caller authenticated as `build_system` cannot read or
+cancel a `release_system` Job even if it knows the Job ID.
+
+If no authentication token is configured, the loopback-only server runs in an
+explicit unauthenticated local-development mode and fixes every request to the
+single tenant `default`. Configure authentication before any production use or
+before placing a TLS proxy in front of the service.
+
+The built-in server deliberately has no plaintext network-exposure mode. Bind
+it to loopback and use a same-host TLS reverse proxy for remote clients. Set a
+distinct `server.admin_token` (or `SHARKRAIL_ADMIN_TOKEN`) to protect the full
+`/health/state` response; tenant credentials receive only minimal live/ready
+health fields and cannot access process IDs or cross-tenant Job statistics.
+
+Callback URLs are resolved before each delivery and connections are pinned to
+the approved public address, preventing a second DNS lookup from rebinding the
+target. Redirects are not followed, so HMAC headers are never forwarded to a
+redirect destination. Loopback, private, link-local, multicast, unspecified,
+and reserved addresses are rejected by default. An administrator can set
+`allow_private_networks = true` on a callback endpoint only when an internal
+destination is intentional and trusted.
+
+Every callback registration also requires a single `tenant_id`. Job submission
+rejects an endpoint owned by another tenant, and delivery rechecks ownership so
+a persisted outbox item cannot cross tenants after configuration changes:
+
+```toml
+[callback_endpoints.build_completion]
+tenant_id = "build_system"
+url = "https://build.example.test/sharkrail/events"
+secret_file = "/run/secrets/sharkrail-build-callback"
+```
+
+HTTP Job request models reject unknown fields instead of ignoring misspellings.
+Every Job has a one-hour timeout by default, accepts no timeout above 24 hours,
+and retains at most 16 MiB of combined output; callers may choose smaller values
+but cannot raise those host protection ceilings. These bounds apply before the
+file output-store quota, because command output is captured in worker memory
+before it is persisted.
 
 ## Command controls
 

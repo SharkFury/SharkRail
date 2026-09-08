@@ -26,6 +26,12 @@ def test_ci_enforces_types_format_coverage_and_installed_wheel():
         assert gate in workflow
 
 
+def test_python_39_type_checker_remains_supported():
+    metadata = (CI_WORKFLOW.parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"mypy>=1.15,<2"' in metadata
+
+
 def test_ci_actions_are_pinned_and_checkout_drops_credentials():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     uses = re.findall(r"uses:\s+([^\s#]+)", workflow)

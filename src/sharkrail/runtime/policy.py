@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..core.models import CommandSpec
+from .routing import WslInvocation, is_wsl_launcher, parse_wsl_invocation
 
 
 class PolicyViolation(ValueError):
@@ -44,20 +46,44 @@ class ExecutionPolicy:
         timeout_ms: int | None,
         max_output_bytes: int | None,
     ) -> None:
-        requested = _command_names(spec.executable)
-        if self.denied_executables and requested & _normalized(self.denied_executables):
+        if self.denied_executables and _matches_windows_wsl_launcher(
+            spec.executable, self.denied_executables
+        ):
             raise PolicyViolation("denied_executables")
-        if self.allowed_executables is not None and not requested & _normalized(
-            self.allowed_executables
+
+        wsl = _policy_wsl_invocation(spec, self)
+        executable = wsl.executable if wsl is not None else spec.executable
+        requested = (
+            _posix_command_names(executable)
+            if wsl is not None
+            else _command_names(executable)
+        )
+        normalized_denied_names = (
+            {str(value) for value in self.denied_executables}
+            if wsl is not None
+            else _normalized(self.denied_executables)
+        )
+        if self.denied_executables and requested & normalized_denied_names:
+            raise PolicyViolation("denied_executables")
+        if self.allowed_executables is not None and not requested & (
+            {str(value) for value in self.allowed_executables}
+            if wsl is not None
+            else _normalized(self.allowed_executables)
         ):
             raise PolicyViolation("allowed_executables")
-        if self.require_absolute_executable and not Path(spec.executable).is_absolute():
+        if self.require_absolute_executable and not (
+            posixpath.isabs(executable)
+            if wsl is not None
+            else Path(executable).is_absolute()
+        ):
             raise PolicyViolation("require_absolute_executable")
         if self.allowed_cwd_roots:
-            cwd = Path(spec.cwd or os.getcwd()).resolve()
-            if not any(
-                _is_within(cwd, root.resolve()) for root in self.allowed_cwd_roots
-            ):
+            cwd_allowed = (
+                _wsl_cwd_is_allowed(wsl, self.allowed_cwd_roots)
+                if wsl is not None
+                else _native_cwd_is_allowed(spec, self.allowed_cwd_roots)
+            )
+            if not cwd_allowed:
                 raise PolicyViolation("allowed_cwd_roots")
         if not self.allow_parent_environment and spec.inherit_env:
             raise PolicyViolation("allow_parent_environment")
@@ -136,6 +162,77 @@ class ExecutionPolicy:
 
 def _command_names(executable: str) -> set[str]:
     return _normalized((executable, Path(executable).name))
+
+
+def _posix_command_names(executable: str) -> set[str]:
+    """Linux executable matching is case-sensitive, even on a Windows host."""
+
+    return {executable, posixpath.basename(executable)}
+
+
+def _matches_windows_wsl_launcher(
+    executable: str, policy_names: Iterable[object]
+) -> bool:
+    """Match the Windows launcher independently of the test host's OS rules."""
+
+    if not is_wsl_launcher(executable):
+        return False
+    requested = {
+        executable.casefold(),
+        Path(executable.replace("\\", "/")).name.casefold(),
+    }
+    return bool(requested & {str(value).casefold() for value in policy_names})
+
+
+def _policy_wsl_invocation(
+    spec: CommandSpec, policy: ExecutionPolicy
+) -> WslInvocation | None:
+    checks_effective_context = (
+        policy.allowed_executables is not None
+        or bool(policy.denied_executables)
+        or policy.require_absolute_executable
+        or bool(policy.allowed_cwd_roots)
+    )
+    if not is_wsl_launcher(spec.executable) or not checks_effective_context:
+        return None
+    try:
+        return parse_wsl_invocation(spec)
+    except (TypeError, ValueError) as err:
+        raise PolicyViolation("wsl_command") from err
+
+
+def _native_cwd_is_allowed(spec: CommandSpec, roots: tuple[Path, ...]) -> bool:
+    cwd = Path(spec.cwd or os.getcwd()).resolve()
+    return any(_is_within(cwd, root.resolve()) for root in roots)
+
+
+def _wsl_cwd_is_allowed(wsl: WslInvocation, roots: tuple[Path, ...]) -> bool:
+    if wsl.cwd is None:
+        return False
+    cwd_parts = _absolute_posix_parts(wsl.cwd)
+    if cwd_parts is None:
+        return False
+    return any(
+        root_parts is not None and cwd_parts[: len(root_parts)] == root_parts
+        for root_parts in (_absolute_posix_parts(root.as_posix()) for root in roots)
+    )
+
+
+def _absolute_posix_parts(value: str) -> tuple[str, ...] | None:
+    """Normalize an absolute Linux path lexically without host path semantics."""
+
+    if not value.startswith("/"):
+        return None
+    parts: list[str] = []
+    for part in value.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return tuple(parts)
 
 
 def _normalized(values: Iterable[object]) -> set[str]:

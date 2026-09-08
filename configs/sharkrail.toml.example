@@ -4,6 +4,14 @@
 listen = "127.0.0.1:8765"
 request_body_max_bytes = 1048576
 request_timeout_seconds = 30
+# A legacy single token is bound to the fixed tenant ID "default". For more
+# than one caller, use tenant_tokens so a request header cannot choose identity.
+# auth_token = "replace-with-a-long-random-token"
+# admin_token = "replace-with-a-distinct-operations-token"
+
+# [server.tenant_tokens]
+# build_system = "replace-with-a-distinct-long-random-token"
+# release_system = "replace-with-another-distinct-long-random-token"
 
 [job_store]
 # Zero-configuration default: transactional, but volatile across Worker or host
@@ -64,5 +72,9 @@ format = "json"
 # Register callbacks by stable ID; Jobs reference only the ID. Prefer
 # secret_file in production. The receiver must deduplicate event IDs.
 # [callback_endpoints.build_system]
+# tenant_id = "build_system"
 # url = "https://build.example.test/sharkrail/events"
 # secret_file = "/run/secrets/sharkrail-callback-secret"
+# Private, loopback, link-local, and reserved destinations are rejected. A
+# trusted administrator may explicitly opt in for an internal-only endpoint:
+# allow_private_networks = true

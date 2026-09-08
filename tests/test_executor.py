@@ -1,5 +1,9 @@
 import asyncio
+import os
+import signal
 import sys
+
+import pytest
 
 from sharkrail.core.models import CommandSpec
 from sharkrail.runtime.executor import CommandRunner, LifecycleEventType
@@ -80,5 +84,63 @@ def test_command_runner_reports_structured_start_error():
         assert result.error is not None
         assert result.error.to_dict()["code"] == "EXECUTABLE_NOT_FOUND"
         assert result.error.to_dict()["stage"] == "start"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process group fixture")
+def test_cancelling_command_runner_cleans_started_process_tree(tmp_path):
+    async def _run() -> None:
+        ready_path = tmp_path / "runner-child-pid"
+        child_code = (
+            "import os,signal,sys,time; "
+            "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+            "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)"
+        )
+        parent_code = (
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL); time.sleep(30)"
+        )
+        execution = asyncio.create_task(
+            CommandRunner().run(
+                CommandSpec(
+                    executable=sys.executable,
+                    argv=("-c", parent_code, str(ready_path), child_code),
+                )
+            )
+        )
+        child_pid = -1
+        try:
+            deadline = asyncio.get_running_loop().time() + 2
+            while (
+                not ready_path.exists() and asyncio.get_running_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.01)
+            child_pid = int(ready_path.read_text())
+
+            execution.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(execution, timeout=5)
+
+            exit_deadline = asyncio.get_running_loop().time() + 2
+            while asyncio.get_running_loop().time() < exit_deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("child process survived cancellation of CommandRunner.run")
+        finally:
+            if not execution.done():
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+            if child_pid > 0:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     asyncio.run(_run())

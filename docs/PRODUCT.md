@@ -143,14 +143,23 @@ WSL commands are launched with structured `wsl.exe --exec` arguments. The Window
 
 ## Trust and security
 
-v0.1 is local, single-user, and uses stdio; it opens no listening socket. It does not elevate privileges, store credentials, upload output, or modify shell profiles. Environment variables are accepted as an overlay and are never included in doctor output.
+The v0.1 local execution core is single-user and uses stdio; that core opens no
+listening socket. The optional asynchronous Job service under `Unreleased` is a
+separate, experimental single-host layer with a loopback-only HTTP listener,
+credential-bound tenant identities, protected local state, and registered
+callbacks. See [ASYNC_JOBS.md](ASYNC_JOBS.md) and
+[CONFIGURATION.md](CONFIGURATION.md) for its additional trust boundary.
+
+The local execution core does not elevate privileges, store credentials, upload
+output, or modify shell profiles. Environment variables are accepted as an
+overlay and are never included in doctor output.
 
 Direct argv avoids unintended shell interpretation, but executed programs have the same authority as SharkRail. Run untrusted code inside an appropriate sandbox, container, VM, AppContainer, or Windows Sandbox.
 
 ## Non-goals
 
 - Remote shell or project-operated hosted execution service
-- Multi-tenant execution
+- Hosted or multi-host multi-tenant scheduling
 - Credential storage or automatic UAC elevation
 - Malware isolation
 - Terminal emulator UI or full VT screen rendering

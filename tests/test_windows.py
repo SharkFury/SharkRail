@@ -110,6 +110,29 @@ def test_windows_pipe_falls_back_when_job_assignment_is_unavailable():
     asyncio.run(_run())
 
 
+def test_windows_pipe_does_not_start_process_when_job_construction_fails():
+    async def _run() -> None:
+        backend = WindowsPipeBackend()
+
+        with (
+            patch.object(
+                PipeBackend,
+                "start",
+                new=AsyncMock(),
+            ) as start,
+            patch(
+                "sharkrail.runtime.backends.WindowsJob",
+                side_effect=OSError("Job construction failed"),
+            ),
+            pytest.raises(OSError, match="Job construction failed"),
+        ):
+            await backend.start(CommandSpec("tool", ()))
+
+        start.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
 def test_windows_pipe_requires_job_when_resource_limits_are_requested():
     async def _run() -> None:
         process = FakeProcess()
@@ -168,6 +191,26 @@ def test_windows_pipe_kill_waits_for_job_processes_to_exit():
     asyncio.run(_run())
 
 
+def test_taskkill_fallback_does_not_target_an_exited_reusable_pid():
+    async def _run() -> None:
+        process = FakeProcess()
+        process.returncode = 0
+        handle = ProcessHandle(process=process, process_tree="taskkill_fallback")
+
+        with (
+            patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch(
+                "sharkrail.runtime.backends.asyncio.create_subprocess_exec",
+                new=AsyncMock(),
+            ) as create_process,
+        ):
+            await PipeBackend().kill_tree(handle)
+
+        create_process.assert_not_awaited()
+
+    asyncio.run(_run())
+
+
 def test_windows_pty_start_bounds_relay_reads():
     async def _run() -> None:
         native = Mock(pid=123)
@@ -189,6 +232,31 @@ def test_windows_pty_start_bounds_relay_reads():
         assert handle.process_tree == "job_object"
         native.fileobj.settimeout.assert_called_once_with(backend._read_poll_seconds)
         job.assign.assert_called_once_with(123)
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_does_not_spawn_when_job_construction_fails():
+    async def _run() -> None:
+        native = Mock(pid=123)
+        pty_process = Mock()
+        pty_process.spawn.return_value = native
+        winpty = ModuleType("winpty")
+        winpty.PtyProcess = pty_process
+        backend = WindowsPtyBackend()
+
+        with (
+            patch.dict(sys.modules, {"winpty": winpty}),
+            patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch(
+                "sharkrail.runtime.backends.WindowsJob",
+                side_effect=OSError("Job construction failed"),
+            ),
+            pytest.raises(OSError, match="Job construction failed"),
+        ):
+            await backend.start(CommandSpec("tool", ()))
+
+        pty_process.spawn.assert_not_called()
 
     asyncio.run(_run())
 

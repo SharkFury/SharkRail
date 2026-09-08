@@ -19,6 +19,13 @@ class CapturedOutput:
         return self.truncated_bytes > 0
 
 
+def _decode_output(data: bytes, encoding: str) -> tuple[str, bool]:
+    try:
+        return data.decode(encoding, errors="strict"), False
+    except UnicodeDecodeError:
+        return data.decode(encoding, errors="replace"), True
+
+
 def capture_output(
     stdout: bytes,
     stderr: bytes,
@@ -41,13 +48,12 @@ def capture_output(
     retained = len(kept_stdout) + len(kept_stderr)
     total = len(stdout) + len(stderr)
 
-    stdout_text = kept_stdout.decode(encoding, errors="replace")
-    stderr_text = kept_stderr.decode(encoding, errors="replace")
-    decoding_errors = "\ufffd" in stdout_text or "\ufffd" in stderr_text
+    stdout_text, stdout_errors = _decode_output(kept_stdout, encoding)
+    stderr_text, stderr_errors = _decode_output(kept_stderr, encoding)
     return CapturedOutput(
         stdout=stdout_text,
         stderr=stderr_text,
         retained_bytes=retained,
         truncated_bytes=total - retained,
-        decoding_errors=decoding_errors,
+        decoding_errors=stdout_errors or stderr_errors,
     )

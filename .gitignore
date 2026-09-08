@@ -8,3 +8,4 @@ __pycache__/
 .hypothesis/
 .coverage
 coverage.xml
+.DS_Store
