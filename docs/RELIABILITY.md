@@ -44,10 +44,12 @@ requests are joined. Both operations have finite deadlines.
 
 Windows Job Objects and POSIX process groups cover ordinary descendants.
 Processes with sufficient privileges can deliberately escape these mechanisms.
-If Windows rejects Job Object assignment, SharkRail reports a `taskkill`
-fallback for that session. It attempts `/T` cleanup even after the root exits,
-but Windows may no longer expose enough ancestry to guarantee that cleanup;
-callers that require containment must reject this degraded capability.
+Windows pipe processes are created suspended, assigned to their Job Object, and
+only then resumed. Assignment or resume failure is fail-closed, so user code
+does not run under the weaker `taskkill` fallback. ConPTY creation is owned by
+`pywinpty`, which does not expose a suspended-create hook; its process is
+assigned immediately after spawn and this limitation is reported in the
+security model.
 WSL cleanup is best effort until an in-distribution supervisor is available.
 Resource-limit behavior also follows OS semantics; for example, POSIX process
 limits may be account-wide and not every memory failure has a uniquely

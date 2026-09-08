@@ -42,6 +42,28 @@ def test_windows_capabilities_report_missing_optional_runtimes():
     assert capability.shells == ("cmd",)
     assert "pty" not in capability.features
     assert capability.degraded_reasons
-    assert capability.process_tree == "job_object_or_taskkill"
-    assert capability.process_tree_fallbacks == ("taskkill_fallback",)
+    assert capability.process_tree == "job_object"
+    assert capability.process_tree_fallbacks == ()
     assert capability.verification["pty"] == "unavailable"
+
+
+def test_windows_capabilities_disclose_conpty_assignment_window():
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "sharkrail.runtime.capabilities.platform.system", return_value="Windows"
+            )
+        )
+        stack.enter_context(
+            patch("sharkrail.runtime.capabilities.find_spec", return_value=object())
+        )
+        stack.enter_context(
+            patch(
+                "sharkrail.runtime.capabilities.shutil.which",
+                return_value="C:/Windows/System32/tool.exe",
+            )
+        )
+        capability = collect()
+
+    assert capability.modes == ("pipe", "pty")
+    assert any("suspended-create" in reason for reason in capability.degraded_reasons)

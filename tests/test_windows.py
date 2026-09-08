@@ -3,7 +3,7 @@ import os
 import socket
 import sys
 from types import ModuleType
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
@@ -23,6 +23,11 @@ from sharkrail.runtime.backends import (
     pty_backend,
 )
 from sharkrail.runtime.windows import WindowsJob
+from sharkrail.service import windows_security
+from sharkrail.service.windows_security import (
+    secure_private_path,
+    validate_private_path,
+)
 
 
 class FakeProcess:
@@ -75,6 +80,28 @@ def test_windows_job_has_explicit_platform_guard():
         WindowsJob()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL integration")
+def test_windows_private_directory_acl_is_inherited(tmp_path):
+    private = tmp_path / "private"
+    private.mkdir()
+    secure_private_path(private, directory=True)
+    child = private / "secret.txt"
+    child.write_text("secret", encoding="utf-8")
+
+    validate_private_path(private)
+    validate_private_path(child)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL integration")
+def test_windows_private_acl_rejects_everyone_allow_ace(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    windows_security._set_windows_dacl(secret, "D:P(A;;FR;;;WD)")
+
+    with pytest.raises(PermissionError, match="grants access outside"):
+        validate_private_path(secret)
+
+
 def test_platform_pty_backend_selection():
     backend = pty_backend()
     if os.name == "nt":
@@ -83,7 +110,7 @@ def test_platform_pty_backend_selection():
         assert type(backend) is PtyBackend
 
 
-def test_windows_pipe_falls_back_when_job_assignment_is_unavailable():
+def test_windows_pipe_fails_closed_when_job_assignment_is_unavailable():
     async def _run() -> None:
         process = FakeProcess()
         job = Mock()
@@ -96,15 +123,13 @@ def test_windows_pipe_falls_back_when_job_assignment_is_unavailable():
                 "start",
                 new=AsyncMock(return_value=ProcessHandle(process=process)),
             ),
+            patch.object(PipeBackend, "kill_tree", new=AsyncMock()),
             patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
+            pytest.raises(OSError, match="nested Job assignment"),
         ):
-            handle = await backend.start(CommandSpec("tool", ()))
+            await backend.start(CommandSpec("tool", ()))
 
-        assert isinstance(handle, WindowsProcessHandle)
-        assert handle.job is None
-        assert handle.process_tree == "taskkill_fallback"
-        assert handle.degraded_reasons
-        assert process.killed is False
+        assert process.killed is True
         job.close.assert_called_once_with()
 
     asyncio.run(_run())
@@ -151,6 +176,7 @@ def test_windows_pipe_requires_job_when_resource_limits_are_requested():
                 "start",
                 new=AsyncMock(return_value=ProcessHandle(process=process)),
             ),
+            patch.object(PipeBackend, "kill_tree", new=AsyncMock()),
             patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
             pytest.raises(OSError, match="nested Job assignment"),
         ):
@@ -158,6 +184,66 @@ def test_windows_pipe_requires_job_when_resource_limits_are_requested():
 
         assert process.killed is True
         job.close.assert_called_once_with()
+
+    asyncio.run(_run())
+
+
+def test_windows_pipe_is_created_suspended_and_resumed_only_after_assignment():
+    async def _run() -> None:
+        process = FakeProcess()
+        job = Mock()
+        backend = WindowsPipeBackend()
+
+        with (
+            patch.object(
+                PipeBackend,
+                "start",
+                new=AsyncMock(return_value=ProcessHandle(process=process)),
+            ),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
+        ):
+            handle = await backend.start(CommandSpec("tool", ()))
+
+        assert isinstance(handle, WindowsProcessHandle)
+        assert handle.process_tree == "job_object"
+        assert job.method_calls[:2] == [
+            call.assign(123),
+            call.resume(123),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_windows_pipe_creation_flags_include_suspended():
+    flags = WindowsPipeBackend()._windows_creation_flags()
+
+    assert flags & 0x00000004
+    assert flags & 0x00000200
+
+
+def test_windows_pipe_resume_failure_terminates_owned_job():
+    async def _run() -> None:
+        process = FakeProcess()
+        job = Mock()
+        job.resume.side_effect = OSError("ResumeThread failed")
+        backend = WindowsPipeBackend()
+
+        with (
+            patch.object(
+                PipeBackend,
+                "start",
+                new=AsyncMock(return_value=ProcessHandle(process=process)),
+            ),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
+            pytest.raises(OSError, match="ResumeThread"),
+        ):
+            await backend.start(CommandSpec("tool", ()))
+
+        job.assign.assert_called_once_with(123)
+        job.terminate.assert_called_once_with()
+        job.wait_empty.assert_called_once_with(1000)
+        job.close.assert_called_once_with()
+        assert process.killed is True
 
     asyncio.run(_run())
 
@@ -230,6 +316,7 @@ def test_windows_pty_start_bounds_relay_reads():
 
         assert isinstance(handle, WindowsPtyProcessHandle)
         assert handle.process_tree == "job_object"
+        assert "pre-execution Job containment" in handle.degraded_reasons[0]
         native.fileobj.settimeout.assert_called_once_with(backend._read_poll_seconds)
         job.assign.assert_called_once_with(123)
 

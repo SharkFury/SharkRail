@@ -24,13 +24,13 @@ and malware containment are outside this boundary.
 | Shell injection | Direct argv by default; shell use is explicit | An explicitly selected shell interprets its script |
 | Unexpected executable | Allow/deny and absolute-path policy rules | Path contents and executable signatures are not verified |
 | Resource exhaustion | Output, input, event, session, process, CPU, memory, wall and idle limits | OS limits vary; use a container/VM for hostile workloads |
-| Orphan descendants | Job Objects or process groups with bounded escalation | Privileged processes and WSL descendants may escape |
+| Orphan descendants | Suspended-create Job assignment for Windows pipe processes, or POSIX process groups with bounded escalation | ConPTY is assigned immediately after `pywinpty` spawn; privileged processes and WSL descendants may escape |
 | Secret leakage | Arguments/environment omitted from default logs; output audit is opt-in | Child output itself may contain secrets |
 | Protocol memory denial | Bounded frames, pages, sessions, input, output and pending requests | The host must bound process count and invocation rate too |
 | Dependency or release substitution | Pinned Actions, CodeQL, Scorecard, Trusted Publishing, SBOM and artifact attestations | Consumers must verify provenance and secure their own resolver |
 | Tenant impersonation | Bearer tokens map to fixed tenant IDs; Job reads and cancellation are tenant-scoped | Terminate TLS before non-loopback use and protect token files |
 | Callback SSRF or credential forwarding | Public-address validation, DNS-pinned connections, and no redirect following | Private callback opt-in trusts that administrator-controlled network target |
-| Local state disclosure | Strict config/secret permissions and private SQLite database/WAL/SHM files | Protect backups and the service account itself |
+| Local state disclosure | Strict config/secret permissions, protected Windows DACLs, and private database/output files | Protect backups and the service account itself |
 
 Execution policy is a host-owned guardrail. Keep the policy file outside an
 agent-writable directory, use absolute executable and cwd allowlists, disable

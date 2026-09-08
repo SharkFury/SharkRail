@@ -30,6 +30,13 @@ class WindowsJob:
             raise RuntimeError("Job Object is closed")
         _assign_process(self._handle, pid)
 
+    def resume(self, pid: int) -> None:
+        """Resume the primary thread of a process created with CREATE_SUSPENDED."""
+
+        if self._closed:
+            raise RuntimeError("Job Object is closed")
+        _resume_process(pid)
+
     def terminate(self, exit_code: int = 1) -> None:
         if not self._closed:
             _terminate_job(self._handle, exit_code)
@@ -73,6 +80,10 @@ if os.name == "nt":
     PROCESS_TERMINATE = 0x0001
     PROCESS_SET_QUOTA = 0x0100
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    THREAD_SUSPEND_RESUME = 0x0002
+    TH32CS_SNAPTHREAD = 0x00000004
+    ERROR_NO_MORE_FILES = 18
+    INVALID_DWORD = 0xFFFFFFFF
 
     class IO_COUNTERS(ctypes.Structure):
         _fields_ = [
@@ -107,6 +118,17 @@ if os.name == "nt":
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     _kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
     _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -127,6 +149,22 @@ if os.name == "nt":
     _kernel32.WaitForSingleObject.restype = wintypes.DWORD
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    _kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _kernel32.Thread32First.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(THREADENTRY32),
+    )
+    _kernel32.Thread32First.restype = wintypes.BOOL
+    _kernel32.Thread32Next.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(THREADENTRY32),
+    )
+    _kernel32.Thread32Next.restype = wintypes.BOOL
+    _kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _kernel32.OpenThread.restype = wintypes.HANDLE
+    _kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
+    _kernel32.ResumeThread.restype = wintypes.DWORD
 
 
 def _raise_last_error(operation: str) -> NoReturn:
@@ -176,6 +214,39 @@ def _assign_process(job: int, pid: int) -> None:
             _raise_last_error("AssignProcessToJobObject")
     finally:
         _kernel32.CloseHandle(process)
+
+
+def _resume_process(pid: int) -> None:
+    """Find and resume the sole primary thread of a suspended new process."""
+
+    snapshot = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snapshot == wintypes.HANDLE(-1).value:
+        _raise_last_error("CreateToolhelp32Snapshot")
+    try:
+        entry = THREADENTRY32()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not _kernel32.Thread32First(snapshot, ctypes.byref(entry)):
+            _raise_last_error("Thread32First")
+        while True:
+            if entry.th32OwnerProcessID == pid:
+                thread = _kernel32.OpenThread(
+                    THREAD_SUSPEND_RESUME, False, entry.th32ThreadID
+                )
+                if not thread:
+                    _raise_last_error("OpenThread")
+                try:
+                    if _kernel32.ResumeThread(thread) == INVALID_DWORD:
+                        _raise_last_error("ResumeThread")
+                finally:
+                    _kernel32.CloseHandle(thread)
+                return
+            if not _kernel32.Thread32Next(snapshot, ctypes.byref(entry)):
+                if ctypes.get_last_error() != ERROR_NO_MORE_FILES:  # type: ignore[attr-defined]
+                    _raise_last_error("Thread32Next")
+                break
+        raise OSError(f"suspended process {pid} has no primary thread")
+    finally:
+        _kernel32.CloseHandle(snapshot)
 
 
 def _terminate_job(job: int, exit_code: int) -> None:

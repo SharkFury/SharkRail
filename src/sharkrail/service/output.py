@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
+from .windows_security import secure_private_path
+
 
 class FileOutputStore:
     def __init__(
@@ -36,12 +38,14 @@ class FileOutputStore:
             path = Path(raw_path or "./output")
             self.root = path if path.is_absolute() else (state_dir or Path.cwd()) / path
         self.root.mkdir(parents=True, exist_ok=True)
+        secure_private_path(self.root, directory=True)
 
     def write(self, job_id: str, stream: str, data: bytes) -> str:
         if stream not in {"stdout", "stderr"}:
             raise ValueError("unknown output stream")
         target_dir = self.root / job_id
         target_dir.mkdir(parents=True, exist_ok=True)
+        secure_private_path(target_dir, directory=True)
         target = target_dir / f"{stream}.bin"
         with self._lock:
             if self._size_locked() + len(data) > self._max_total_bytes:
@@ -51,10 +55,12 @@ class FileOutputStore:
             )
             try:
                 with os.fdopen(descriptor, "wb") as handle:
+                    secure_private_path(Path(temporary), directory=False)
                     handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary, target)
+                secure_private_path(target, directory=False)
                 _sync_directory(target_dir)
             except BaseException:
                 try:

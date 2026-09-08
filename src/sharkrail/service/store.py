@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from .models import JobPhase, JobRecord, JobSpec, OutboxRecord, utc_now
+from .windows_security import secure_private_path
 
 
 class StoreError(RuntimeError):
@@ -74,6 +75,7 @@ class SqliteJobStore:
         if location != ":memory:":
             self._database_path = Path(location)
             self._database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            secure_private_path(self._database_path.parent, directory=True)
             self._instance_lock = _InstanceLock(Path(location + ".lock"))
             self._instance_lock.acquire()
         try:
@@ -891,14 +893,15 @@ def _secure_file(path: Path) -> None:
             os.fchmod(descriptor, 0o600)
     finally:
         os.close(descriptor)
+    secure_private_path(path, directory=False)
 
 
 def _secure_sqlite_files(database: Path) -> None:
-    if os.name == "nt":  # chmod does not express Windows ACLs.
-        return
     for path in (database, Path(f"{database}-wal"), Path(f"{database}-shm")):
         try:
-            path.chmod(0o600)
+            if os.name != "nt":
+                path.chmod(0o600)
+            secure_private_path(path, directory=False)
         except FileNotFoundError:
             pass
 
@@ -913,6 +916,7 @@ class _InstanceLock:
         try:
             if os.name != "nt":
                 os.fchmod(descriptor, 0o600)
+            secure_private_path(self.path, directory=False)
             if os.name == "nt":  # pragma: no cover - exercised on Windows CI
                 import msvcrt
 
