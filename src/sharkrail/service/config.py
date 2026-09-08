@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -28,6 +30,8 @@ class ServerSettings:
     request_body_max_bytes: int = 1024 * 1024
     request_timeout_seconds: int = 30
     auth_token: Optional[str] = None
+    admin_token: Optional[str] = None
+    tenant_tokens: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def host(self) -> str:
@@ -101,14 +105,17 @@ class LoggingSettings:
 @dataclass(frozen=True)
 class CallbackEndpoint:
     url: str
+    tenant_id: str
     secret: Optional[str] = None
     secret_file: Optional[str] = None
+    allow_private_networks: bool = False
 
     def resolved_secret(self) -> Optional[str]:
         if self.secret is not None:
             return self.secret
         if self.secret_file is None:
             return None
+        _validate_permissions(Path(self.secret_file))
         try:
             return Path(self.secret_file).read_text(encoding="utf-8").strip()
         except OSError as err:
@@ -144,6 +151,12 @@ class ServiceConfig:
         server = result["server"]
         if isinstance(server, dict) and server.get("auth_token"):
             server["auth_token"] = "<redacted>"
+        if isinstance(server, dict) and server.get("admin_token"):
+            server["admin_token"] = "<redacted>"
+        if isinstance(server, dict) and server.get("tenant_tokens"):
+            tokens = server["tenant_tokens"]
+            if isinstance(tokens, dict):
+                server["tenant_tokens"] = {tenant: "<redacted>" for tenant in tokens}
         endpoints = result["callback_endpoints"]
         if isinstance(endpoints, dict):
             for endpoint in endpoints.values():
@@ -159,6 +172,8 @@ _SECTIONS: dict[str, set[str]] = {
         "request_body_max_bytes",
         "request_timeout_seconds",
         "auth_token",
+        "admin_token",
+        "tenant_tokens",
     },
     "job_store": {"url", "url_file"},
     "output_store": {"url", "max_total_bytes"},
@@ -200,6 +215,7 @@ _ENV_KEYS = {
     "SHARKRAIL_OUTPUT_STORE_URL": ("output_store", "url"),
     "SHARKRAIL_LISTEN": ("server", "listen"),
     "SHARKRAIL_AUTH_TOKEN": ("server", "auth_token"),
+    "SHARKRAIL_ADMIN_TOKEN": ("server", "admin_token"),
 }
 
 
@@ -234,6 +250,17 @@ def state_directory(
             base = _windows_program_data()
         return Path(base) / "SharkRail" / "data"
     return Path("/var/lib/sharkrail")
+
+
+def is_loopback_listener(host: str) -> bool:
+    """Return whether the HTTP listener is confined to the local host."""
+
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def load_config(
@@ -273,7 +300,7 @@ def load_config(
     except TypeError as err:
         raise ConfigError(f"invalid configuration value: {err}") from err
     try:
-        return _validate_config(config, merged)
+        return _validate_config(config, merged, resolve_callbacks=True)
     except ConfigError:
         raise
     except (AttributeError, TypeError, ValueError) as err:
@@ -346,7 +373,13 @@ def _validate_keys(raw: Mapping[str, Any]) -> None:
             for name, endpoint in values.items():
                 if not isinstance(endpoint, dict):
                     raise ConfigError(f"callback endpoint {name!r} must be a table")
-                unknown = set(endpoint) - {"url", "secret", "secret_file"}
+                unknown = set(endpoint) - {
+                    "url",
+                    "tenant_id",
+                    "secret",
+                    "secret_file",
+                    "allow_private_networks",
+                }
                 if unknown:
                     raise ConfigError(
                         f"unknown callback endpoint setting: {name}.{min(unknown)}"
@@ -369,8 +402,19 @@ def _apply_environment(
     return merged
 
 
+def validate_service_config(
+    config: ServiceConfig, *, resolve_callbacks: bool = True
+) -> ServiceConfig:
+    """Validate a programmatically constructed service configuration."""
+
+    return _validate_config(config, resolve_callbacks=resolve_callbacks)
+
+
 def _validate_config(
-    config: ServiceConfig, raw: Optional[Mapping[str, Any]] = None
+    config: ServiceConfig,
+    raw: Optional[Mapping[str, Any]] = None,
+    *,
+    resolve_callbacks: bool,
 ) -> ServiceConfig:
     try:
         host, port = config.server.listen.rsplit(":", 1)
@@ -379,12 +423,12 @@ def _validate_config(
         raise ConfigError("server.listen must be HOST:PORT") from err
     if not host or not 0 <= port_value <= 65535:
         raise ConfigError("server.listen must contain a valid host and port")
-    if config.server.auth_token is not None and (
-        not isinstance(config.server.auth_token, str) or not config.server.auth_token
-    ):
-        raise ConfigError("server.auth_token must be a non-empty string")
-    if host not in {"127.0.0.1", "localhost", "::1"} and not config.server.auth_token:
-        raise ConfigError("server.auth_token is required for a non-loopback listener")
+    _validate_tenant_tokens(config.server)
+    if not is_loopback_listener(host):
+        raise ConfigError(
+            "server.listen must use a loopback address; expose the service only "
+            "through a same-host TLS reverse proxy"
+        )
     _positive_values(config)
 
     job_store_raw = (raw or {}).get("job_store", {})
@@ -393,6 +437,7 @@ def _validate_config(
         raise ConfigError("job_store.url and job_store.url_file are mutually exclusive")
     store_url = config.job_store.url
     if config.job_store.url_file:
+        _validate_permissions(Path(config.job_store.url_file))
         try:
             store_url = (
                 Path(config.job_store.url_file).read_text(encoding="utf-8").strip()
@@ -408,9 +453,30 @@ def _validate_config(
     if output.scheme != "file":
         raise ConfigError("only file:// OutputStore URLs are currently supported")
     for name, endpoint in config.callback_endpoints.items():
-        parsed = urlparse(endpoint.url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ConfigError(f"callback endpoint {name!r} must use an HTTP(S) URL")
+        if not isinstance(name, str) or not name:
+            raise ConfigError("callback endpoint IDs must be non-empty strings")
+        if (
+            not isinstance(endpoint.tenant_id, str)
+            or not endpoint.tenant_id
+            or len(endpoint.tenant_id.encode("utf-8")) > 256
+        ):
+            raise ConfigError(
+                f"callback endpoint {name!r} must have a non-empty tenant_id of "
+                "at most 256 UTF-8 bytes"
+            )
+        if not isinstance(endpoint.allow_private_networks, bool):
+            raise ConfigError(
+                f"callback endpoint {name!r} allow_private_networks must be a boolean"
+            )
+        for setting, value in (
+            ("secret", endpoint.secret),
+            ("secret_file", endpoint.secret_file),
+        ):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ConfigError(
+                    f"callback endpoint {name!r} {setting} must be a non-empty string"
+                )
+        validate_callback_destination(endpoint, name=name, resolve=resolve_callbacks)
         if endpoint.secret and endpoint.secret_file:
             raise ConfigError(
                 f"callback endpoint {name!r} cannot set secret and secret_file"
@@ -457,10 +523,135 @@ def _validate_permissions(path: Path) -> None:
         mode = path.stat().st_mode
     except OSError as err:
         raise ConfigError(f"cannot inspect configuration permissions: {err}") from err
-    if mode & 0o022:
+    if mode & 0o027:
         raise ConfigError(
-            f"configuration is group/world writable: {path}; expected mode 0640 or stricter"
+            f"sensitive file permissions are too broad: {path}; "
+            "expected mode 0640 or stricter"
         )
+
+
+def _validate_tenant_tokens(server: ServerSettings) -> None:
+    if not isinstance(server.tenant_tokens, Mapping):
+        raise ConfigError("server.tenant_tokens must be a table")
+    identities: dict[str, str] = {}
+    if server.auth_token is not None:
+        _validate_bearer_token(server.auth_token, "server.auth_token")
+        identities[server.auth_token] = "default"
+    for tenant, token in server.tenant_tokens.items():
+        if (
+            not isinstance(tenant, str)
+            or not tenant
+            or len(tenant.encode("utf-8")) > 256
+        ):
+            raise ConfigError(
+                "server.tenant_tokens keys must be non-empty tenant IDs of at most "
+                "256 UTF-8 bytes"
+            )
+        _validate_bearer_token(token, f"server.tenant_tokens.{tenant}")
+        previous = identities.get(token)
+        if previous is not None and previous != tenant:
+            raise ConfigError(
+                "server authentication tokens must be unique to one tenant"
+            )
+        identities[token] = tenant
+    if server.admin_token is not None:
+        _validate_bearer_token(server.admin_token, "server.admin_token")
+        if server.admin_token in identities:
+            raise ConfigError("server.admin_token must differ from all tenant tokens")
+
+
+def _validate_bearer_token(value: object, name: str) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
+    ):
+        raise ConfigError(
+            f"{name} must be a non-empty visible ASCII string of at most 4096 bytes"
+        )
+
+
+def validate_callback_destination(
+    endpoint: CallbackEndpoint,
+    *,
+    name: str = "callback endpoint",
+    resolve: bool = True,
+) -> tuple[str, int, tuple[str, ...]]:
+    """Validate and resolve a callback to an explicit set of safe addresses.
+
+    Returning the approved addresses lets the delivery layer pin its connection to
+    the result of this check instead of performing a second, rebindable DNS lookup.
+    """
+
+    parsed = urlparse(endpoint.url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ConfigError(
+            f"callback endpoint {name!r} must use a credential-free HTTP(S) URL"
+        )
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as err:
+        raise ConfigError(f"callback endpoint {name!r} has an invalid port") from err
+
+    hostname = parsed.hostname
+    try:
+        literal = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        literal = None
+    addresses: tuple[str, ...]
+    if literal is not None:
+        addresses = (str(literal),)
+    elif not resolve:
+        if hostname.rstrip(".").casefold() == "localhost":
+            raise ConfigError(f"callback endpoint {name!r} uses a non-public hostname")
+        addresses = ()
+    else:
+        try:
+            records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except OSError as err:
+            raise ConfigError(
+                f"cannot resolve callback endpoint {name!r}: {err}"
+            ) from err
+        addresses = tuple(dict.fromkeys(str(record[4][0]) for record in records))
+    if not addresses:
+        if resolve:
+            raise ConfigError(f"callback endpoint {name!r} resolved to no addresses")
+        return hostname, port, ()
+    if not endpoint.allow_private_networks:
+        for address in addresses:
+            try:
+                candidate = ipaddress.ip_address(address.split("%", 1)[0])
+            except ValueError as err:  # pragma: no cover - getaddrinfo returns IPs
+                raise ConfigError(
+                    f"callback endpoint {name!r} resolved to an invalid address"
+                ) from err
+            transition_address = candidate.version == 6 and any(
+                getattr(candidate, attribute, None) is not None
+                for attribute in ("ipv4_mapped", "sixtofour", "teredo")
+            )
+            if (
+                not candidate.is_global
+                or candidate.is_loopback
+                or candidate.is_link_local
+                or candidate.is_private
+                or candidate.is_multicast
+                or candidate.is_unspecified
+                or candidate.is_reserved
+                or bool(getattr(candidate, "is_site_local", False))
+                or transition_address
+            ):
+                raise ConfigError(
+                    f"callback endpoint {name!r} resolves to non-public address "
+                    f"{address}; set allow_private_networks=true only for a trusted "
+                    "administrator-controlled destination"
+                )
+    return hostname, port, addresses
 
 
 def _windows_program_data() -> str:

@@ -349,7 +349,6 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     "limit": {"type": "integer", "minimum": 1},
                 },
                 "required": ["sessionId"],
-                "oneOf": [{"required": ["text"]}, {"required": ["dataBase64"]}],
                 "additionalProperties": False,
             },
         },

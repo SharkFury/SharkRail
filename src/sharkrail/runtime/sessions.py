@@ -40,6 +40,86 @@ from .policy import ExecutionPolicy, PolicyViolation
 
 
 @dataclass
+class _Utf8StreamDecoder:
+    """Decode event text while distinguishing invalid bytes from a literal U+FFFD."""
+
+    text_decoder: Any = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="replace")
+    )
+    validation_decoder: Any = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(
+            errors="surrogateescape"
+        )
+    )
+
+    def decode(self, data: bytes, *, final: bool) -> tuple[str, bool]:
+        text = self.text_decoder.decode(data, final=final)
+        validated = self.validation_decoder.decode(data, final=final)
+        decoding_errors = any("\udc80" <= char <= "\udcff" for char in validated)
+        return text, decoding_errors
+
+
+async def _settle_task(task: asyncio.Task[Any]) -> None:
+    """Settle a protected task despite repeated cancellation of its owner."""
+
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                break
+            continue
+        except Exception:  # noqa: BLE001 - outcome is retrieved below
+            break
+    if not task.cancelled():
+        task.exception()
+
+
+async def _settle_task_bounded(task: asyncio.Task[Any], timeout: float) -> bool:
+    """Settle a protected task up to a hard deadline, despite caller cancellation."""
+
+    deadline = time.monotonic() + timeout
+    while not task.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            task.cancel()
+            task.add_done_callback(_consume_task_outcome)
+            return False
+        try:
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+        if not done:
+            task.cancel()
+            task.add_done_callback(_consume_task_outcome)
+            return False
+    _consume_task_outcome(task)
+    return True
+
+
+def _consume_task_outcome(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _await_with_hard_deadline(operation: Any, timeout: float) -> Any:
+    """Bound an operation even when it ignores task cancellation."""
+
+    task = asyncio.create_task(operation)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except BaseException:
+        task.cancel()
+        task.add_done_callback(_consume_task_outcome)
+        raise
+    if not done:
+        task.cancel()
+        task.add_done_callback(_consume_task_outcome)
+        raise asyncio.TimeoutError
+    return task.result()
+
+
+@dataclass
 class Session:
     id: str
     spec: CommandSpec
@@ -79,7 +159,7 @@ class Session:
     drain_started_monotonic: Optional[float] = None
     last_output_monotonic: Optional[float] = None
     input_bytes: int = 0
-    stream_decoders: dict[str, Any] = field(default_factory=dict)
+    stream_decoders: dict[str, _Utf8StreamDecoder] = field(default_factory=dict)
     event_recorder: Optional[EventRecorder] = None
     output_retention: Literal["head", "tail"] = "head"
 
@@ -159,9 +239,9 @@ class Session:
         if kept and self.output_event_count < self.max_output_events:
             decoder = self.stream_decoders.get(stream)
             if decoder is None:
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                decoder = _Utf8StreamDecoder()
                 self.stream_decoders[stream] = decoder
-            text = decoder.decode(kept, final=False)
+            text, decoding_errors = decoder.decode(kept, final=False)
             await self.emit(
                 kind,
                 {
@@ -171,7 +251,7 @@ class Session:
                     "encoding": "utf-8",
                     "text": text,
                     "data_base64": base64.b64encode(kept).decode("ascii"),
-                    "decoding_errors": "\ufffd" in text,
+                    "decoding_errors": decoding_errors,
                 },
             )
             self.output_event_count += 1
@@ -193,6 +273,41 @@ class Session:
                         "total_dropped_bytes": self.truncated_output_bytes,
                     },
                 )
+
+    async def flush_output_decoder(self, stream: str) -> None:
+        """Flush a stream decoder when its transport reaches EOF."""
+
+        decoder = self.stream_decoders.pop(stream, None)
+        if decoder is None:
+            return
+        text, decoding_errors = decoder.decode(b"", final=True)
+        if not text:
+            return
+        if self.output_event_count >= self.max_output_events:
+            if not self.output_event_limit_reported:
+                self.output_event_limit_reported = True
+                await self.emit(
+                    LifecycleEventType.RESOURCE_LIMIT_HIT,
+                    {"resource": "output_events", "limit": self.max_output_events},
+                )
+            return
+        kind = {
+            "stderr": LifecycleEventType.STDERR,
+            "pty": LifecycleEventType.PTY_OUTPUT,
+        }.get(stream, LifecycleEventType.STDOUT)
+        await self.emit(
+            kind,
+            {
+                "stream": stream,
+                "offset": self.stream_offsets.get(stream, 0),
+                "bytes": 0,
+                "encoding": "utf-8",
+                "text": text,
+                "data_base64": "",
+                "decoding_errors": decoding_errors,
+            },
+        )
+        self.output_event_count += 1
 
 
 class SessionManager:
@@ -335,9 +450,30 @@ class SessionManager:
             pty_backend() if spec.mode == CommandMode.PTY else pipe_backend()
         )
         process_started = False
+        start_operation = asyncio.create_task(backend.start(spec))
         try:
-            handle = await backend.start(spec)
+            handle = await asyncio.shield(start_operation)
             process_started = True
+        except asyncio.CancelledError:
+            # create_subprocess_exec may already have created the process when
+            # the owning request is cancelled. Keep the backend start alive
+            # long enough to recover its handle, then tear ownership down.
+            settled = await _settle_task_bounded(
+                start_operation, self._shutdown_timeout_ms / 1000
+            )
+            abandoned_handle = (
+                start_operation.result()
+                if settled
+                and not start_operation.cancelled()
+                and start_operation.exception() is None
+                else None
+            )
+            if abandoned_handle is not None:
+                cleanup = asyncio.create_task(
+                    self._cleanup_abandoned_start(backend, abandoned_handle)
+                )
+                await _settle_task_bounded(cleanup, self._shutdown_timeout_ms / 1000)
+            raise
         except FileNotFoundError as err:
             raise SharkRailError(
                 ExecutionError(
@@ -362,55 +498,71 @@ class SessionManager:
             if not process_started:
                 self._starting_sessions -= 1
 
-        session = Session(
-            id=str(uuid4()),
-            spec=spec,
-            backend=backend,
-            handle=handle,
-            max_output_bytes=self._default_max_output_bytes
-            if max_output_bytes is None
-            else max_output_bytes,
-            timeout_ms=timeout_ms,
-            idle_timeout_ms=idle_timeout_ms,
-            max_output_events=self._max_output_events,
-            max_retained_events=self._max_retained_events,
-            trace_id=trace_id or str(uuid4()),
-            request_id=request_id,
-            created_monotonic=requested_monotonic,
-            started_monotonic=time.monotonic(),
-            event_recorder=self._event_recorder,
-            output_retention=output_retention,
-        )
-        self._sessions[session.id] = session
-        self._starting_sessions -= 1
-        self._started_sessions += 1
-        session.transition(SessionState.ACCEPTED)
-        await session.emit(LifecycleEventType.ACCEPTED, {"session_id": session.id})
-        session.transition(SessionState.STARTING)
-        session.transition(SessionState.RUNNING)
-        await session.emit(
-            LifecycleEventType.PROCESS_STARTED,
-            {
-                "pid": handle.pid,
-                "mode": spec.mode.value,
-                "process_tree": handle.process_tree,
-            },
-        )
-        for reason in handle.degraded_reasons:
-            await session.emit(
-                LifecycleEventType.CAPABILITY_DEGRADED,
-                {"capability": "process_tree", "reason": reason},
+        session: Session | None = None
+        registered = False
+        try:
+            session = Session(
+                id=str(uuid4()),
+                spec=spec,
+                backend=backend,
+                handle=handle,
+                max_output_bytes=self._default_max_output_bytes
+                if max_output_bytes is None
+                else max_output_bytes,
+                timeout_ms=timeout_ms,
+                idle_timeout_ms=idle_timeout_ms,
+                max_output_events=self._max_output_events,
+                max_retained_events=self._max_retained_events,
+                trace_id=trace_id or str(uuid4()),
+                request_id=request_id,
+                created_monotonic=requested_monotonic,
+                started_monotonic=time.monotonic(),
+                event_recorder=self._event_recorder,
+                output_retention=output_retention,
             )
-        session.monitor_task = asyncio.create_task(self._monitor(session))
-        log_event(
-            logging.INFO,
-            "session.started",
-            session_id=session.id,
-            trace_id=session.trace_id,
-            pid=handle.pid,
-            mode=spec.mode.value,
-        )
-        return session
+            self._sessions[session.id] = session
+            self._starting_sessions -= 1
+            self._started_sessions += 1
+            registered = True
+            session.transition(SessionState.ACCEPTED)
+            await session.emit(LifecycleEventType.ACCEPTED, {"session_id": session.id})
+            session.transition(SessionState.STARTING)
+            session.transition(SessionState.RUNNING)
+            await session.emit(
+                LifecycleEventType.PROCESS_STARTED,
+                {
+                    "pid": handle.pid,
+                    "mode": spec.mode.value,
+                    "process_tree": handle.process_tree,
+                },
+            )
+            for reason in handle.degraded_reasons:
+                await session.emit(
+                    LifecycleEventType.CAPABILITY_DEGRADED,
+                    {"capability": "process_tree", "reason": reason},
+                )
+            session.monitor_task = asyncio.create_task(self._monitor(session))
+            log_event(
+                logging.INFO,
+                "session.started",
+                session_id=session.id,
+                trace_id=session.trace_id,
+                pid=handle.pid,
+                mode=spec.mode.value,
+            )
+            return session
+        except BaseException:
+            if registered:
+                assert session is not None
+                self._sessions.pop(session.id, None)
+                self._started_sessions -= 1
+            else:
+                self._starting_sessions -= 1
+            cleanup = asyncio.create_task(
+                self._cleanup_abandoned_start(backend, handle)
+            )
+            await _settle_task_bounded(cleanup, self._shutdown_timeout_ms / 1000)
+            raise
 
     def get(self, session_id: str) -> Session:
         self._prune_completed_sessions()
@@ -465,12 +617,15 @@ class SessionManager:
                         ),
                     )
                 )
+            # Reserve quota before handing bytes to the backend. StreamWriter
+            # buffers data before drain(), so a timed-out drain still consumed
+            # memory and must never make the same quota available again.
+            self._total_input_bytes += len(data)
+            session.input_bytes += len(data)
             await asyncio.wait_for(
                 session.backend.write(session.handle, data),
                 self._termination_timeout_ms / 1000,
             )
-            self._total_input_bytes += len(data)
-            session.input_bytes += len(data)
 
     async def close_stdin(self, session_id: str) -> None:
         session = self.get(session_id)
@@ -519,93 +674,119 @@ class SessionManager:
     ) -> tuple[str, ...]:
         session = self.get(session_id)
         async with session.operation_lock:
-            if session.cancellation_steps or session.state in {
-                SessionState.COMPLETED,
-                SessionState.FAILED,
-            }:
-                return session.cancellation_steps
-            self._require_active(session_id)
-            if session.state == SessionState.RUNNING:
-                session.transition(SessionState.CANCELLING)
-            session.completion_reason = CompletionReason.CANCELLED
-            self._cancellation_count += 1
-            cancellation_started = time.monotonic()
-
-            async def report_step(step: CancellationStep) -> None:
-                value = step.value
-                session.cancellation_steps = (*session.cancellation_steps, value)
-                await session.emit(
-                    LifecycleEventType.CANCELLATION_STEP, {"step": value}
-                )
-
+            cancellation = asyncio.create_task(
+                self._cancel_locked(session_id, session, policy)
+            )
             try:
-                await cancel_process(
+                return await asyncio.shield(cancellation)
+            except asyncio.CancelledError:
+                # The caller still observes cancellation, but the process-tree
+                # cleanup is allowed to reach a terminal state first.
+                await _settle_task(cancellation)
+                raise
+
+    async def _cancel_locked(
+        self,
+        session_id: str,
+        session: Session,
+        policy: Optional[CancellationPolicy],
+    ) -> tuple[str, ...]:
+        if session.cancellation_steps or session.state in {
+            SessionState.COMPLETED,
+            SessionState.FAILED,
+        }:
+            return session.cancellation_steps
+        effective_policy = policy or CancellationPolicy()
+        effective_policy.validate()
+        self._require_active(session_id)
+        if session.state == SessionState.RUNNING:
+            session.transition(SessionState.CANCELLING)
+        session.completion_reason = CompletionReason.CANCELLED
+        self._cancellation_count += 1
+        cancellation_started = time.monotonic()
+
+        async def report_step(step: CancellationStep) -> None:
+            value = step.value
+            session.cancellation_steps = (*session.cancellation_steps, value)
+            await session.emit(LifecycleEventType.CANCELLATION_STEP, {"step": value})
+
+        grace_ms = (
+            (
+                0
+                if effective_policy.skip_interrupt
+                else effective_policy.interrupt_grace_ms
+            )
+            + effective_policy.terminate_grace_ms
+            + effective_policy.kill_tree_grace_ms
+        )
+        try:
+            await _await_with_hard_deadline(
+                cancel_process(
                     session.backend,
                     session.handle,
-                    policy,
+                    effective_policy,
                     step_handler=report_step,
+                ),
+                (grace_ms + self._termination_timeout_ms) / 1000,
+            )
+        except Exception as err:
+            cleanup_succeeded = False
+            cleanup_error: str | None = None
+            try:
+                if CancellationStep.KILL_TREE.value not in session.cancellation_steps:
+                    await report_step(CancellationStep.KILL_TREE)
+                await _await_with_hard_deadline(
+                    session.backend.kill_tree(session.handle),
+                    self._termination_timeout_ms / 1000,
                 )
-            except Exception as err:
-                cleanup_succeeded = session.handle.process.returncode is not None
-                cleanup_error: str | None = None
-                if not cleanup_succeeded:
-                    try:
-                        if (
-                            CancellationStep.KILL_TREE.value
-                            not in session.cancellation_steps
-                        ):
-                            await report_step(CancellationStep.KILL_TREE)
-                        await asyncio.wait_for(
-                            session.backend.kill_tree(session.handle),
-                            self._termination_timeout_ms / 1000,
-                        )
-                        await asyncio.wait_for(
-                            self._wait_for_process_exit(session.handle),
-                            self._termination_timeout_ms / 1000,
-                        )
-                        cleanup_succeeded = True
-                    except Exception as cleanup:  # noqa: BLE001 - cleanup boundary
-                        cleanup_error = str(cleanup)
-                await session.emit(
-                    LifecycleEventType.CANCELLATION_COMPLETED,
-                    {
-                        "success": False,
-                        "steps": session.cancellation_steps,
-                        "cleanup_succeeded": cleanup_succeeded,
-                        "duration_ms": round(
-                            (time.monotonic() - cancellation_started) * 1000,
-                            3,
-                        ),
-                    },
-                )
-                raise SharkRailError(
-                    ExecutionError(
-                        code=ErrorCode.TERMINATION_FAILED,
-                        stage=ErrorStage.RUN,
-                        message=str(err),
-                        native={
-                            "cleanup_succeeded": cleanup_succeeded,
-                            **(
-                                {"cleanup_error": cleanup_error}
-                                if cleanup_error is not None
-                                else {}
-                            ),
-                        },
-                    ),
-                    err,
-                ) from err
+                if session.handle.process.returncode is None:
+                    await _await_with_hard_deadline(
+                        self._wait_for_process_exit(session.handle),
+                        self._termination_timeout_ms / 1000,
+                    )
+                cleanup_succeeded = True
+            except Exception as cleanup:  # noqa: BLE001 - cleanup boundary
+                cleanup_error = str(cleanup)
             await session.emit(
                 LifecycleEventType.CANCELLATION_COMPLETED,
                 {
-                    "success": True,
+                    "success": False,
                     "steps": session.cancellation_steps,
+                    "cleanup_succeeded": cleanup_succeeded,
                     "duration_ms": round(
                         (time.monotonic() - cancellation_started) * 1000,
                         3,
                     ),
                 },
             )
-            return session.cancellation_steps
+            raise SharkRailError(
+                ExecutionError(
+                    code=ErrorCode.TERMINATION_FAILED,
+                    stage=ErrorStage.RUN,
+                    message=str(err),
+                    native={
+                        "cleanup_succeeded": cleanup_succeeded,
+                        **(
+                            {"cleanup_error": cleanup_error}
+                            if cleanup_error is not None
+                            else {}
+                        ),
+                    },
+                ),
+                err,
+            ) from err
+        await session.emit(
+            LifecycleEventType.CANCELLATION_COMPLETED,
+            {
+                "success": True,
+                "steps": session.cancellation_steps,
+                "duration_ms": round(
+                    (time.monotonic() - cancellation_started) * 1000,
+                    3,
+                ),
+            },
+        )
+        return session.cancellation_steps
 
     async def wait(
         self, session_id: str, timeout_ms: Optional[int] = None
@@ -1134,6 +1315,23 @@ class SessionManager:
             await asyncio.sleep(0.01)
         return handle.process.returncode
 
+    async def _cleanup_abandoned_start(
+        self, backend: ExecutionBackend, handle: ProcessHandle
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                backend.kill_tree(handle), self._termination_timeout_ms / 1000
+            )
+            if handle.process.returncode is None:
+                await asyncio.wait_for(
+                    self._wait_for_process_exit(handle),
+                    self._termination_timeout_ms / 1000,
+                )
+        finally:
+            await asyncio.wait_for(
+                backend.dispose(handle), self._termination_timeout_ms / 1000
+            )
+
     async def _read_pipe(
         self,
         session: Session,
@@ -1143,6 +1341,7 @@ class SessionManager:
         while True:
             chunk = await reader.read(65536)
             if not chunk:
+                await session.flush_output_decoder(stream)
                 return
             await session.append_output(stream, chunk)
 
@@ -1155,6 +1354,7 @@ class SessionManager:
         while True:
             chunk = await backend.read(handle)
             if not chunk:
+                await session.flush_output_decoder("pty")
                 return
             await session.append_output("pty", chunk)
 

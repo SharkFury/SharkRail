@@ -21,6 +21,20 @@ def test_output_budget_is_shared_between_streams():
     assert captured.truncated_bytes == 3
 
 
+def test_literal_replacement_character_is_valid_utf8_output():
+    captured = capture_output("\ufffd".encode("utf-8"), b"", None)
+
+    assert captured.stdout == "\ufffd"
+    assert captured.decoding_errors is False
+
+
+def test_invalid_utf8_bytes_are_reported_as_decoding_errors():
+    captured = capture_output(b"prefix\xffsuffix", b"", None)
+
+    assert captured.stdout == "prefix\ufffdsuffix"
+    assert captured.decoding_errors is True
+
+
 def test_negative_output_budget_is_rejected():
     with pytest.raises(ValueError, match="greater than or equal to zero"):
         capture_output(b"", b"", -1)

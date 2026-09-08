@@ -1,9 +1,12 @@
-from sharkrail.core.models import CommandMode, ResourceLimits
+import pytest
+
+from sharkrail.core.models import CommandMode, CommandSpec, ResourceLimits
 from sharkrail.runtime.routing import (
     Shell,
     Target,
     WslOptions,
     direct_command,
+    parse_wsl_invocation,
     shell_command,
 )
 
@@ -39,6 +42,39 @@ def test_wsl_direct_command_is_structured():
         "-c",
         "print('hello world')",
     )
+    invocation = parse_wsl_invocation(spec)
+    assert invocation is not None
+    assert invocation.executable == "python3"
+    assert invocation.cwd == "/work"
+
+
+def test_wsl_invocation_parser_recognizes_absolute_windows_launcher_path():
+    invocation = parse_wsl_invocation(
+        CommandSpec(
+            r"C:\Windows\System32\WSL.EXE",
+            ("--cd", "/work", "--exec", "/usr/bin/python3", "-V"),
+        )
+    )
+
+    assert invocation is not None
+    assert invocation.executable == "/usr/bin/python3"
+    assert invocation.cwd == "/work"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        (),
+        ("python3", "-V"),
+        ("--exec",),
+        ("--distribution", "Ubuntu"),
+        ("--unknown", "value", "--exec", "python3"),
+        ("--cd", "/one", "--cd", "/two", "--exec", "python3"),
+    ],
+)
+def test_wsl_invocation_parser_rejects_noncanonical_commands(argv):
+    with pytest.raises(ValueError):
+        parse_wsl_invocation(CommandSpec("wsl.exe", argv))
 
 
 def test_wsl_shell_rejects_windows_shell():

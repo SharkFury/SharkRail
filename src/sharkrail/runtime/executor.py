@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
@@ -225,14 +226,39 @@ class CommandRunner:
                 ),
             ]
         else:
-            waited = await manager.wait(session.id)
-            if waited is None:  # pragma: no cover - an unbounded wait always completes
-                raise RuntimeError("session completed without a result")
-            result = waited
-            events = list(session.events)
-            await manager.dispose(session.id)
+            try:
+                waited = await manager.wait(session.id)
+                if (
+                    waited is None
+                ):  # pragma: no cover - an unbounded wait always completes
+                    raise RuntimeError("session completed without a result")
+                result = waited
+                events = list(session.events)
+                await manager.dispose(session.id)
+            except asyncio.CancelledError:
+                # The caller keeps cancellation semantics, but ownership of an
+                # already-started process cannot be abandoned with the stack.
+                cleanup = asyncio.create_task(manager.shutdown())
+                await _wait_for_cleanup(cleanup)
+                raise
 
         if event_handler is not None:
             for event in events:
                 event_handler(event)
         return result, events
+
+
+async def _wait_for_cleanup(task: asyncio.Task[None]) -> None:
+    """Settle cleanup despite repeated cancellation of the calling task."""
+
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                break
+            continue
+        except Exception:  # noqa: BLE001 - cleanup outcome is retrieved below
+            break
+    if not task.cancelled():
+        task.exception()

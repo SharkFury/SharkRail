@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
+import socket
+import socketserver
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
+from .config import is_loopback_listener
 from .server import JobService
 from .store import AdmissionLimited, IdempotencyConflict, JobNotFound, StoreError
 
@@ -19,7 +23,17 @@ class JobHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], service: JobService) -> None:
+        if not is_loopback_listener(address[0]):
+            raise ValueError(
+                "Job HTTP server must bind to loopback; use a same-host TLS reverse proxy"
+            )
         self.service = service
+        try:
+            address_value = ipaddress.ip_address(address[0])
+        except ValueError:
+            address_value = None
+        if address_value is not None and address_value.version == 6:
+            self.address_family = socket.AF_INET6
         request_limit = min(
             service.config.admission.max_concurrent_requests,
             service.config.control.api_workers,
@@ -27,6 +41,13 @@ class JobHTTPServer(ThreadingHTTPServer):
         self.request_slots = threading.BoundedSemaphore(request_limit)
         self.submission_slots = threading.BoundedSemaphore(max(1, request_limit - 1))
         super().__init__(address, JobRequestHandler)
+
+    def server_bind(self) -> None:
+        """Bind without HTTPServer's potentially blocking reverse-DNS lookup."""
+
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self.request_slots.acquire(blocking=False):
@@ -55,6 +76,7 @@ class JobHTTPServer(ThreadingHTTPServer):
 class JobRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SharkRail"
+    _tenant_id: str
 
     @property
     def job_server(self) -> JobHTTPServer:
@@ -62,12 +84,19 @@ class JobRequestHandler(BaseHTTPRequestHandler):
         return self.server
 
     def do_GET(self) -> None:
-        if not self._authorized():
+        path = urlparse(self.path).path
+        if path == "/health/state":
+            if not self._authorized_admin():
+                return
+        elif path in {"/health/live", "/health/ready"}:
+            if not self._authorized_probe():
+                return
+        elif not self._authorized_tenant():
             return
         self._do_get()
 
     def do_POST(self) -> None:
-        if not self._authorized():
+        if not self._authorized_tenant():
             return
         self._do_post()
 
@@ -77,14 +106,18 @@ class JobRequestHandler(BaseHTTPRequestHandler):
             health = self.job_server.service.health()
             self._json(
                 HTTPStatus.OK if health["live"] else HTTPStatus.SERVICE_UNAVAILABLE,
-                health,
+                {"live": health["live"]},
             )
             return
         if parsed.path == "/health/ready":
             health = self.job_server.service.health()
             self._json(
                 HTTPStatus.OK if health["ready"] else HTTPStatus.SERVICE_UNAVAILABLE,
-                health,
+                {
+                    "ready": health["ready"],
+                    "degraded": health["degraded"],
+                    "reason": health["reason"],
+                },
             )
             return
         if parsed.path == "/health/state":
@@ -95,7 +128,7 @@ class JobRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         job_id = parts[2]
-        tenant = self.headers.get("X-SharkRail-Tenant", "default")
+        tenant = self._tenant_id
         try:
             if len(parts) == 3:
                 job = self.job_server.service.get(job_id, tenant)
@@ -124,7 +157,7 @@ class JobRequestHandler(BaseHTTPRequestHandler):
 
     def _do_post(self) -> None:
         parsed = urlparse(self.path)
-        tenant = self.headers.get("X-SharkRail-Tenant", "default")
+        tenant = self._tenant_id
         if parsed.path == "/v1/jobs":
             if not self.job_server.submission_slots.acquire(blocking=False):
                 self._json(
@@ -197,12 +230,32 @@ class JobRequestHandler(BaseHTTPRequestHandler):
             raise TypeError("request body must be a JSON object")
         return value
 
-    def _authorized(self) -> bool:
-        expected = self.job_server.service.config.server.auth_token
-        if expected is None:
+    def _authorized_tenant(self) -> bool:
+        settings = self.job_server.service.config.server
+        credentials: list[tuple[str, str]] = list(settings.tenant_tokens.items())
+        if settings.auth_token is not None:
+            credentials.append(("default", settings.auth_token))
+
+        if not credentials:
+            tenant = "default"
+            claimed = self.headers.get("X-SharkRail-Tenant")
+            if claimed not in {None, tenant}:
+                self._json(HTTPStatus.FORBIDDEN, {"error": "tenant identity mismatch"})
+                return False
+            self._tenant_id = tenant
             return True
+
         supplied = self.headers.get("Authorization", "")
-        if hmac.compare_digest(supplied, f"Bearer {expected}"):
+        matched: Optional[str] = None
+        for tenant, token in credentials:
+            if self._bearer_matches(supplied, token):
+                matched = tenant
+        if matched is not None:
+            claimed = self.headers.get("X-SharkRail-Tenant")
+            if claimed not in {None, matched}:
+                self._json(HTTPStatus.FORBIDDEN, {"error": "tenant identity mismatch"})
+                return False
+            self._tenant_id = matched
             return True
         self._json(
             HTTPStatus.UNAUTHORIZED,
@@ -210,6 +263,45 @@ class JobRequestHandler(BaseHTTPRequestHandler):
             headers={"WWW-Authenticate": "Bearer"},
         )
         return False
+
+    def _authorized_probe(self) -> bool:
+        settings = self.job_server.service.config.server
+        supplied = self.headers.get("Authorization", "")
+        if settings.admin_token is not None and self._bearer_matches(
+            supplied, settings.admin_token
+        ):
+            return True
+        return self._authorized_tenant()
+
+    def _authorized_admin(self) -> bool:
+        settings = self.job_server.service.config.server
+        expected = settings.admin_token
+        if expected is None:
+            if settings.auth_token is None and not settings.tenant_tokens:
+                return True
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "administrative health access is not configured"},
+            )
+            return False
+        supplied = self.headers.get("Authorization", "")
+        if self._bearer_matches(supplied, expected):
+            return True
+        self._json(
+            HTTPStatus.UNAUTHORIZED,
+            {"error": "unauthorized"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        return False
+
+    @staticmethod
+    def _bearer_matches(supplied: str, token: str) -> bool:
+        try:
+            supplied_bytes = supplied.encode("latin-1")
+            expected_bytes = f"Bearer {token}".encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return hmac.compare_digest(supplied_bytes, expected_bytes)
 
     def _json(
         self,

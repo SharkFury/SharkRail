@@ -113,6 +113,24 @@ def test_mcp_persistent_session_lifecycle():
         )
         assert written is not None
         assert written["result"]["structuredContent"]["acceptedBytes"] == 6
+        read = await runtime.dispatch(
+            _request(
+                "tools/call",
+                {
+                    "name": "sharkrail_session_read",
+                    "arguments": {
+                        "sessionId": session_id,
+                        "cursor": 0,
+                        "waitMs": 2000,
+                        "limit": 100,
+                    },
+                },
+                5,
+            )
+        )
+        assert read is not None
+        assert read["result"]["isError"] is False
+        assert read["result"]["structuredContent"]["nextCursor"] > 0
         waited = await runtime.dispatch(
             _request(
                 "tools/call",

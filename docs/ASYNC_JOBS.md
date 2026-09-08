@@ -133,7 +133,7 @@ controller-owned observed state:
     "cwd": "/workspace/project",
     "desired_state": "active",
     "timeout_seconds": 3600,
-    "retry_policy": {"before_start": 3, "after_start": 0},
+    "max_output_bytes": 16777216,
     "callback_endpoint_id": "build-system"
   },
   "status": {
@@ -222,9 +222,11 @@ SHARKRAIL_JOB_STORE_URL=sqlite:///:memory:
 SHARKRAIL_OUTPUT_STORE_URL=file://<runtime-directory>/output
 ```
 
-Command output still uses bounded temporary files rather than unbounded process
-memory. The runtime directory is private to the service instance and may be
-removed after restart. To enable durable single-host state, configure SQLite:
+Command output is captured under a hard in-memory byte limit and written to the
+local OutputStore when the command finishes; incremental durable output is not
+implemented. The volatile runtime directory is private to the service instance
+and may be removed after restart. To enable durable single-host state, configure
+SQLite:
 
 ```text
 SHARKRAIL_STATE_DIR=/var/lib/sharkrail
@@ -502,8 +504,8 @@ Content-Type: application/json
   "command": ["pytest", "-q"],
   "cwd": "/workspace/project",
   "timeout_seconds": 3600,
-  "callback": {"endpoint_id": "build-system"},
-  "retry_policy": {"before_start": 3, "after_start": 0}
+  "max_output_bytes": 16777216,
+  "callback": {"endpoint_id": "build-system"}
 }
 ```
 
@@ -731,9 +733,14 @@ DNS resolution, redirect behavior, and tenant ownership. Production delivery
 must prevent loopback, link-local, metadata-service, and unauthorized private-
 network targets, including DNS rebinding.
 
-The server also requires:
+Zero-configuration loopback mode is deliberately unauthenticated and fixes all
+requests to the single tenant `default`; it is for local development only. Any
+production deployment or same-host TLS proxy must configure distinct tenant
+bearer credentials and a separate administrator token. The service also
+requires:
 
-- authenticated tenants and per-job authorization;
+- credential-bound tenant identity and per-job authorization when authentication
+  is configured;
 - host-owned execution policy that callers cannot weaken;
 - command, cwd, environment, runtime, output, and concurrency limits;
 - encrypted callback secrets and credential references;

@@ -39,7 +39,10 @@ with tempfile.TemporaryDirectory(prefix="sharkrail-callback-example-") as direct
         callback_endpoints={
             "build": CallbackEndpoint(
                 url=f"http://127.0.0.1:{callback.server_port}/completed",
+                tenant_id="example",
                 secret="example-secret",
+                # This example intentionally targets its own local test receiver.
+                allow_private_networks=True,
             )
         }
     )

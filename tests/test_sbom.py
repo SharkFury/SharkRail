@@ -15,6 +15,9 @@ Name: sharkrail
 Version: 1.2.3
 License-Expression: MIT
 Requires-Dist: pywinpty>=3; sys_platform == 'win32'
+Requires-Dist: Demo_Package>=1; python_version < '3.10'
+Requires-Dist: demo-package>=2; python_version >= '3.10'
+Requires-Dist: pytest>=8; extra == 'test'
 
 """
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -41,5 +44,12 @@ Requires-Dist: pywinpty>=3; sys_platform == 'win32'
     assert payload["bomFormat"] == "CycloneDX"
     assert payload["specVersion"] == "1.6"
     assert payload["metadata"]["component"]["purl"] == "pkg:pypi/sharkrail@1.2.3"
-    assert payload["components"][0]["name"] == "pywinpty"
-    assert payload["dependencies"][0]["dependsOn"] == ["pkg:pypi/pywinpty"]
+    references = [component["bom-ref"] for component in payload["components"]]
+    assert references == ["pkg:pypi/demo-package", "pkg:pypi/pywinpty"]
+    assert len(references) == len(set(references))
+    assert "pkg:pypi/pytest" not in references
+    assert payload["dependencies"][0]["dependsOn"] == references
+    demo = payload["components"][0]
+    assert demo["scope"] == "required"
+    assert len(demo["properties"]) == 1
+    assert len(json.loads(demo["properties"][0]["value"])) == 2

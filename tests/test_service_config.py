@@ -53,11 +53,120 @@ def test_strict_config_and_environment_override(tmp_path):
         load_config(bad)
 
 
-def test_non_loopback_requires_authentication(tmp_path):
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_config_rejects_world_readable_secrets(tmp_path):
+    path = tmp_path / "service.toml"
+    path.write_text('[server]\nauth_token = "secret"\n', encoding="utf-8")
+    path.chmod(0o644)
+
+    with pytest.raises(ConfigError, match="permissions are too broad"):
+        load_config(path)
+
+
+def test_tenant_tokens_are_validated_and_redacted(tmp_path):
     path = _write_config(
-        tmp_path / "service.toml", '[server]\nlisten = "0.0.0.0:8765"\n'
+        tmp_path / "service.toml",
+        '[server.tenant_tokens]\nalpha = "alpha-secret"\nbeta = "beta-secret"\n',
     )
-    with pytest.raises(ConfigError, match="auth_token"):
+    config = load_config(path)
+
+    assert config.server.tenant_tokens["alpha"] == "alpha-secret"
+    assert config.public_dict()["server"]["tenant_tokens"] == {
+        "alpha": "<redacted>",
+        "beta": "<redacted>",
+    }
+
+    duplicate = _write_config(
+        tmp_path / "duplicate.toml",
+        '[server.tenant_tokens]\nalpha = "same"\nbeta = "same"\n',
+    )
+    with pytest.raises(ConfigError, match="unique to one tenant"):
+        load_config(duplicate)
+
+
+def test_authentication_tokens_must_be_distinct_visible_ascii(tmp_path):
+    non_ascii = _write_config(
+        tmp_path / "non-ascii.toml",
+        '[server]\nauth_token = "sëcret"\n',
+    )
+    with pytest.raises(ConfigError, match="visible ASCII"):
+        load_config(non_ascii)
+
+    duplicate_admin = _write_config(
+        tmp_path / "duplicate-admin.toml",
+        '[server]\nadmin_token = "same"\n[server.tenant_tokens]\ntenant = "same"\n',
+    )
+    with pytest.raises(ConfigError, match="differ from all tenant tokens"):
+        load_config(duplicate_admin)
+
+
+def test_callback_rejects_non_public_destination_by_default(tmp_path):
+    path = _write_config(
+        tmp_path / "service.toml",
+        '[callback_endpoints.local]\ntenant_id = "default"\n'
+        'url = "http://127.0.0.1/hook"\n',
+    )
+
+    with pytest.raises(ConfigError, match="non-public address"):
+        load_config(path)
+
+
+def test_callback_private_destination_requires_explicit_opt_in(tmp_path):
+    path = _write_config(
+        tmp_path / "service.toml",
+        '[callback_endpoints.local]\ntenant_id = "default"\n'
+        'url = "http://127.0.0.1/hook"\n'
+        "allow_private_networks = true\n",
+    )
+
+    config = load_config(path)
+    assert config.callback_endpoints["local"].allow_private_networks is True
+
+
+def test_callback_requires_tenant_and_strict_private_network_flag(tmp_path):
+    missing_tenant = _write_config(
+        tmp_path / "missing-tenant.toml",
+        '[callback_endpoints.local]\nurl = "http://127.0.0.1/hook"\n',
+    )
+    with pytest.raises(ConfigError, match="invalid configuration value"):
+        load_config(missing_tenant)
+
+    string_flag = _write_config(
+        tmp_path / "string-flag.toml",
+        '[callback_endpoints.local]\ntenant_id = "default"\n'
+        'url = "http://127.0.0.1/hook"\nallow_private_networks = "true"\n',
+    )
+    with pytest.raises(ConfigError, match="must be a boolean"):
+        load_config(string_flag)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "224.0.0.1",
+        "[ff02::1]",
+        "[fec0::1]",
+        "[2002:7f00:1::1]",
+        "0.0.0.0",
+    ],
+)
+def test_callback_rejects_non_unicast_destinations(tmp_path, address):
+    path = _write_config(
+        tmp_path / "non-unicast.toml",
+        '[callback_endpoints.unsafe]\ntenant_id = "default"\n'
+        f'url = "http://{address}/hook"\n',
+    )
+
+    with pytest.raises(ConfigError, match="non-public address"):
+        load_config(path)
+
+
+def test_non_loopback_listener_is_rejected_even_with_authentication(tmp_path):
+    path = _write_config(
+        tmp_path / "service.toml",
+        '[server]\nlisten = "0.0.0.0:8765"\nauth_token = "secret"\n',
+    )
+    with pytest.raises(ConfigError, match="loopback address"):
         load_config(path)
 
 
@@ -75,6 +184,8 @@ def test_store_url_and_url_file_are_mutually_exclusive(tmp_path):
 def test_store_url_file_is_resolved(tmp_path):
     secret = tmp_path / "database-url"
     secret.write_text("sqlite:///jobs.db\n", encoding="utf-8")
+    if os.name != "nt":
+        secret.chmod(0o600)
     path = _write_config(
         tmp_path / "service.toml",
         f'[job_store]\nurl_file = "{secret}"\n',
