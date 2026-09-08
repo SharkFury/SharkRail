@@ -46,6 +46,9 @@ worker_restart_window_seconds = 60
 workers = 2
 heartbeat_seconds = 5
 lease_seconds = 30
+# Required to execute Jobs. Without a host-owned policy, the service starts in
+# deny-all mode so an HTTP caller cannot inherit the service account's authority.
+# policy_file = "/etc/sharkrail/execution-policy.json"
 
 [admission]
 max_concurrent_requests = 128

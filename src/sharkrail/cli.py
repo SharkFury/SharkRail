@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
@@ -24,6 +25,7 @@ from .service.config import (
     example_config_text,
     initialize_config,
     load_config,
+    load_service_execution_policy,
     system_config_path,
 )
 from .service.http import serve_http
@@ -146,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run one Worker directly for diagnostics and tests",
     )
+    _add_policy_argument(server)
 
     return parser
 
@@ -370,14 +373,28 @@ def main() -> int:
             config = load_config(config_path, require_explicit=config_path is not None)
         except ConfigError as err:
             parser.error(str(err))
+        execution_policy = ns.execution_policy
+        if ns.policy:
+            policy_config = replace(
+                config,
+                executor=replace(
+                    config.executor, policy_file=str(Path(ns.policy).resolve())
+                ),
+            )
+            try:
+                execution_policy = load_service_execution_policy(policy_config)
+            except ConfigError as err:
+                parser.error(str(err))
         configure_logging(config.logging.level)
         if ns.single_process:
             try:
-                serve_http(JobService(config))
+                serve_http(JobService(config, execution_policy=execution_policy))
             except KeyboardInterrupt:
                 pass
             return 0
-        return ControlMaster(config, config.config_path).run()
+        return ControlMaster(
+            config, config.config_path, execution_policy=execution_policy
+        ).run()
 
     parser.print_help()
     return 1

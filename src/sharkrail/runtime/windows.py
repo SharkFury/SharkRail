@@ -41,13 +41,6 @@ class WindowsJob:
         if not self._closed:
             _terminate_job(self._handle, exit_code)
 
-    def wait_empty(self, timeout_ms: int) -> bool:
-        """Wait until the Job has no active processes after termination."""
-
-        if self._closed:
-            return True
-        return _wait_for_job(self._handle, timeout_ms)
-
     def close(self) -> None:
         if self._closed:
             return
@@ -145,8 +138,6 @@ if os.name == "nt":
     _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     _kernel32.TerminateJobObject.restype = wintypes.BOOL
-    _kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
     _kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
@@ -252,15 +243,6 @@ def _resume_process(pid: int) -> None:
 def _terminate_job(job: int, exit_code: int) -> None:
     if not _kernel32.TerminateJobObject(job, exit_code):
         _raise_last_error("TerminateJobObject")
-
-
-def _wait_for_job(job: int, timeout_ms: int) -> bool:
-    result = _kernel32.WaitForSingleObject(job, timeout_ms)
-    if result == 0:
-        return True
-    if result == 258:
-        return False
-    _raise_last_error("WaitForSingleObject")
 
 
 def _close_handle(handle: int) -> None:

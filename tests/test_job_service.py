@@ -35,6 +35,8 @@ from sharkrail.service.http import JobHTTPServer
 from sharkrail.service.master import ControlMaster
 from sharkrail.service.models import JobPhase, OutboxRecord
 from sharkrail.service.server import JobService, _post_callback
+from sharkrail.service.store import StoreError
+from sharkrail.service.windows_security import secure_private_path
 
 
 class _LoopbackHTTPServer(ThreadingHTTPServer):
@@ -46,17 +48,34 @@ class _LoopbackHTTPServer(ThreadingHTTPServer):
         self.server_port = int(self.server_address[1])
 
 
-def _exiting_worker(_config_path, _parent_pid, heartbeat):
+def _exiting_worker(_config_path, _parent_pid, heartbeat, _execution_policy):
     if heartbeat is not None:
         heartbeat.send((time.monotonic(), {"ready": True, "active_processes": []}))
         heartbeat.close()
 
 
 def _config(tmp_path: Path, **changes):
+    policy_path = tmp_path / "job-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "allowed_executables": [sys.executable, "echo"],
+                "allow_parent_environment": False,
+                "require_timeout": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    secure_private_path(policy_path, directory=False)
     values = {
         "job_store": JobStoreSettings(url="sqlite:///:memory:"),
         "output_store": OutputStoreSettings(url="file://./output"),
-        "executor": ExecutorSettings(workers=2, heartbeat_seconds=1, lease_seconds=10),
+        "executor": ExecutorSettings(
+            workers=2,
+            heartbeat_seconds=1,
+            lease_seconds=10,
+            policy_file=str(policy_path),
+        ),
     }
     values.update(changes)
     return ServiceConfig(**values)
@@ -101,6 +120,52 @@ def test_service_executes_and_retains_bounded_output(tmp_path):
         assert result.phase == JobPhase.SUCCEEDED
         assert service.read_output(job.id, "stdout") == f"hello{os.linesep}".encode()
         assert service.health()["reason"] == "DEGRADED_VOLATILE_STORE"
+    finally:
+        service.close()
+
+
+def test_service_without_host_policy_denies_every_command(tmp_path):
+    config = _config(tmp_path)
+    config = replace(
+        config,
+        executor=ExecutorSettings(workers=1, heartbeat_seconds=1, lease_seconds=1),
+    )
+    service = JobService(config, state_dir=tmp_path)
+    service.start()
+    try:
+        job, _ = service.submit(
+            "tenant",
+            "deny-all",
+            {"command": [sys.executable, "-c", "print('must-not-run')"]},
+        )
+        result = _terminal(service, job.id)
+        assert result.phase == JobPhase.FAILED
+        assert result.error is not None
+        assert "execution denied by policy" in result.error["message"]
+        assert service.read_output(job.id, "stdout") == b""
+    finally:
+        service.close()
+
+
+def test_service_jobs_never_inherit_service_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHARKRAIL_SERVICE_SECRET", "must-not-leak")
+    service = JobService(_config(tmp_path), state_dir=tmp_path)
+    service.start()
+    try:
+        job, _ = service.submit(
+            "tenant",
+            "clean-environment",
+            {
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import os; print(os.environ.get('SHARKRAIL_SERVICE_SECRET', 'missing'))",
+                ]
+            },
+        )
+        result = _terminal(service, job.id)
+        assert result.phase == JobPhase.SUCCEEDED
+        assert service.read_output(job.id, "stdout").strip() == b"missing"
     finally:
         service.close()
 
@@ -165,6 +230,64 @@ def test_cancel_during_session_registration_cannot_be_lost(monkeypatch, tmp_path
         assert completed.observed_generation == completed.generation
     finally:
         allow_start.set()
+        service.close()
+
+
+def test_service_shutdown_cancels_job_stuck_in_session_start(monkeypatch, tmp_path):
+    entered = threading.Event()
+
+    async def stuck_start(_manager, *_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(SessionManager, "start", stuck_start)
+    service = JobService(_config(tmp_path), state_dir=tmp_path)
+    service.start()
+    service.submit(
+        "tenant",
+        "stuck-start",
+        {"command": [sys.executable, "-c", "pass"]},
+    )
+    assert entered.wait(3)
+
+    started = time.monotonic()
+    service.close()
+    assert time.monotonic() - started < 2
+
+
+def test_terminal_persistence_failure_is_recovered_after_lease_expiry(
+    monkeypatch, tmp_path
+):
+    config = _config(tmp_path)
+    config = replace(
+        config,
+        executor=replace(config.executor, heartbeat_seconds=1, lease_seconds=1),
+    )
+    service = JobService(config, state_dir=tmp_path)
+    original_finish = service.store.finish
+    failures = 0
+
+    def fail_both_finalization_paths(*args, **kwargs):
+        nonlocal failures
+        if failures < 6:
+            failures += 1
+            raise StoreError("simulated terminal write failure")
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(service.store, "finish", fail_both_finalization_paths)
+    service.start()
+    try:
+        job, _ = service.submit(
+            "tenant",
+            "finish-failure",
+            {"command": [sys.executable, "-c", "print('uncommitted')"]},
+        )
+        result = _terminal(service, job.id, timeout=5)
+        assert failures == 6
+        assert result.phase == JobPhase.EXECUTOR_LOST
+        assert result.reason == "executor_lease_expired"
+        assert not (service.output.root / job.id).exists()
+    finally:
         service.close()
 
 
@@ -499,6 +622,7 @@ def test_http_bearer_authentication(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(endpoint, timeout=3)
         assert denied.value.code == 401
+        denied.value.close()
         request = urllib.request.Request(
             endpoint, headers={"Authorization": "Bearer test-token"}
         )
@@ -551,6 +675,7 @@ def test_http_binds_tenant_identity_to_bearer_token(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as mismatch:
             urllib.request.urlopen(forged, timeout=3)
         assert mismatch.value.code == 403
+        mismatch.value.close()
 
         cross_tenant = urllib.request.Request(
             base + f"/v1/jobs/{job_id}",
@@ -559,6 +684,7 @@ def test_http_binds_tenant_identity_to_bearer_token(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as hidden:
             urllib.request.urlopen(cross_tenant, timeout=3)
         assert hidden.value.code == 404
+        hidden.value.close()
 
         cross_tenant_cancel = urllib.request.Request(
             base + f"/v1/jobs/{job_id}/cancel",
@@ -569,6 +695,7 @@ def test_http_binds_tenant_identity_to_bearer_token(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as hidden_cancel:
             urllib.request.urlopen(cross_tenant_cancel, timeout=3)
         assert hidden_cancel.value.code == 404
+        hidden_cancel.value.close()
     finally:
         server.shutdown()
         server.server_close()
@@ -603,6 +730,7 @@ def test_detailed_health_requires_distinct_admin_token(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(state, timeout=3)
         assert denied.value.code == 401
+        denied.value.close()
 
         admin_state = urllib.request.Request(
             base + "/health/state",
@@ -664,13 +792,16 @@ def test_http_bind_avoids_reverse_dns(monkeypatch, tmp_path):
         assert server.server_name == "127.0.0.1"
     finally:
         server.server_close()
+        service.close()
 
 
 def test_http_direct_construction_rejects_non_loopback_bind(tmp_path):
     service = JobService(_config(tmp_path), state_dir=tmp_path)
-
-    with pytest.raises(ValueError, match="must bind to loopback"):
-        JobHTTPServer(("0.0.0.0", 0), service)
+    try:
+        with pytest.raises(ValueError, match="must bind to loopback"):
+            JobHTTPServer(("0.0.0.0", 0), service)
+    finally:
+        service.close()
 
 
 def test_http_supports_ipv6_loopback(tmp_path):
@@ -680,12 +811,14 @@ def test_http_supports_ipv6_loopback(tmp_path):
     try:
         server = JobHTTPServer(("::1", 0), service)
     except OSError:
+        service.close()
         pytest.skip("IPv6 loopback is unavailable")
     try:
         assert server.address_family == socket.AF_INET6
         assert server.server_address[0] == "::1"
     finally:
         server.server_close()
+        service.close()
 
 
 def test_registered_callback_is_signed_and_delivered(tmp_path):
@@ -892,6 +1025,14 @@ def test_master_worker_serves_and_shuts_down(tmp_path):
                 ) as response:
                     assert json.load(response)["ready"] is True
                     break
+            except urllib.error.HTTPError as err:
+                err.close()
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    stdout, stderr = process.communicate(timeout=1)
+                    raise AssertionError(
+                        f"Master/Worker failed to become ready: {stdout}\n{stderr}"
+                    )
+                time.sleep(0.05)
             except (OSError, urllib.error.URLError):
                 if process.poll() is not None or time.monotonic() >= deadline:
                     stdout, stderr = process.communicate(timeout=1)
@@ -902,6 +1043,10 @@ def test_master_worker_serves_and_shuts_down(tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=10)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
     # POSIX SIGTERM is handled gracefully by the master. Windows
     # Popen.terminate() is TerminateProcess(), so only assert that the process
     # was reaped after it had successfully served a readiness request.

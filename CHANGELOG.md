@@ -35,6 +35,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Bound and isolate blocking ConPTY spawn/write calls, clean up late spawn
+  results after cancellation, and remove invalid waits on Windows Job handles.
+- Make HTTP Job execution deny-all without a host policy, always use a clean
+  child environment, recover expired executor leases, cancel starts during
+  shutdown, and roll back partially persisted output pairs.
+- Preserve pending callback records during volatile TTL cleanup, reconcile TTL
+  without requiring a new submission, harden existing state/output directory
+  permissions, and fail closed for unverifiable WSL cwd symlink boundaries.
+- Send both canonical POSIX VEOF transitions for unterminated input and reject
+  close-stdin in raw PTY mode where no reliable half-close exists.
 - Reap POSIX process groups after root exit and on caller cancellation, account
   stdin before potentially blocking writes, make POSIX PTY I/O cancellable, and
   flush incremental UTF-8 decoders at EOF without misclassifying valid U+FFFD.

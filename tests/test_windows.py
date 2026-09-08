@@ -2,6 +2,8 @@ import asyncio
 import os
 import socket
 import sys
+import threading
+import time
 from types import ModuleType
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -241,7 +243,7 @@ def test_windows_pipe_resume_failure_terminates_owned_job():
 
         job.assign.assert_called_once_with(123)
         job.terminate.assert_called_once_with()
-        job.wait_empty.assert_called_once_with(1000)
+        job.wait_empty.assert_not_called()
         job.close.assert_called_once_with()
         assert process.killed is True
 
@@ -264,7 +266,7 @@ def test_windows_pipe_dispose_also_closes_standard_input():
     asyncio.run(_run())
 
 
-def test_windows_pipe_kill_waits_for_job_processes_to_exit():
+def test_windows_pipe_kill_does_not_wait_on_job_handle_signal():
     async def _run() -> None:
         job = Mock()
         handle = WindowsProcessHandle(process=FakeProcess(), job=job)
@@ -272,7 +274,7 @@ def test_windows_pipe_kill_waits_for_job_processes_to_exit():
         await WindowsPipeBackend().kill_tree(handle)
 
         job.terminate.assert_called_once_with()
-        job.wait_empty.assert_called_once_with(1000)
+        job.wait_empty.assert_not_called()
 
     asyncio.run(_run())
 
@@ -344,6 +346,75 @@ def test_windows_pty_does_not_spawn_when_job_construction_fails():
             await backend.start(CommandSpec("tool", ()))
 
         pty_process.spawn.assert_not_called()
+
+    asyncio.run(_run())
+
+
+def test_cancelled_windows_pty_spawn_closes_late_native_process():
+    async def _run() -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        native = Mock(pid=123)
+
+        def blocked_spawn(*_args, **_kwargs):
+            entered.set()
+            release.wait(2)
+            return native
+
+        pty_process = Mock()
+        pty_process.spawn.side_effect = blocked_spawn
+        winpty = ModuleType("winpty")
+        winpty.PtyProcess = pty_process
+        job = Mock()
+        backend = WindowsPtyBackend()
+
+        with (
+            patch.dict(sys.modules, {"winpty": winpty}),
+            patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
+        ):
+            start = asyncio.create_task(backend.start(CommandSpec("tool", ())))
+            assert await asyncio.to_thread(entered.wait, 1)
+            start.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start
+            release.set()
+            deadline = time.monotonic() + 1
+            while not native.close.called and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+
+        native.close.assert_called_once_with(force=True)
+        job.close.assert_called_once_with()
+
+    asyncio.run(_run())
+
+
+def test_cancelled_windows_pty_write_rejects_overlapping_writes():
+    async def _run() -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_write(_data):
+            entered.set()
+            release.wait(2)
+
+        native = Mock()
+        native.write.side_effect = blocked_write
+        handle = WindowsPtyProcessHandle(process=Mock(), native_pty=native)
+        backend = WindowsPtyBackend()
+
+        first = asyncio.create_task(backend.write(handle, b"first"))
+        assert await asyncio.to_thread(entered.wait, 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        with pytest.raises(RuntimeError, match="previous ConPTY write"):
+            await backend.write(handle, b"second")
+        release.set()
+        deadline = time.monotonic() + 1
+        while handle._write_future is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert handle._write_future is None
 
     asyncio.run(_run())
 

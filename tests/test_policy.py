@@ -153,23 +153,16 @@ def test_wsl_policy_denylist_checks_launcher_and_linux_executable(denied: str):
     assert raised.value.rule == "denied_executables"
 
 
-def test_wsl_policy_checks_linux_working_directory_lexically():
+def test_wsl_policy_fails_closed_for_physical_working_directory_boundary():
     policy = ExecutionPolicy(allowed_cwd_roots=(Path("/workspace"),))
     allowed = direct_command(
         "python3",
         target=Target.WSL,
         wsl=WslOptions(cwd="/workspace/project"),
     )
-    escaped = direct_command(
-        "python3",
-        target=Target.WSL,
-        wsl=WslOptions(cwd="/workspace/project/../../outside"),
-    )
-
-    policy.enforce(allowed, timeout_ms=1, max_output_bytes=1)
     with pytest.raises(PolicyViolation) as raised:
-        policy.enforce(escaped, timeout_ms=1, max_output_bytes=1)
-    assert raised.value.rule == "allowed_cwd_roots"
+        policy.enforce(allowed, timeout_ms=1, max_output_bytes=1)
+    assert raised.value.rule == "wsl_cwd_physical_resolution"
 
 
 @pytest.mark.parametrize("cwd", [None, "workspace/project", "~"])
@@ -179,7 +172,7 @@ def test_wsl_policy_rejects_unverifiable_working_directory(cwd):
 
     with pytest.raises(PolicyViolation) as raised:
         policy.enforce(spec, timeout_ms=1, max_output_bytes=1)
-    assert raised.value.rule == "allowed_cwd_roots"
+    assert raised.value.rule == "wsl_cwd_physical_resolution"
 
 
 @pytest.mark.parametrize(

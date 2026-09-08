@@ -600,6 +600,53 @@ class SqliteJobStore:
                 self._insert_outbox(updated)
             return len(rows)
 
+    def recover_expired_leases(self, *, exclude_job_ids: tuple[str, ...] = ()) -> int:
+        """Finalize attempts whose executor stopped renewing its lease."""
+
+        excluded = set(exclude_job_ids)
+        recovered = 0
+        with self._transaction():
+            rows = self._connection.execute(
+                "SELECT * FROM jobs WHERE phase IN (?, ?) "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
+                (JobPhase.ASSIGNED.value, JobPhase.RUNNING.value, time.time()),
+            ).fetchall()
+            for row in rows:
+                if str(row["id"]) in excluded:
+                    continue
+                revision = int(row["revision"]) + 1
+                now = utc_now()
+                spec_data = json.loads(row["spec_json"])
+                cancelled = spec_data.get("desired_state") == "cancelled"
+                phase = JobPhase.CANCELED if cancelled else JobPhase.EXECUTOR_LOST
+                reason = "cancelled" if cancelled else "executor_lease_expired"
+                updated = self._connection.execute(
+                    "UPDATE jobs SET phase = ?, observed_generation = generation, "
+                    "revision = ?, completed_at = ?, updated_at = ?, reason = ?, "
+                    "lease_expires_at = NULL WHERE id = ? AND revision = ? "
+                    "AND lease_expires_at <= ?",
+                    (
+                        phase.value,
+                        revision,
+                        now,
+                        now,
+                        reason,
+                        row["id"],
+                        row["revision"],
+                        time.time(),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                recovered += 1
+                self._event(str(row["id"]), revision, f"job.{phase.value}")
+                terminal = self._connection.execute(
+                    "SELECT * FROM jobs WHERE id = ?", (row["id"],)
+                ).fetchone()
+                assert terminal is not None
+                self._insert_outbox(terminal)
+        return recovered
+
     def outbox_due(self, limit: int = 100) -> tuple[OutboxRecord, ...]:
         with self._lock:
             rows = self._connection.execute(
@@ -785,7 +832,10 @@ class SqliteJobStore:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT id, stdout_path, stderr_path FROM jobs "
-                f"WHERE phase IN ({placeholders}) AND completed_at < ?",
+                f"WHERE phase IN ({placeholders}) AND completed_at < ? "
+                "AND NOT EXISTS (SELECT 1 FROM callback_outbox "
+                "WHERE callback_outbox.job_id = jobs.id "
+                "AND callback_outbox.state IN ('pending', 'delivering'))",
                 (*terminal, cutoff),
             ).fetchall()
         cleaned_ids: list[str] = []
@@ -806,7 +856,9 @@ class SqliteJobStore:
             for job_id in cleaned_ids:
                 result = self._connection.execute(
                     f"DELETE FROM jobs WHERE id = ? AND phase IN ({placeholders}) "
-                    "AND completed_at < ?",
+                    "AND completed_at < ? AND NOT EXISTS (SELECT 1 "
+                    "FROM callback_outbox WHERE callback_outbox.job_id = jobs.id "
+                    "AND callback_outbox.state IN ('pending', 'delivering'))",
                     (job_id, *terminal, cutoff),
                 )
                 deleted += result.rowcount

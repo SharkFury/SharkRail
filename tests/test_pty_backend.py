@@ -58,6 +58,54 @@ def test_pty_backend_writes_and_resizes_terminal():
     asyncio.run(_run())
 
 
+def test_pty_close_stdin_delivers_unterminated_input_then_eof():
+    async def _run() -> None:
+        backend = PtyBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import sys; print(repr(sys.stdin.read()))"),
+                mode=CommandMode.PTY,
+            )
+        )
+        output_task = asyncio.create_task(read_pty_output(backend, handle))
+        await backend.write(handle, b"unterminated")
+        await backend.close_stdin(handle)
+        await asyncio.wait_for(handle.process.wait(), timeout=2)
+        output = await output_task
+        await backend.dispose(handle)
+
+        assert b"unterminated" in output
+
+    asyncio.run(_run())
+
+
+def test_pty_close_stdin_fails_closed_in_raw_mode():
+    async def _run() -> None:
+        backend = PtyBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=(
+                    "-c",
+                    "import time,tty; tty.setraw(0); print('ready', flush=True); time.sleep(30)",
+                ),
+                mode=CommandMode.PTY,
+            )
+        )
+        try:
+            assert b"ready" in await asyncio.wait_for(backend.read(handle), timeout=1)
+            with pytest.raises(RuntimeError, match="non-canonical mode"):
+                await backend.close_stdin(handle)
+            assert handle.stdin_closed is False
+        finally:
+            await backend.kill_tree(handle)
+            await asyncio.wait_for(handle.process.wait(), timeout=2)
+            await backend.dispose(handle)
+
+    asyncio.run(_run())
+
+
 def test_pty_backpressure_is_cancellable_without_blocking_worker_threads():
     async def _run() -> None:
         backend = PtyBackend()

@@ -8,9 +8,11 @@ from pathlib import Path
 
 
 def secure_private_path(path: Path, *, directory: bool | None = None) -> None:
-    """Restrict a Windows path to the service identity, SYSTEM, and admins."""
+    """Restrict a sensitive path to the service identity on every platform."""
 
     if os.name != "nt":
+        is_directory = path.is_dir() if directory is None else directory
+        path.chmod(0o700 if is_directory else 0o600)
         return
     is_directory = path.is_dir() if directory is None else directory
     _set_private_windows_acl(path, directory=is_directory)

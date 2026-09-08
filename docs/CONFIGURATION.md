@@ -55,6 +55,20 @@ single-instance lock. The current release supports SQLite JobStore and local
 file OutputStore only; unsupported schemes fail startup instead of silently
 falling back to memory.
 
+The Job service also requires a host-owned execution policy before it will run
+commands. Configure `executor.policy_file` or pass `--policy PATH`; with neither,
+the service starts in deny-all mode. Job commands always begin with a clean
+environment and apply only the request's validated `env` overlay, so service
+credentials cannot be inherited:
+
+```toml
+[executor]
+workers = 2
+heartbeat_seconds = 5
+lease_seconds = 30
+policy_file = "/etc/sharkrail/execution-policy.json"
+```
+
 The complete installed example is
 [`configs/sharkrail.toml.example`](../configs/sharkrail.toml.example). Unknown
 keys, invalid values, any non-loopback listener, and a
@@ -203,6 +217,7 @@ server accept the same policy as strict JSON:
 
 ```bash
 sharkrail serve --policy ./examples/security/policy.json
+sharkrail server --policy ./examples/security/policy.json
 sharkrail run --policy ./examples/security/policy.json --clean-env \
   --timeout-ms 30000 --max-output-bytes 1048576 -- python -V
 ```
@@ -217,3 +232,8 @@ Name-based executable allowlists are convenient but still depend on `PATH`.
 Use `require_absolute_executable` together with a controlled clean environment
 when the executable identity is security-sensitive. SharkRail policy reduces
 accidental authority; it is not an isolation boundary.
+
+`allowed_cwd_roots` cannot safely authorize a WSL working directory from the
+Windows host because distribution-local symlinks require Linux-side physical
+path resolution. SharkRail therefore rejects WSL requests whenever that cwd
+boundary is enabled instead of relying on lexical normalization.

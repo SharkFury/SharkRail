@@ -70,6 +70,62 @@ class FileOutputStore:
                 raise
         return str(target)
 
+    def write_job(self, job_id: str, stdout: bytes, stderr: bytes) -> tuple[str, str]:
+        """Commit both Job streams together or remove every partial artifact."""
+
+        if not job_id or Path(job_id).name != job_id:
+            raise OSError("invalid output Job ID")
+        target_dir = self.root / job_id
+        targets = (target_dir / "stdout.bin", target_dir / "stderr.bin")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        secure_private_path(target_dir, directory=True)
+        temporary_paths: list[str] = []
+        with self._lock:
+            existing_size = sum(
+                target.stat().st_size for target in targets if target.is_file()
+            )
+            if (
+                self._size_locked() - existing_size + len(stdout) + len(stderr)
+                > self._max_total_bytes
+            ):
+                try:
+                    target_dir.rmdir()
+                except OSError:
+                    pass
+                raise OSError("output store capacity exceeded")
+            try:
+                for stream, data in (("stdout", stdout), ("stderr", stderr)):
+                    descriptor, temporary = tempfile.mkstemp(
+                        prefix=f".{stream}.", dir=str(target_dir)
+                    )
+                    temporary_paths.append(temporary)
+                    with os.fdopen(descriptor, "wb") as handle:
+                        secure_private_path(Path(temporary), directory=False)
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                for temporary, target in zip(temporary_paths, targets):
+                    os.replace(temporary, target)
+                    secure_private_path(target, directory=False)
+                _sync_directory(target_dir)
+            except BaseException:
+                for temporary in temporary_paths:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                for target in targets:
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                try:
+                    target_dir.rmdir()
+                except OSError:
+                    pass
+                raise
+        return str(targets[0]), str(targets[1])
+
     @staticmethod
     def read(path: Optional[str]) -> bytes:
         if path is None:

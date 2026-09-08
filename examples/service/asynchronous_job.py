@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from sharkrail.runtime.policy import ExecutionPolicy
 from sharkrail.service.config import (
     ExecutorSettings,
     JobStoreSettings,
@@ -22,7 +23,12 @@ with tempfile.TemporaryDirectory(prefix="sharkrail-example-") as directory:
         output_store=OutputStoreSettings(url="file://./output"),
         executor=ExecutorSettings(workers=1, heartbeat_seconds=1, lease_seconds=10),
     )
-    service = JobService(config, state_dir=Path(directory))
+    policy = ExecutionPolicy(
+        allowed_executables=frozenset({sys.executable}),
+        allow_parent_environment=False,
+        require_timeout=True,
+    )
+    service = JobService(config, state_dir=Path(directory), execution_policy=policy)
     service.start()
     try:
         job, _ = service.submit(

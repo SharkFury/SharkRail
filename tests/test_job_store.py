@@ -161,6 +161,24 @@ def test_file_store_survives_restart_and_marks_running_job_lost(tmp_path: Path):
         second.close()
 
 
+def test_expired_lease_is_recovered_without_service_restart():
+    store = SqliteJobStore()
+    try:
+        job, _ = store.submit("tenant", "expired", JobSpec(("echo",)))
+        claimed = store.claim_next("lost-worker", 0)
+        assert claimed is not None and claimed.attempt_id is not None
+        store.mark_running(job.id, claimed.attempt_id, "lost-worker")
+
+        assert store.recover_expired_leases(exclude_job_ids=(job.id,)) == 0
+        assert store.get(job.id).phase == JobPhase.RUNNING
+        assert store.recover_expired_leases() == 1
+        recovered = store.get(job.id)
+        assert recovered.phase == JobPhase.EXECUTOR_LOST
+        assert recovered.reason == "executor_lease_expired"
+    finally:
+        store.close()
+
+
 def test_file_store_rejects_second_local_instance(tmp_path: Path):
     first = SqliteJobStore("sqlite:///jobs.db", state_dir=tmp_path)
     try:
@@ -296,6 +314,81 @@ def test_volatile_ttl_removes_output_files_with_job(tmp_path: Path):
     finally:
         store.close()
         output.close()
+
+
+def test_volatile_ttl_keeps_job_until_callback_is_delivered(tmp_path: Path):
+    store = SqliteJobStore(job_ttl_seconds=0)
+    output = FileOutputStore("file://./output", state_dir=tmp_path)
+    store.set_output_cleaner(output.delete_job)
+    try:
+        job, _ = store.submit(
+            "tenant",
+            "callback",
+            JobSpec(("echo",), callback_endpoint_id="receiver"),
+        )
+        stdout, stderr = output.write_job(job.id, b"out", b"err")
+        claimed = store.claim_next("worker", 30)
+        assert claimed is not None and claimed.attempt_id is not None
+        _finish(
+            store,
+            job.id,
+            claimed.attempt_id,
+            stdout_path=stdout,
+            stderr_path=stderr,
+        )
+        time.sleep(0.002)
+
+        assert store.prune_expired() == 0
+        assert Path(stdout).exists()
+        delivery = store.claim_outbox_due()
+        assert len(delivery) == 1
+        assert store.outbox_delivered(
+            delivery[0].event_id, delivery[0].delivery_attempt_id
+        )
+        assert store.prune_expired() == 1
+        assert not Path(stdout).exists()
+    finally:
+        store.close()
+        output.close()
+
+
+def test_output_pair_rolls_back_when_second_replace_fails(monkeypatch, tmp_path: Path):
+    output = FileOutputStore("file://./output", state_dir=tmp_path)
+    original_replace = os.replace
+    replacements = 0
+
+    def fail_second_replace(source, target):
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise OSError("simulated stderr commit failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr("sharkrail.service.output.os.replace", fail_second_replace)
+    try:
+        with pytest.raises(OSError, match="stderr commit failure"):
+            output.write_job("job", b"stdout", b"stderr")
+        assert not (output.root / "job").exists()
+    finally:
+        output.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_existing_state_and_output_directories_are_tightened(tmp_path: Path):
+    state = tmp_path / "state"
+    output_root = state / "output"
+    output_root.mkdir(parents=True)
+    state.chmod(0o777)
+    output_root.chmod(0o777)
+
+    store = SqliteJobStore("sqlite:///jobs.db", state_dir=state)
+    output = FileOutputStore("file://./output", state_dir=state)
+    try:
+        assert stat.S_IMODE(state.stat().st_mode) == 0o700
+        assert stat.S_IMODE(output_root.stat().st_mode) == 0o700
+    finally:
+        output.close()
+        store.close()
 
 
 def test_ttl_output_cleanup_failure_keeps_record_for_retry(tmp_path: Path):

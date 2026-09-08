@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from ..runtime.policy import ExecutionPolicy
 from .windows_security import secure_private_path, validate_private_path
 
 if sys.version_info >= (3, 11):  # pragma: no cover - selected by interpreter
@@ -73,6 +74,7 @@ class ExecutorSettings:
     workers: int = 2
     heartbeat_seconds: int = 5
     lease_seconds: int = 30
+    policy_file: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -189,7 +191,7 @@ _SECTIONS: dict[str, set[str]] = {
         "worker_restart_limit",
         "worker_restart_window_seconds",
     },
-    "executor": {"workers", "heartbeat_seconds", "lease_seconds"},
+    "executor": {"workers", "heartbeat_seconds", "lease_seconds", "policy_file"},
     "admission": {
         "max_concurrent_requests",
         "max_queued_jobs",
@@ -434,6 +436,7 @@ def _validate_config(
             "through a same-host TLS reverse proxy"
         )
     _positive_values(config)
+    load_service_execution_policy(config)
 
     job_store_raw = (raw or {}).get("job_store", {})
     direct_url_configured = isinstance(job_store_raw, dict) and "url" in job_store_raw
@@ -497,6 +500,45 @@ def _validate_config(
     if config.logging.format != "json":
         raise ConfigError("only logging.format=json is currently supported")
     return config
+
+
+def load_service_execution_policy(config: ServiceConfig) -> ExecutionPolicy:
+    """Load the host-owned Job policy or return a deny-all safe default."""
+
+    configured = config.executor.policy_file
+    if configured is None:
+        return ExecutionPolicy(
+            allowed_executables=frozenset(),
+            allow_parent_environment=False,
+            require_timeout=True,
+        )
+    if not isinstance(configured, str) or not configured:
+        raise ConfigError("ExecutorSettings.policy_file must be a non-empty string")
+    path = Path(configured)
+    if not path.is_absolute() and config.config_path is not None:
+        path = config.config_path.parent / path
+    _validate_policy_permissions(path)
+    try:
+        return ExecutionPolicy.from_json(path)
+    except (OSError, TypeError, ValueError) as err:
+        raise ConfigError(f"cannot load executor policy_file {path}: {err}") from err
+
+
+def _validate_policy_permissions(path: Path) -> None:
+    if os.name == "nt":
+        _validate_permissions(path)
+        return
+    try:
+        mode = path.stat().st_mode
+    except OSError as err:
+        raise ConfigError(
+            f"cannot inspect execution policy permissions: {err}"
+        ) from err
+    if mode & 0o022:
+        raise ConfigError(
+            f"execution policy permissions are too broad: {path}; "
+            "the file must not be writable by group or other users"
+        )
 
 
 def _positive_values(config: ServiceConfig) -> None:

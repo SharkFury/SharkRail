@@ -11,7 +11,8 @@ Inspect the effective settings before startup:
 ```bash
 sharkrail config validate --config /etc/sharkrail/sharkrail.toml
 sharkrail config show --config /etc/sharkrail/sharkrail.toml
-sharkrail server --config /etc/sharkrail/sharkrail.toml
+sharkrail server --config /etc/sharkrail/sharkrail.toml \
+  --policy /etc/sharkrail/execution-policy.json
 ```
 
 On Windows, use `%ProgramData%\SharkRail\sharkrail.toml`. By default the
@@ -44,7 +45,9 @@ grows or `dead_callbacks` is nonzero.
 1. Pin a released SharkRail version and verify its GitHub attestation and SBOM.
 2. Run `sharkrail doctor --json` on each deployment image and save the result.
 3. Use a reviewed execution policy with absolute paths, required timeouts,
-   bounded output/resources, and minimal environment inheritance.
+   bounded output/resources, and a narrow environment overlay. The Job service
+   denies all commands when no policy is configured and never inherits its own
+   process environment into a Job.
 4. Keep stdio private to the parent host; do not expose it as a network socket.
 5. Capture `runtime.health`, `runtime.stats`, structured stderr logs, and
    redacted event audits according to a retention policy.

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..observability.telemetry import configure_logging
+from ..runtime.policy import ExecutionPolicy
 from .config import ServiceConfig, load_config
 from .http import serve_http
 from .server import JobService
@@ -23,6 +24,7 @@ def run_worker(
     config_path: Optional[str],
     parent_pid: Optional[int] = None,
     heartbeat: Optional[Connection] = None,
+    execution_policy: Optional[ExecutionPolicy] = None,
 ) -> None:
     config = (
         load_config(Path(config_path), require_explicit=True)
@@ -30,7 +32,7 @@ def run_worker(
         else load_config()
     )
     configure_logging(config.logging.level)
-    service = JobService(config)
+    service = JobService(config, execution_policy=execution_policy)
     if parent_pid is not None:
         _start_parent_watch(parent_pid)
     if heartbeat is not None:
@@ -55,12 +57,20 @@ class ControlMaster:
         config_path: Optional[Path],
         *,
         worker_target: Callable[
-            [Optional[str], Optional[int], Optional[Connection]], None
+            [
+                Optional[str],
+                Optional[int],
+                Optional[Connection],
+                Optional[ExecutionPolicy],
+            ],
+            None,
         ] = run_worker,
+        execution_policy: Optional[ExecutionPolicy] = None,
     ) -> None:
         self.config = config
         self.config_path = config_path
         self._worker_target = worker_target
+        self._execution_policy = execution_policy
         self._stop = threading.Event()
         self._worker: Optional[BaseProcess] = None
 
@@ -87,6 +97,7 @@ class ControlMaster:
                         str(self.config_path) if self.config_path else None,
                         os.getpid(),
                         heartbeat_writer,
+                        self._execution_policy,
                     ),
                     name="sharkrail-control-worker",
                 )

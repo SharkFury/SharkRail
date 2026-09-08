@@ -78,11 +78,13 @@ class ExecutionPolicy:
         ):
             raise PolicyViolation("require_absolute_executable")
         if self.allowed_cwd_roots:
-            cwd_allowed = (
-                _wsl_cwd_is_allowed(wsl, self.allowed_cwd_roots)
-                if wsl is not None
-                else _native_cwd_is_allowed(spec, self.allowed_cwd_roots)
-            )
+            if wsl is not None:
+                # Windows-side lexical normalization cannot prove the physical
+                # Linux path because any component may be a distribution-local
+                # symlink. Fail closed instead of presenting this as a secure
+                # working-directory boundary.
+                raise PolicyViolation("wsl_cwd_physical_resolution")
+            cwd_allowed = _native_cwd_is_allowed(spec, self.allowed_cwd_roots)
             if not cwd_allowed:
                 raise PolicyViolation("allowed_cwd_roots")
         if not self.allow_parent_environment and spec.inherit_env:
@@ -204,35 +206,6 @@ def _policy_wsl_invocation(
 def _native_cwd_is_allowed(spec: CommandSpec, roots: tuple[Path, ...]) -> bool:
     cwd = Path(spec.cwd or os.getcwd()).resolve()
     return any(_is_within(cwd, root.resolve()) for root in roots)
-
-
-def _wsl_cwd_is_allowed(wsl: WslInvocation, roots: tuple[Path, ...]) -> bool:
-    if wsl.cwd is None:
-        return False
-    cwd_parts = _absolute_posix_parts(wsl.cwd)
-    if cwd_parts is None:
-        return False
-    return any(
-        root_parts is not None and cwd_parts[: len(root_parts)] == root_parts
-        for root_parts in (_absolute_posix_parts(root.as_posix()) for root in roots)
-    )
-
-
-def _absolute_posix_parts(value: str) -> tuple[str, ...] | None:
-    """Normalize an absolute Linux path lexically without host path semantics."""
-
-    if not value.startswith("/"):
-        return None
-    parts: list[str] = []
-    for part in value.split("/"):
-        if not part or part == ".":
-            continue
-        if part == "..":
-            if parts:
-                parts.pop()
-            continue
-        parts.append(part)
-    return tuple(parts)
 
 
 def _normalized(values: Iterable[object]) -> set[str]:

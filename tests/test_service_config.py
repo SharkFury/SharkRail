@@ -12,6 +12,7 @@ from sharkrail.service.config import (
     example_config_text,
     initialize_config,
     load_config,
+    load_service_execution_policy,
     state_directory,
     system_config_path,
 )
@@ -236,6 +237,50 @@ def test_numeric_limits_are_strict_positive_integers(tmp_path):
     path = _write_config(tmp_path / "service.toml", '[executor]\nworkers = "many"\n')
     with pytest.raises(ConfigError, match="positive integer"):
         load_config(path)
+
+
+def test_service_execution_policy_is_host_owned_and_fail_closed(tmp_path):
+    default = load_config(
+        _write_config(tmp_path / "default.toml", "[executor]\nworkers = 1\n")
+    )
+    assert load_service_execution_policy(default).allowed_executables == frozenset()
+
+    policy = tmp_path / "policy.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "allowed_executables": ["approved-tool"],
+                "allow_parent_environment": False,
+                "require_timeout": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        policy.chmod(0o600)
+    configured = load_config(
+        _write_config(
+            tmp_path / "configured.toml",
+            f"[executor]\npolicy_file = {json.dumps(str(policy))}\n",
+        )
+    )
+    loaded = load_service_execution_policy(configured)
+    assert loaded.allowed_executables == frozenset({"approved-tool"})
+    assert loaded.allow_parent_environment is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
+def test_service_execution_policy_rejects_group_writable_file(tmp_path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"allowed_executables": []}', encoding="utf-8")
+    policy.chmod(0o666)
+    config = _write_config(
+        tmp_path / "service.toml",
+        f"[executor]\npolicy_file = {json.dumps(str(policy))}\n",
+    )
+
+    with pytest.raises(ConfigError, match="policy permissions are too broad"):
+        load_config(config)
 
 
 def test_system_paths_follow_platform_conventions():

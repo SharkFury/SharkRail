@@ -11,8 +11,10 @@ import os
 import signal
 import socket
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -29,6 +31,18 @@ if os.name != "nt":
 
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
 _WINDOWS_CREATE_SUSPENDED = getattr(subprocess, "CREATE_SUSPENDED", 0x4)
+_CONPTY_START_WORKERS = 4
+_CONPTY_WRITE_WORKERS = 16
+_conpty_start_executor = ThreadPoolExecutor(
+    max_workers=_CONPTY_START_WORKERS,
+    thread_name_prefix="sharkrail-conpty-start",
+)
+_conpty_start_slots = threading.BoundedSemaphore(_CONPTY_START_WORKERS)
+_conpty_write_executor = ThreadPoolExecutor(
+    max_workers=_CONPTY_WRITE_WORKERS,
+    thread_name_prefix="sharkrail-conpty-write",
+)
+_conpty_write_slots = threading.BoundedSemaphore(_CONPTY_WRITE_WORKERS)
 
 
 def _child_environment(spec: CommandSpec) -> dict[str, str]:
@@ -85,6 +99,12 @@ class WindowsProcessHandle(ProcessHandle):
 class WindowsPtyProcessHandle(PtyProcessHandle):
     native_pty: Any = None
     job: WindowsJob | None = None
+    _write_future: Future[Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _write_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
 
 class CancellationStep(str, Enum):
@@ -300,8 +320,7 @@ class WindowsPipeBackend(PipeBackend):
             async with handle._tree_lock:
                 if handle._tree_killed:
                     return
-                await asyncio.to_thread(handle.job.terminate)
-                await asyncio.to_thread(handle.job.wait_empty, 1000)
+                handle.job.terminate()
                 handle._tree_killed = True
             return
         await super().kill_tree(handle)
@@ -332,8 +351,7 @@ class WindowsPipeBackend(PipeBackend):
         """Fail closed if a Job-owned suspended process cannot be resumed."""
 
         try:
-            await asyncio.to_thread(job.terminate)
-            await asyncio.to_thread(job.wait_empty, 1000)
+            job.terminate()
         except OSError:
             pass
         finally:
@@ -398,8 +416,20 @@ class PtyBackend(ExecutionBackend):
         if pty_handle.stdin_closed:
             return
         pty_handle.stdin_closed = True
-        # POSIX terminal EOF (VEOF) preserves the output side of the PTY.
-        await _write_fd(pty_handle.master_fd, b"\x04")
+        attributes = termios.tcgetattr(pty_handle.master_fd)
+        if not attributes[3] & termios.ICANON:
+            pty_handle.stdin_closed = False
+            raise RuntimeError(
+                "stdin EOF is unavailable for a POSIX PTY in non-canonical mode"
+            )
+        veof_value = attributes[6][termios.VEOF]
+        veof = (
+            bytes((veof_value,)) if isinstance(veof_value, int) else bytes(veof_value)
+        )
+        # One VEOF submits an unterminated canonical line and the second
+        # presents EOF to the following read. Both are required for a
+        # deterministic close_stdin() operation.
+        await _write_fd(pty_handle.master_fd, veof + veof)
 
     async def interrupt(self, handle: ProcessHandle) -> None:
         if handle.process.returncode is None:
@@ -508,7 +538,7 @@ class WindowsPtyBackend(ExecutionBackend):
             process_count=spec.resources.process_count,
         )
         try:
-            native = await asyncio.to_thread(
+            spawn_future = _submit_conpty_start(
                 PtyProcess.spawn,
                 spec.argv_list,
                 cwd=spec.cwd,
@@ -517,6 +547,36 @@ class WindowsPtyBackend(ExecutionBackend):
             )
         except BaseException:
             job.close()
+            raise
+        abandoned = threading.Event()
+        cleanup_lock = threading.Lock()
+        cleaned = False
+
+        def cleanup_abandoned_spawn(completed: Future[Any]) -> None:
+            nonlocal cleaned
+            if not abandoned.is_set():
+                return
+            with cleanup_lock:
+                if cleaned:
+                    return
+                cleaned = True
+            try:
+                spawned = completed.result()
+            except BaseException:  # noqa: BLE001 - native worker boundary
+                job.close()
+                return
+            try:
+                spawned.close(force=True)
+            finally:
+                job.close()
+
+        spawn_future.add_done_callback(cleanup_abandoned_spawn)
+        try:
+            native = await asyncio.shield(asyncio.wrap_future(spawn_future))
+        except BaseException:
+            abandoned.set()
+            if not spawn_future.cancel() and spawn_future.done():
+                cleanup_abandoned_spawn(spawn_future)
             raise
         # pywinpty can leave its relay socket open after the child exits, so a
         # permanently blocking read cannot reliably observe terminal EOF.
@@ -551,10 +611,23 @@ class WindowsPtyBackend(ExecutionBackend):
         pty_handle = _as_windows_pty(handle)
         if pty_handle.stdin_closed:
             raise RuntimeError("stdin is closed")
-        await asyncio.to_thread(
-            pty_handle.native_pty.write,
-            _windows_terminal_input(data).decode("utf-8", errors="replace"),
-        )
+        with pty_handle._write_lock:
+            pending = pty_handle._write_future
+            if pending is not None and not pending.done():
+                raise RuntimeError("a previous ConPTY write is still pending")
+            future = _submit_conpty_write(
+                pty_handle.native_pty.write,
+                _windows_terminal_input(data).decode("utf-8", errors="replace"),
+            )
+            pty_handle._write_future = future
+
+        def clear_write(completed: Future[Any]) -> None:
+            with pty_handle._write_lock:
+                if pty_handle._write_future is completed:
+                    pty_handle._write_future = None
+
+        future.add_done_callback(clear_write)
+        await asyncio.shield(asyncio.wrap_future(future))
 
     async def close_stdin(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
@@ -578,8 +651,7 @@ class WindowsPtyBackend(ExecutionBackend):
             if handle._tree_killed:
                 return
             if pty_handle.job is not None:
-                await asyncio.to_thread(pty_handle.job.terminate)
-                await asyncio.to_thread(pty_handle.job.wait_empty, 1000)
+                pty_handle.job.terminate()
             elif pty_handle.process.returncode is None:
                 await asyncio.to_thread(pty_handle.native_pty.terminate, True)
             handle._tree_killed = True
@@ -623,6 +695,40 @@ class WindowsPtyBackend(ExecutionBackend):
                 pty_handle.job.close()
                 pty_handle.job = None
         pty_handle._disposed = True
+
+
+def _submit_bounded_native_call(
+    executor: ThreadPoolExecutor,
+    slots: threading.BoundedSemaphore,
+    operation: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Future[Any]:
+    if not slots.acquire(blocking=False):
+        raise RuntimeError("ConPTY native worker capacity is exhausted")
+    try:
+        future = executor.submit(operation, *args, **kwargs)
+    except BaseException:
+        slots.release()
+        raise
+    future.add_done_callback(lambda _completed: slots.release())
+    return future
+
+
+def _submit_conpty_start(
+    operation: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Future[Any]:
+    return _submit_bounded_native_call(
+        _conpty_start_executor, _conpty_start_slots, operation, *args, **kwargs
+    )
+
+
+def _submit_conpty_write(
+    operation: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Future[Any]:
+    return _submit_bounded_native_call(
+        _conpty_write_executor, _conpty_write_slots, operation, *args, **kwargs
+    )
 
 
 def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:

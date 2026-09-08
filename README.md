@@ -160,13 +160,14 @@ scenario are indexed in [`examples/README.md`](examples/README.md).
 
 ## Submit a long-running Job and disconnect
 
-Start the optional service. With no configuration it runs in explicitly
-volatile SQLite memory mode; use the example file to configure durable local
-state.
+Start the optional service with a host-owned execution policy. Without a
+policy, the service remains available for configuration and health checks but
+denies every Job. The zero-configuration store is explicitly volatile; use the
+example file to configure durable local state.
 
 ```bash
 sharkrail config sample
-sharkrail server
+sharkrail server --policy ./examples/security/policy.json
 
 curl -X POST http://127.0.0.1:8765/v1/jobs \
   -H 'Content-Type: application/json' \

@@ -13,6 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from sharkrail.runtime.policy import ExecutionPolicy
 from sharkrail.service.config import CallbackEndpoint, ServiceConfig
 from sharkrail.service.server import JobService
 
@@ -56,7 +57,12 @@ with tempfile.TemporaryDirectory(prefix="sharkrail-callback-example-") as direct
             )
         }
     )
-    service = JobService(config, state_dir=Path(directory))
+    policy = ExecutionPolicy(
+        allowed_executables=frozenset({sys.executable}),
+        allow_parent_environment=False,
+        require_timeout=True,
+    )
+    service = JobService(config, state_dir=Path(directory), execution_policy=policy)
     service.start()
     try:
         job, _ = service.submit(
