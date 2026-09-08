@@ -204,7 +204,9 @@ def test_store_url_and_url_file_are_mutually_exclusive(tmp_path):
     secret.write_text("sqlite:///:memory:", encoding="utf-8")
     path = _write_config(
         tmp_path / "service.toml",
-        f'[job_store]\nurl = "sqlite:///:memory:"\nurl_file = "{secret}"\n',
+        "[job_store]\n"
+        'url = "sqlite:///:memory:"\n'
+        f"url_file = {json.dumps(str(secret))}\n",
     )
     with pytest.raises(ConfigError, match="mutually exclusive"):
         load_config(path)
@@ -217,7 +219,7 @@ def test_store_url_file_is_resolved(tmp_path):
         secret.chmod(0o600)
     path = _write_config(
         tmp_path / "service.toml",
-        f'[job_store]\nurl_file = "{secret}"\n',
+        f"[job_store]\nurl_file = {json.dumps(str(secret))}\n",
     )
     config = load_config(path)
     assert config.job_store.url == "sqlite:///jobs.db"

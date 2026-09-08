@@ -647,6 +647,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._approved_address = address
         self._callback_context = context
         self._callback_deadline = deadline
+        self._callback_timeout = timeout
 
     def connect(self) -> None:
         raw_socket = socket.create_connection(
@@ -664,7 +665,9 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
             raw_socket.close()
             raise
         self.sock = tls_socket
-        remaining = self._callback_deadline - time.monotonic()
+        remaining = min(
+            self._callback_timeout, self._callback_deadline - time.monotonic()
+        )
         if remaining <= 0:
             raise TimeoutError("callback TLS handshake deadline exceeded")
         tls_socket.settimeout(remaining)
@@ -694,7 +697,10 @@ def _post_callback(
     deadline = time.monotonic() + timeout
     https_context = ssl.create_default_context() if scheme == "https" else None
     for address in addresses:
-        remaining = deadline - time.monotonic()
+        # Floating-point addition/subtraction can otherwise produce a value a
+        # few ulps larger than the administrator-configured timeout. Keep every
+        # socket and timer deadline bounded by the original request limit.
+        remaining = min(timeout, deadline - time.monotonic())
         if remaining <= 0:
             last_error = TimeoutError("callback request deadline exceeded")
             break

@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import socket
+import socketserver
 import ssl
 import subprocess
 import sys
@@ -34,6 +35,15 @@ from sharkrail.service.http import JobHTTPServer
 from sharkrail.service.master import ControlMaster
 from sharkrail.service.models import JobPhase, OutboxRecord
 from sharkrail.service.server import JobService, _post_callback
+
+
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    """Test callback server that never performs reverse DNS during bind."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
 
 
 def _exiting_worker(_config_path, _parent_pid, heartbeat):
@@ -89,7 +99,7 @@ def test_service_executes_and_retains_bounded_output(tmp_path):
         result = _terminal(service, job.id)
         assert created is True
         assert result.phase == JobPhase.SUCCEEDED
-        assert service.read_output(job.id, "stdout") == b"hello\n"
+        assert service.read_output(job.id, "stdout") == f"hello{os.linesep}".encode()
         assert service.health()["reason"] == "DEGRADED_VOLATILE_STORE"
     finally:
         service.close()
@@ -465,7 +475,7 @@ def test_http_submit_idempotency_result_and_output(tmp_path):
         with urllib.request.urlopen(
             base + f"/v1/jobs/{submitted['job_id']}/output?stream=stdout", timeout=3
         ) as response:
-            assert response.read() == b"from-http\n"
+            assert response.read() == f"from-http{os.linesep}".encode()
         with urllib.request.urlopen(base + "/health/state", timeout=3) as response:
             assert json.load(response)["degraded"] is True
     finally:
@@ -691,7 +701,7 @@ def test_registered_callback_is_signed_and_delivered(tmp_path):
         def log_message(self, format, *args):
             return
 
-    callback_server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    callback_server = _LoopbackHTTPServer(("127.0.0.1", 0), Receiver)
     callback_thread = threading.Thread(
         target=callback_server.serve_forever, daemon=True
     )
@@ -755,7 +765,7 @@ def test_callback_redirect_is_not_followed_or_given_signature(tmp_path):
         def log_message(self, format, *args):
             return
 
-    target_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectTarget)
+    target_server = _LoopbackHTTPServer(("127.0.0.1", 0), RedirectTarget)
     target_thread = threading.Thread(target=target_server.serve_forever, daemon=True)
     target_thread.start()
 
@@ -772,7 +782,7 @@ def test_callback_redirect_is_not_followed_or_given_signature(tmp_path):
         def log_message(self, format, *args):
             return
 
-    redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+    redirect_server = _LoopbackHTTPServer(("127.0.0.1", 0), Redirector)
     redirect_thread = threading.Thread(
         target=redirect_server.serve_forever, daemon=True
     )
@@ -892,4 +902,7 @@ def test_master_worker_serves_and_shuts_down(tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=10)
-    assert process.returncode == 0
+    # POSIX SIGTERM is handled gracefully by the master. Windows
+    # Popen.terminate() is TerminateProcess(), so only assert that the process
+    # was reaped after it had successfully served a readiness request.
+    assert process.returncode is not None

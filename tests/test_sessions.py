@@ -622,7 +622,7 @@ def test_cancelled_cancel_call_still_finishes_process_cleanup():
         async def kill_tree(self, handle: ProcessHandle) -> None:
             self.tree_killed.set()
             if self.process.returncode is None:
-                self.process.returncode = -signal.SIGKILL
+                self.process.returncode = -9
 
         async def dispose(self, handle: ProcessHandle) -> None:
             pass
@@ -689,7 +689,7 @@ def test_stalled_cancellation_backend_hits_hard_deadline_and_kills_tree():
 
         async def kill_tree(self, handle: ProcessHandle) -> None:
             self.tree_killed = True
-            self.process.returncode = -signal.SIGKILL
+            self.process.returncode = -9
 
         async def dispose(self, handle: ProcessHandle) -> None:
             pass
@@ -766,7 +766,7 @@ def test_cancellation_deadline_does_not_wait_for_backend_to_accept_cancel():
 
         async def kill_tree(self, handle: ProcessHandle) -> None:
             self.tree_killed = True
-            self.process.returncode = -signal.SIGKILL
+            self.process.returncode = -9
 
         async def dispose(self, handle: ProcessHandle) -> None:
             pass
@@ -987,7 +987,10 @@ def test_literal_replacement_character_is_not_a_decoding_error():
                 executable=sys.executable,
                 argv=(
                     "-c",
-                    "import sys; sys.stdout.write('\\ufffd'); sys.stdout.flush()",
+                    (
+                        "import sys; sys.stdout.buffer.write(b'\\xef\\xbf\\xbd'); "
+                        "sys.stdout.flush()"
+                    ),
                 ),
             )
         )
