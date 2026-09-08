@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import socketserver
 import sys
 import tempfile
 import threading
@@ -30,7 +31,16 @@ class Receiver(BaseHTTPRequestHandler):
         return
 
 
-callback = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    """Bind locally without HTTPServer's potentially blocking reverse lookup."""
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
+
+
+callback = LoopbackHTTPServer(("127.0.0.1", 0), Receiver)
 callback_thread = threading.Thread(target=callback.serve_forever, daemon=True)
 callback_thread.start()
 
