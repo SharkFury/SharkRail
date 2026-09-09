@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import queue
 import socket
 import sys
 import tempfile
+import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from importlib import resources
@@ -94,6 +96,14 @@ class VolatileStoreSettings:
 
 
 @dataclass(frozen=True)
+class DurableStoreSettings:
+    max_jobs: int = 1_000_000
+    max_metadata_bytes: int = 1024 * 1024 * 1024
+    max_event_records: int = 10_000_000
+    job_ttl_seconds: int = 30 * 24 * 60 * 60
+
+
+@dataclass(frozen=True)
 class NotificationSettings:
     max_concurrent_deliveries: int = 16
     request_timeout_seconds: int = 10
@@ -137,6 +147,7 @@ class ServiceConfig:
     executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     admission: AdmissionSettings = field(default_factory=AdmissionSettings)
     volatile_store: VolatileStoreSettings = field(default_factory=VolatileStoreSettings)
+    durable_store: DurableStoreSettings = field(default_factory=DurableStoreSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
     callback_endpoints: Mapping[str, CallbackEndpoint] = field(default_factory=dict)
@@ -203,6 +214,12 @@ _SECTIONS: dict[str, set[str]] = {
         "max_event_records",
         "job_ttl_seconds",
         "max_temporary_output_bytes",
+    },
+    "durable_store": {
+        "max_jobs",
+        "max_metadata_bytes",
+        "max_event_records",
+        "job_ttl_seconds",
     },
     "notifications": {
         "max_concurrent_deliveries",
@@ -360,6 +377,7 @@ def _build_config(raw: Mapping[str, Any], path: Optional[Path]) -> ServiceConfig
         executor=ExecutorSettings(**raw.get("executor", {})),
         admission=AdmissionSettings(**raw.get("admission", {})),
         volatile_store=VolatileStoreSettings(**raw.get("volatile_store", {})),
+        durable_store=DurableStoreSettings(**raw.get("durable_store", {})),
         notifications=NotificationSettings(**raw.get("notifications", {})),
         logging=LoggingSettings(**raw.get("logging", {})),
         callback_endpoints=endpoints,
@@ -549,6 +567,7 @@ def _positive_values(config: ServiceConfig) -> None:
         config.executor,
         config.admission,
         config.volatile_store,
+        config.durable_store,
         config.notifications,
     )
     for group in groups:
@@ -667,7 +686,7 @@ def validate_callback_destination(
         addresses = ()
     else:
         try:
-            records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+            records = _getaddrinfo_with_timeout(hostname, port, timeout=5.0)
         except OSError as err:
             raise ConfigError(
                 f"cannot resolve callback endpoint {name!r}: {err}"
@@ -706,6 +725,41 @@ def validate_callback_destination(
                     "administrator-controlled destination"
                 )
     return hostname, port, addresses
+
+
+def _getaddrinfo_with_timeout(
+    hostname: str, port: int, *, timeout: float
+) -> list[tuple[Any, ...]]:
+    """Bound startup DNS without adding a non-daemon interpreter dependency."""
+
+    completed: queue.Queue[object] = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            result: object = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except BaseException as err:  # noqa: BLE001 - resolver thread boundary
+            result = err
+        try:
+            completed.put_nowait(result)
+        except queue.Full:
+            pass
+
+    threading.Thread(
+        target=resolve,
+        name="sharkrail-config-dns",
+        daemon=True,
+    ).start()
+    try:
+        result = completed.get(timeout=timeout)
+    except queue.Empty as err:
+        raise TimeoutError(
+            f"DNS resolution for callback endpoint exceeded {timeout:g} seconds"
+        ) from err
+    if isinstance(result, BaseException):
+        raise result
+    if not isinstance(result, list):
+        raise TypeError("getaddrinfo returned an invalid result")
+    return result
 
 
 def _windows_program_data() -> str:

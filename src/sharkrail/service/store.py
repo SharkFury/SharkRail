@@ -16,7 +16,11 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from .models import JobPhase, JobRecord, JobSpec, OutboxRecord, utc_now
-from .windows_security import secure_private_path
+from .windows_security import (
+    ensure_private_directory,
+    open_private_file,
+    validate_private_path,
+)
 
 
 class StoreError(RuntimeError):
@@ -74,8 +78,7 @@ class SqliteJobStore:
         self._instance_lock: Optional[_InstanceLock] = None
         if location != ":memory:":
             self._database_path = Path(location)
-            self._database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            secure_private_path(self._database_path.parent, directory=True)
+            ensure_private_directory(self._database_path.parent)
             self._instance_lock = _InstanceLock(Path(location + ".lock"))
             self._instance_lock.acquire()
         try:
@@ -123,6 +126,16 @@ class SqliteJobStore:
         self, cleaner: Callable[[str, Optional[str], Optional[str]], None]
     ) -> None:
         self._output_cleaner = cleaner
+
+    def referenced_output_job_ids(self) -> set[str]:
+        """Return Jobs whose published output is committed in the database."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id FROM jobs WHERE stdout_path IS NOT NULL "
+                "OR stderr_path IS NOT NULL"
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
 
     def _configure(self) -> None:
         with self._lock:
@@ -814,16 +827,13 @@ class SqliteJobStore:
             "VALUES (?, ?, ?, ?)",
             (job_id, revision, kind, utc_now()),
         )
-        if self.volatile:
-            self._connection.execute(
-                "DELETE FROM resource_events WHERE seq IN "
-                "(SELECT seq FROM resource_events ORDER BY seq DESC LIMIT -1 OFFSET ?)",
-                (self._max_event_records,),
-            )
+        self._connection.execute(
+            "DELETE FROM resource_events WHERE seq IN "
+            "(SELECT seq FROM resource_events ORDER BY seq DESC LIMIT -1 OFFSET ?)",
+            (self._max_event_records,),
+        )
 
     def prune_expired(self) -> int:
-        if not self.volatile:
-            return 0
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=self._job_ttl_seconds)
         ).isoformat()
@@ -939,21 +949,14 @@ def _sqlite_location(url: str, *, state_dir: Optional[Path]) -> str:
 
 
 def _secure_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        if os.name != "nt":
-            os.fchmod(descriptor, 0o600)
-    finally:
-        os.close(descriptor)
-    secure_private_path(path, directory=False)
+    descriptor = open_private_file(path)
+    os.close(descriptor)
 
 
 def _secure_sqlite_files(database: Path) -> None:
     for path in (database, Path(f"{database}-wal"), Path(f"{database}-shm")):
         try:
-            if os.name != "nt":
-                path.chmod(0o600)
-            secure_private_path(path, directory=False)
+            validate_private_path(path)
         except FileNotFoundError:
             pass
 
@@ -964,11 +967,8 @@ class _InstanceLock:
         self._descriptor: Optional[int] = None
 
     def acquire(self) -> None:
-        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        descriptor = open_private_file(self.path)
         try:
-            if os.name != "nt":
-                os.fchmod(descriptor, 0o600)
-            secure_private_path(self.path, directory=False)
             if os.name == "nt":  # pragma: no cover - exercised on Windows CI
                 import msvcrt
 

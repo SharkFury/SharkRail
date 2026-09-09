@@ -16,9 +16,11 @@ import urllib.request
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import pytest
 
+from sharkrail.runtime.policy import ExecutionPolicy, PolicyViolation
 from sharkrail.runtime.sessions import SessionManager
 from sharkrail.service.config import (
     CallbackEndpoint,
@@ -32,7 +34,7 @@ from sharkrail.service.config import (
     ServiceConfig,
 )
 from sharkrail.service.http import JobHTTPServer
-from sharkrail.service.master import ControlMaster
+from sharkrail.service.master import ControlMaster, _cleanup_orphan_processes
 from sharkrail.service.models import JobPhase, OutboxRecord
 from sharkrail.service.server import JobService, _post_callback
 from sharkrail.service.store import StoreError
@@ -131,18 +133,43 @@ def test_service_without_host_policy_denies_every_command(tmp_path):
         executor=ExecutorSettings(workers=1, heartbeat_seconds=1, lease_seconds=1),
     )
     service = JobService(config, state_dir=tmp_path)
+    try:
+        with pytest.raises(PolicyViolation, match="allowed_executables"):
+            service.submit(
+                "tenant",
+                "deny-all",
+                {"command": [sys.executable, "-c", "print('must-not-run')"]},
+            )
+        assert service.store.stats()["jobs"] == {}
+    finally:
+        service.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rlimit integration")
+def test_job_policy_ceiling_is_applied_when_request_omits_resources(tmp_path):
+    policy = ExecutionPolicy(
+        allowed_executables=frozenset({sys.executable}),
+        allow_parent_environment=False,
+        require_timeout=True,
+        max_cpu_time_seconds=7,
+    )
+    service = JobService(_config(tmp_path), state_dir=tmp_path, execution_policy=policy)
     service.start()
     try:
         job, _ = service.submit(
             "tenant",
-            "deny-all",
-            {"command": [sys.executable, "-c", "print('must-not-run')"]},
+            "effective-limit",
+            {
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import resource; print(resource.getrlimit(resource.RLIMIT_CPU)[0])",
+                ]
+            },
         )
         result = _terminal(service, job.id)
-        assert result.phase == JobPhase.FAILED
-        assert result.error is not None
-        assert "execution denied by policy" in result.error["message"]
-        assert service.read_output(job.id, "stdout") == b""
+        assert result.phase == JobPhase.SUCCEEDED
+        assert service.read_output(job.id, "stdout").strip() == b"7"
     finally:
         service.close()
 
@@ -966,6 +993,58 @@ def test_master_bounds_repeated_worker_crashes(tmp_path):
         worker_target=_exiting_worker,
     )
     assert master.run() == 70
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_orphan_cleanup_uses_reported_pgid_after_leader_exit(monkeypatch):
+    killed = []
+    monkeypatch.setattr(
+        os, "killpg", lambda pgid, signum: killed.append((pgid, signum))
+    )
+
+    _cleanup_orphan_processes(
+        [{"pid": 123, "pgid": 456, "process_tree": "process_group"}]
+    )
+
+    assert killed == [(456, 9)]
+
+
+def test_master_uses_configured_drain_deadline_before_force_kill(tmp_path):
+    control = replace(ControlSettings(), worker_drain_timeout_seconds=3)
+    master = ControlMaster(_config(tmp_path, control=control), None)
+    worker = Mock()
+    worker.is_alive.side_effect = [True, True]
+    master._worker = worker
+
+    master._terminate_worker()
+
+    worker.terminate.assert_called_once_with()
+    assert worker.join.call_args_list == [call(timeout=3), call(timeout=2)]
+    worker.kill.assert_called_once_with()
+
+
+def test_controller_failures_eventually_make_service_unready(monkeypatch, tmp_path):
+    control = replace(ControlSettings(), worker_progress_timeout_seconds=1)
+    service = JobService(_config(tmp_path, control=control), state_dir=tmp_path)
+    service.start()
+    try:
+        deadline = time.monotonic() + 2
+        while service._last_controller_success is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        def fail_claim(*_args, **_kwargs):
+            raise RuntimeError("persistent controller failure")
+
+        monkeypatch.setattr(service.store, "claim_next", fail_claim)
+        deadline = time.monotonic() + 3
+        while service.health()["ready"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert service.health()["ready"] is False
+        assert service.health()["controller_stalled"] is True
+        assert service.health()["controller_errors"] > 0
+    finally:
+        service.close()
 
 
 def test_master_worker_serves_and_shuts_down(tmp_path):

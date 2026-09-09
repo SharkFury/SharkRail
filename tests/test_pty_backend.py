@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import termios
 from unittest.mock import patch
 
 import pytest
@@ -96,6 +97,35 @@ def test_pty_close_stdin_fails_closed_in_raw_mode():
         try:
             assert b"ready" in await asyncio.wait_for(backend.read(handle), timeout=1)
             with pytest.raises(RuntimeError, match="non-canonical mode"):
+                await backend.close_stdin(handle)
+            assert handle.stdin_closed is False
+        finally:
+            await backend.kill_tree(handle)
+            await asyncio.wait_for(handle.process.wait(), timeout=2)
+            await backend.dispose(handle)
+
+    asyncio.run(_run())
+
+
+def test_pty_close_stdin_rejects_disabled_veof():
+    async def _run() -> None:
+        backend = PtyBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import time; time.sleep(30)"),
+                mode=CommandMode.PTY,
+            )
+        )
+        try:
+            value = termios.tcgetattr(handle.master_fd)[6][termios.VEOF]
+            disabled = (
+                value if isinstance(value, int) else int.from_bytes(value, "little")
+            )
+            with (
+                patch("sharkrail.runtime.backends.os.fpathconf", return_value=disabled),
+                pytest.raises(RuntimeError, match="EOF is disabled"),
+            ):
                 await backend.close_stdin(handle)
             assert handle.stdin_closed is False
         finally:

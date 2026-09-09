@@ -4,7 +4,7 @@ Notable changes to SharkRail are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and package releases
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.1.3] - 2026-09-09
 
 ### Added
 
@@ -35,6 +35,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fail closed on unsafe pre-existing POSIX storage paths, publish Job output
+  pairs atomically, reconcile crash leftovers, and bound durable retention.
+- Materialize host resource ceilings for Job execution and reject policy-denied
+  submissions before persistence.
+- Drain Workers using the configured global deadline and sweep reported POSIX
+  process groups even after their leaders exit.
+- Isolate each Windows ConPTY in a pre-contained broker process, serialize close
+  against writes, and verify zero active Job processes after termination.
 - Bound and isolate blocking ConPTY spawn/write calls, clean up late spawn
   results after cancellation, and remove invalid waits on Windows Job handles.
 - Make HTTP Job execution deny-all without a host policy, always use a clean

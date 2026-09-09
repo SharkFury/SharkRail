@@ -75,9 +75,10 @@ class ControlMaster:
         self._worker: Optional[BaseProcess] = None
 
     def stop(self, *_args: object) -> None:
+        # The run loop owns the single drain deadline. Signal handlers only
+        # request shutdown so they cannot accidentally start a second, shorter
+        # termination sequence.
         self._stop.set()
-        if self._worker is not None and self._worker.is_alive():
-            self._worker.terminate()
 
     def run(self) -> int:
         previous_handlers = {
@@ -106,7 +107,10 @@ class ControlMaster:
                 heartbeat_writer.close()
                 last_progress = time.monotonic()
                 active_processes: list[dict[str, object]] = []
-                while worker.is_alive() and not self._stop.wait(0.2):
+                worker_stalled = False
+                while worker.is_alive():
+                    if self._stop.wait(0.2):
+                        break
                     try:
                         while heartbeat_reader.poll():
                             _, health = heartbeat_reader.recv()
@@ -132,17 +136,18 @@ class ControlMaster:
                         time.monotonic() - last_progress
                         > self.config.control.worker_progress_timeout_seconds
                     ):
-                        worker.terminate()
+                        worker_stalled = True
                         break
                 heartbeat_reader.close()
-                worker.join(timeout=1)
-                if worker.is_alive():
-                    worker.kill()
-                    worker.join(timeout=2)
-                if not self._stop.is_set() and worker.exitcode not in {0, None}:
-                    _cleanup_orphan_processes(active_processes)
-                if self._stop.is_set():
+                if self._stop.is_set() or worker_stalled or worker.is_alive():
                     self._terminate_worker()
+                else:
+                    worker.join()
+                # A root can exit before descendants that still hold inherited
+                # descriptors. Every worker-exit path therefore performs the
+                # same final ownership sweep, including graceful master stop.
+                _cleanup_orphan_processes(active_processes)
+                if self._stop.is_set():
                     return 0
                 now = time.monotonic()
                 window = self.config.control.worker_restart_window_seconds
@@ -213,8 +218,16 @@ def _cleanup_orphan_processes(processes: list[dict[str, object]]) -> None:
                     timeout=5,
                 )
             else:
-                if mechanism != "process_group" or os.getpgid(pid) != pid:
+                pgid = process.get("pgid")
+                if (
+                    mechanism != "process_group"
+                    or not isinstance(pgid, int)
+                    or pgid <= 0
+                ):
                     continue
-                os.killpg(pid, signal.SIGKILL)
+                # Process-group IDs remain valid after their original leader
+                # exits. Checking getpgid(leader_pid) here would skip exactly
+                # the descendant-only orphan tree this sweep must remove.
+                os.killpg(pgid, signal.SIGKILL)
         except (OSError, subprocess.SubprocessError):
             pass

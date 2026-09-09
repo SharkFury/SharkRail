@@ -8,6 +8,7 @@ import hmac
 import http.client
 import json
 import logging
+import math
 import socket
 import ssl
 import threading
@@ -66,14 +67,17 @@ class JobService:
         )
         self.worker_id = f"worker_{uuid4().hex}"
         resolved_state_dir = state_dir or state_directory()
+        store_limits = (
+            config.volatile_store
+            if config.durability == "volatile"
+            else config.durable_store
+        )
         self.store = SqliteJobStore(
             config.job_store.url,
-            max_jobs=config.volatile_store.max_jobs
-            if config.durability == "volatile"
-            else 2**31 - 1,
-            max_metadata_bytes=config.volatile_store.max_metadata_bytes,
-            max_event_records=config.volatile_store.max_event_records,
-            job_ttl_seconds=config.volatile_store.job_ttl_seconds,
+            max_jobs=store_limits.max_jobs,
+            max_metadata_bytes=store_limits.max_metadata_bytes,
+            max_event_records=store_limits.max_event_records,
+            job_ttl_seconds=store_limits.job_ttl_seconds,
             max_queued_jobs=config.admission.max_queued_jobs,
             max_queued_jobs_per_tenant=config.admission.max_queued_jobs_per_tenant,
             state_dir=resolved_state_dir,
@@ -89,6 +93,9 @@ class JobService:
             ),
         )
         self.store.set_output_cleaner(self.output.delete_job)
+        removed_outputs = self.output.reconcile(self.store.referenced_output_job_ids())
+        if removed_outputs:
+            LOGGER.warning("removed %d uncommitted output directories", removed_outputs)
         self._executor = ThreadPoolExecutor(
             max_workers=config.executor.workers,
             thread_name_prefix="sharkrail-executor",
@@ -129,6 +136,7 @@ class JobService:
         self._started = False
         self._closed = False
         self._last_controller_progress = time.monotonic()
+        self._last_controller_success: Optional[float] = None
         self._last_notification_progress = time.monotonic()
         self._last_lease_renew = 0.0
         self._last_store_reconcile = 0.0
@@ -147,6 +155,11 @@ class JobService:
             LOGGER.warning(
                 "DEGRADED_VOLATILE_STORE: Job state and callbacks are lost on restart"
             )
+        # Successful recovery is the controller's initial complete state pass.
+        # Subsequent reconciliation failures age this timestamp until ready
+        # becomes false instead of briefly failing readiness during startup.
+        self._last_controller_success = time.monotonic()
+        self._last_controller_progress = self._last_controller_success
         self._started = True
         for thread in (*self._controllers, *self._notification_workers):
             thread.start()
@@ -187,6 +200,11 @@ class JobService:
         self, tenant_id: str, idempotency_key: str, payload: dict[str, Any]
     ) -> tuple[JobRecord, bool]:
         spec = JobSpec.from_dict(payload)
+        self.execution_policy.effective_spec(
+            self._command_spec(spec),
+            timeout_ms=_seconds_to_ms(spec.timeout_seconds),
+            max_output_bytes=spec.max_output_bytes,
+        )
         if spec.callback_endpoint_id:
             endpoint = self.config.callback_endpoints.get(spec.callback_endpoint_id)
             if endpoint is None or endpoint.tenant_id != tenant_id:
@@ -244,6 +262,7 @@ class JobService:
                     {
                         "job_id": job_id,
                         "pid": inspected["pid"],
+                        "pgid": inspected.get("pgid"),
                         "process_tree": inspected["process_tree"],
                     }
                 )
@@ -259,6 +278,11 @@ class JobService:
             and oldest_notification_age
             > self.config.notifications.request_timeout_seconds + 5.0
         )
+        controller_stalled = (
+            self._last_controller_success is None
+            or now - self._last_controller_success
+            > self.config.control.worker_progress_timeout_seconds
+        )
         degraded = self.config.durability == "volatile"
         return {
             "live": not self._stop.is_set(),
@@ -268,6 +292,7 @@ class JobService:
                 and all(thread.is_alive() for thread in self._controllers)
                 and all(thread.is_alive() for thread in self._notification_workers)
                 and not notification_stalled
+                and not controller_stalled
             ),
             "degraded": degraded,
             "reason": "DEGRADED_VOLATILE_STORE" if degraded else None,
@@ -282,6 +307,7 @@ class JobService:
             ),
             "notification_inflight": notification_inflight,
             "notification_stalled": notification_stalled,
+            "controller_stalled": controller_stalled,
             "oldest_notification_age_seconds": (
                 round(oldest_notification_age, 3)
                 if oldest_notification_age is not None
@@ -295,7 +321,6 @@ class JobService:
     def _controller_loop(self) -> None:
         while not self._stop.wait(0.05):
             try:
-                self._last_controller_progress = time.monotonic()
                 with self._schedule_lock:
                     with self._active_lock:
                         capacity = self.config.executor.workers - len(self._inflight)
@@ -330,6 +355,9 @@ class JobService:
                         )
                     self.store.prune_expired()
                     self._last_store_reconcile = time.monotonic()
+                self._last_controller_success = time.monotonic()
+                self._last_controller_progress = self._last_controller_success
+                self._controller_errors = 0
             except Exception:
                 self._controller_errors += 1
                 LOGGER.exception("controller reconciliation failed")
@@ -399,14 +427,7 @@ class JobService:
                     output_truncated=False,
                 )
                 return
-            spec = CommandSpec(
-                executable=claimed.spec.command[0],
-                argv=claimed.spec.command[1:],
-                cwd=claimed.spec.cwd,
-                env=claimed.spec.env,
-                mode=CommandMode.PIPE,
-                inherit_env=False,
-            )
+            spec = self._command_spec(claimed.spec)
             start_task = loop.create_task(
                 manager.start(
                     spec,
@@ -516,6 +537,17 @@ class JobService:
             except Exception:
                 LOGGER.exception("session cleanup failed for Job %s", claimed.id)
             loop.close()
+
+    @staticmethod
+    def _command_spec(spec: JobSpec) -> CommandSpec:
+        return CommandSpec(
+            executable=spec.command[0],
+            argv=spec.command[1:],
+            cwd=spec.cwd,
+            env=spec.env,
+            mode=CommandMode.PIPE,
+            inherit_env=False,
+        )
 
     def _finish_with_retries(self, *args: Any, **kwargs: Any) -> JobRecord:
         last_error: Optional[Exception] = None
@@ -712,7 +744,9 @@ class JobService:
 
 
 def _seconds_to_ms(value: Optional[float]) -> Optional[int]:
-    return None if value is None else int(value * 1000)
+    if value is None:
+        return None
+    return max(1, math.ceil(value * 1000))
 
 
 def _phase_for_result(reason: CompletionReason, exit_code: int) -> JobPhase:

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import pytest
 
 from sharkrail.service.config import (
     ConfigError,
+    _getaddrinfo_with_timeout,
     example_config_text,
     initialize_config,
     load_config,
@@ -82,6 +84,23 @@ def test_config_enforces_windows_private_dacl(monkeypatch, tmp_path):
         load_config(path)
 
     assert error.value.__cause__ is denied
+
+
+def test_callback_dns_resolution_has_a_hard_deadline(monkeypatch):
+    release = threading.Event()
+
+    def blocked_resolution(*_args, **_kwargs):
+        release.wait(1)
+        return []
+
+    monkeypatch.setattr(
+        "sharkrail.service.config.socket.getaddrinfo", blocked_resolution
+    )
+    try:
+        with pytest.raises(TimeoutError, match="exceeded"):
+            _getaddrinfo_with_timeout("example.test", 443, timeout=0.01)
+    finally:
+        release.set()
 
 
 def test_initialize_config_hardens_windows_acl(tmp_path):

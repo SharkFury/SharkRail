@@ -63,6 +63,14 @@ max_event_records = 10000
 job_ttl_seconds = 3600
 max_temporary_output_bytes = 1073741824
 
+[durable_store]
+# Durable state is bounded and terminal Jobs are removed after this retention
+# period once callback delivery and output deletion have completed.
+max_jobs = 1000000
+max_metadata_bytes = 1073741824
+max_event_records = 10000000
+job_ttl_seconds = 2592000
+
 [notifications]
 max_concurrent_deliveries = 16
 request_timeout_seconds = 10

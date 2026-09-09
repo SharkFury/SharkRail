@@ -6,11 +6,11 @@ import json
 import os
 import posixpath
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ..core.models import CommandSpec
+from ..core.models import CommandSpec, ResourceLimits
 from .routing import WslInvocation, is_wsl_launcher, parse_wsl_invocation
 
 
@@ -112,6 +112,45 @@ class ExecutionPolicy:
             spec.resources.process_count,
             self.max_process_count,
         )
+
+    def effective_spec(
+        self,
+        spec: CommandSpec,
+        *,
+        timeout_ms: int | None,
+        max_output_bytes: int | None,
+    ) -> CommandSpec:
+        """Validate a request and materialize host-owned resource ceilings.
+
+        A ceiling is also the default when the caller omits that resource. This
+        keeps a host policy from silently becoming advisory for APIs that do not
+        expose per-request resource fields, including the asynchronous Job API.
+        """
+
+        self.enforce(
+            spec,
+            timeout_ms=timeout_ms,
+            max_output_bytes=max_output_bytes,
+        )
+        requested = spec.resources
+        effective = ResourceLimits(
+            memory_bytes=(
+                requested.memory_bytes
+                if requested.memory_bytes is not None
+                else self.max_memory_bytes
+            ),
+            cpu_time_seconds=(
+                requested.cpu_time_seconds
+                if requested.cpu_time_seconds is not None
+                else self.max_cpu_time_seconds
+            ),
+            process_count=(
+                requested.process_count
+                if requested.process_count is not None
+                else self.max_process_count
+            ),
+        )
+        return spec if effective == requested else replace(spec, resources=effective)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ExecutionPolicy:

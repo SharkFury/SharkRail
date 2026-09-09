@@ -25,6 +25,12 @@ def test_current_release_tag_matches_package_version() -> None:
 
     assert result.returncode == 0
     assert f"matches SharkRail {__version__}" in result.stdout
+    changelog = (REPOSITORY / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(
+        rf"^## \[{re.escape(__version__)}\] - \d{{4}}-\d{{2}}-\d{{2}}$",
+        changelog,
+        re.MULTILINE,
+    )
 
 
 def test_release_tag_must_match_package_version() -> None:
@@ -67,6 +73,7 @@ def test_release_retests_platforms_and_publishes_provenance() -> None:
     assert "actions/attest@" in workflow
     assert "attestations: write" in workflow
     assert "release-metadata" in workflow
+    assert "dist/current/*" in workflow
 
 
 def test_release_actions_are_commit_pinned() -> None:

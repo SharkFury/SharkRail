@@ -46,6 +46,12 @@ url = "sqlite:///sharkrail.db"
 [output_store]
 url = "file://./output"
 max_total_bytes = 1073741824
+
+[durable_store]
+max_jobs = 1000000
+max_metadata_bytes = 1073741824
+max_event_records = 10000000
+job_ttl_seconds = 2592000
 ```
 
 Relative paths resolve under `/var/lib/sharkrail` on Unix and
@@ -54,6 +60,11 @@ File SQLite uses WAL, full synchronous writes, foreign keys, and a local
 single-instance lock. The current release supports SQLite JobStore and local
 file OutputStore only; unsupported schemes fail startup instead of silently
 falling back to memory.
+Expired terminal Jobs are deleted only after pending callbacks settle and their
+output finalizer succeeds. Existing POSIX storage directories must be owned by
+the service user, must not be symlinks or group/world writable, and must not be
+`/`, `/tmp`, `/var/tmp`, or `/dev/shm`; SharkRail changes permissions only on
+directories it creates itself.
 
 The Job service also requires a host-owned execution policy before it will run
 commands. Configure `executor.policy_file` or pass `--policy PATH`; with neither,

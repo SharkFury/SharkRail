@@ -42,6 +42,24 @@ def test_policy_allows_named_executable_and_bounded_request(tmp_path: Path):
     )
 
 
+def test_policy_materializes_omitted_resource_ceilings():
+    policy = ExecutionPolicy(
+        max_memory_bytes=4096,
+        max_cpu_time_seconds=2,
+        max_process_count=3,
+    )
+
+    effective = policy.effective_spec(
+        CommandSpec("python", ()), timeout_ms=1000, max_output_bytes=1024
+    )
+
+    assert effective.resources == ResourceLimits(
+        memory_bytes=4096,
+        cpu_time_seconds=2,
+        process_count=3,
+    )
+
+
 @pytest.mark.parametrize(
     ("policy", "spec", "timeout_ms", "output_bytes", "rule"),
     [

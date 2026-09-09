@@ -74,6 +74,14 @@ python -m venv .wheel-venv
 .wheel-venv/bin/python .github/scripts/wheel_smoke.py
 ```
 
+PowerShell equivalent:
+
+```powershell
+py -m venv .wheel-venv
+.\.wheel-venv\Scripts\python.exe -m pip install (Get-ChildItem dist/current/*.whl).FullName
+.\.wheel-venv\Scripts\python.exe .github/scripts/wheel_smoke.py
+```
+
 The build must produce one source distribution and one platform-independent
 wheel. The wheel includes the MIT license and PEP 639 `License-Expression`
 metadata.
