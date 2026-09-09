@@ -1,12 +1,12 @@
 import asyncio
 import os
 import sys
-import termios
 from unittest.mock import patch
 
 import pytest
 
 from sharkrail.core.models import CommandMode, CommandSpec
+from sharkrail.runtime import backends as backend_module
 from sharkrail.runtime.backends import PtyBackend, read_pty_output
 from sharkrail.runtime.executor import CommandRunner
 
@@ -118,7 +118,9 @@ def test_pty_close_stdin_rejects_disabled_veof():
             )
         )
         try:
-            value = termios.tcgetattr(handle.master_fd)[6][termios.VEOF]
+            value = backend_module.termios.tcgetattr(handle.master_fd)[6][
+                backend_module.termios.VEOF
+            ]
             disabled = (
                 value if isinstance(value, int) else int.from_bytes(value, "little")
             )
