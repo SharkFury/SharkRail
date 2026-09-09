@@ -19,8 +19,63 @@ from .models import JobPhase, JobRecord, JobSpec, OutboxRecord, utc_now
 from .windows_security import (
     ensure_private_directory,
     open_private_file,
-    validate_private_path,
+    validate_private_file,
 )
+
+_METADATA_COLUMNS = {
+    "metadata": ("key", "value"),
+    "jobs": (
+        "id",
+        "tenant_id",
+        "idempotency_key",
+        "request_hash",
+        "spec_json",
+        "phase",
+        "generation",
+        "observed_generation",
+        "revision",
+        "durability",
+        "store_epoch",
+        "attempt_id",
+        "lease_owner",
+        "lease_epoch",
+        "lease_expires_at",
+        "created_at",
+        "updated_at",
+        "started_at",
+        "completed_at",
+        "exit_code",
+        "reason",
+        "error_json",
+        "stdout_path",
+        "stderr_path",
+        "stdout_bytes",
+        "stderr_bytes",
+        "output_truncated",
+        "conditions_json",
+    ),
+    "resource_events": ("seq", "job_id", "revision", "kind", "created_at"),
+    "callback_outbox": (
+        "event_id",
+        "job_id",
+        "endpoint_id",
+        "payload_json",
+        "state",
+        "attempts",
+        "next_attempt_at",
+        "delivery_attempt_id",
+        "last_error",
+        "created_at",
+        "delivered_at",
+    ),
+    "job_deletions": ("job_id", "stdout_path", "stderr_path", "created_at"),
+}
+
+
+def _metadata_row_size(prefix: str, columns: tuple[str, ...]) -> str:
+    return " + ".join(
+        f"length(CAST(COALESCE({prefix}.{column}, '') AS BLOB))" for column in columns
+    )
 
 
 class StoreError(RuntimeError):
@@ -128,14 +183,14 @@ class SqliteJobStore:
         self._output_cleaner = cleaner
 
     def referenced_output_job_ids(self) -> set[str]:
-        """Return Jobs whose published output is committed in the database."""
+        """Return Jobs whose published or pending-delete output is committed."""
 
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id FROM jobs WHERE stdout_path IS NOT NULL "
-                "OR stderr_path IS NOT NULL"
+                "SELECT id AS job_id FROM jobs WHERE stdout_path IS NOT NULL "
+                "OR stderr_path IS NOT NULL UNION SELECT job_id FROM job_deletions"
             ).fetchall()
-        return {str(row["id"]) for row in rows}
+        return {str(row["job_id"]) for row in rows}
 
     def _configure(self) -> None:
         with self._lock:
@@ -213,6 +268,17 @@ class SqliteJobStore:
                 );
                 CREATE INDEX IF NOT EXISTS outbox_due
                     ON callback_outbox (state, next_attempt_at);
+                CREATE TABLE IF NOT EXISTS job_deletions (
+                    job_id TEXT PRIMARY KEY,
+                    stdout_path TEXT,
+                    stderr_path TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS metadata_usage (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    bytes INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO metadata_usage(id, bytes) VALUES (1, 0);
                 """
             )
             columns = {
@@ -225,14 +291,20 @@ class SqliteJobStore:
                 self._connection.execute(
                     "ALTER TABLE callback_outbox ADD COLUMN delivery_attempt_id TEXT"
                 )
-            self._set_metadata("schema_version", "2")
+            self._create_metadata_usage_triggers()
+            self._set_metadata("schema_version", "3")
+            self._recalculate_metadata_usage()
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
+            before = self._metadata_size_bytes()
             try:
                 yield
+                after = self._metadata_size_bytes()
+                if after > self._max_metadata_bytes and after > before:
+                    raise AdmissionLimited("metadata capacity is full")
             except BaseException:
                 self._connection.execute("ROLLBACK")
                 raise
@@ -251,6 +323,42 @@ class SqliteJobStore:
             "INSERT INTO metadata(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
+        )
+
+    def _metadata_size_bytes(self) -> int:
+        row = self._connection.execute(
+            "SELECT bytes FROM metadata_usage WHERE id = 1"
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def _create_metadata_usage_triggers(self) -> None:
+        for table, columns in _METADATA_COLUMNS.items():
+            new_size = _metadata_row_size("NEW", columns)
+            old_size = _metadata_row_size("OLD", columns)
+            for operation, adjustment in (
+                ("insert", f"+ ({new_size})"),
+                ("update", f"- ({old_size}) + ({new_size})"),
+                ("delete", f"- ({old_size})"),
+            ):
+                self._connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS metadata_usage_{table}_{operation} "
+                    f"AFTER {operation.upper()} ON {table} BEGIN "
+                    "UPDATE metadata_usage SET bytes = bytes "
+                    f"{adjustment} WHERE id = 1; END"
+                )
+
+    def _recalculate_metadata_usage(self) -> None:
+        total = 0
+        for table, columns in _METADATA_COLUMNS.items():
+            expression = _metadata_row_size(table, columns)
+            total += int(
+                self._connection.execute(
+                    f"SELECT COALESCE(SUM({expression}), 0) FROM {table}"
+                ).fetchone()[0]
+            )
+        self._connection.execute(
+            "UPDATE metadata_usage SET bytes = ? WHERE id = 1", (total,)
         )
 
     def submit(
@@ -308,27 +416,10 @@ class SqliteJobStore:
                     (JobPhase.QUEUED.value, tenant_id),
                 ).fetchone()[0]
             )
-            metadata_bytes = int(
-                self._connection.execute(
-                    "SELECT COALESCE(SUM(length(CAST(tenant_id AS BLOB)) + "
-                    "length(CAST(idempotency_key AS BLOB)) + "
-                    "length(CAST(spec_json AS BLOB)) + "
-                    "length(CAST(conditions_json AS BLOB)) + length(request_hash)), 0) "
-                    "FROM jobs"
-                ).fetchone()[0]
-            )
-            new_metadata_bytes = (
-                len(spec_json.encode("utf-8"))
-                + len(conditions_json.encode("utf-8"))
-                + len(request_hash)
-                + len(tenant_id.encode("utf-8"))
-                + len(idempotency_key.encode("utf-8"))
-            )
             if (
                 total >= self._max_jobs
                 or queued >= self._max_queued_jobs
                 or tenant_queued >= self._max_queued_jobs_per_tenant
-                or metadata_bytes + new_metadata_bytes > self._max_metadata_bytes
             ):
                 raise AdmissionLimited("job admission capacity is full")
             self._connection.execute(
@@ -431,7 +522,7 @@ class SqliteJobStore:
     def renew_lease(
         self, job_id: str, attempt_id: str, owner: str, lease_seconds: int
     ) -> bool:
-        with self._lock:
+        with self._transaction():
             updated = self._connection.execute(
                 "UPDATE jobs SET lease_expires_at = ? WHERE id = ? AND attempt_id = ? "
                 "AND lease_owner = ? AND phase IN (?, ?)",
@@ -736,7 +827,7 @@ class SqliteJobStore:
     def outbox_delivered(
         self, event_id: str, delivery_attempt_id: Optional[str]
     ) -> bool:
-        with self._lock:
+        with self._transaction():
             updated = self._connection.execute(
                 "UPDATE callback_outbox SET state = 'delivered', delivered_at = ?, "
                 "delivery_attempt_id = NULL "
@@ -755,7 +846,7 @@ class SqliteJobStore:
         next_attempt_at: float,
         permanent: bool,
     ) -> bool:
-        with self._lock:
+        with self._transaction():
             updated = self._connection.execute(
                 "UPDATE callback_outbox SET state = ?, attempts = attempts + 1, "
                 "next_attempt_at = ?, last_error = ?, delivery_attempt_id = NULL "
@@ -790,12 +881,21 @@ class SqliteJobStore:
                     "SELECT COUNT(*) FROM callback_outbox WHERE state = 'dead'"
                 ).fetchone()[0]
             )
+            pending_output_deletions = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM job_deletions"
+                ).fetchone()[0]
+            )
+            metadata_bytes = self._metadata_size_bytes()
         return {
             "durability": self.durability,
             "store_epoch": self.store_epoch,
             "jobs": phases,
             "pending_callbacks": pending_callbacks,
             "dead_callbacks": dead_callbacks,
+            "pending_output_deletions": pending_output_deletions,
+            "metadata_bytes": metadata_bytes,
+            "max_metadata_bytes": self._max_metadata_bytes,
         }
 
     def _owned_row(self, job_id: str, attempt_id: str, owner: str) -> sqlite3.Row:
@@ -834,12 +934,14 @@ class SqliteJobStore:
         )
 
     def prune_expired(self) -> int:
+        self._finalize_output_deletions()
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=self._job_ttl_seconds)
         ).isoformat()
         terminal = tuple(phase.value for phase in JobPhase if phase.terminal)
         placeholders = ",".join("?" for _ in terminal)
-        with self._lock:
+        deleted = 0
+        with self._transaction():
             rows = self._connection.execute(
                 "SELECT id, stdout_path, stderr_path FROM jobs "
                 f"WHERE phase IN ({placeholders}) AND completed_at < ? "
@@ -848,22 +950,21 @@ class SqliteJobStore:
                 "AND callback_outbox.state IN ('pending', 'delivering'))",
                 (*terminal, cutoff),
             ).fetchall()
-        cleaned_ids: list[str] = []
-        for row in rows:
-            stdout_path = row["stdout_path"]
-            stderr_path = row["stderr_path"]
-            if self._output_cleaner is None:
+            for row in rows:
+                stdout_path = row["stdout_path"]
+                stderr_path = row["stderr_path"]
+                if self._output_cleaner is None and (
+                    stdout_path is not None or stderr_path is not None
+                ):
+                    continue
+                job_id = str(row["id"])
                 if stdout_path is not None or stderr_path is not None:
-                    continue
-            else:
-                try:
-                    self._output_cleaner(str(row["id"]), stdout_path, stderr_path)
-                except OSError:
-                    continue
-            cleaned_ids.append(str(row["id"]))
-        deleted = 0
-        with self._transaction():
-            for job_id in cleaned_ids:
+                    self._connection.execute(
+                        "INSERT INTO job_deletions(job_id, stdout_path, stderr_path, "
+                        "created_at) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(job_id) DO NOTHING",
+                        (job_id, stdout_path, stderr_path, utc_now()),
+                    )
                 result = self._connection.execute(
                     f"DELETE FROM jobs WHERE id = ? AND phase IN ({placeholders}) "
                     "AND completed_at < ? AND NOT EXISTS (SELECT 1 "
@@ -872,7 +973,35 @@ class SqliteJobStore:
                     (job_id, *terminal, cutoff),
                 )
                 deleted += result.rowcount
+                if result.rowcount == 0:
+                    self._connection.execute(
+                        "DELETE FROM job_deletions WHERE job_id = ?", (job_id,)
+                    )
+        self._finalize_output_deletions()
         return deleted
+
+    def _finalize_output_deletions(self) -> int:
+        cleaner = self._output_cleaner
+        if cleaner is None:
+            return 0
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT job_id, stdout_path, stderr_path FROM job_deletions "
+                "ORDER BY created_at"
+            ).fetchall()
+        finalized = 0
+        for row in rows:
+            job_id = str(row["job_id"])
+            try:
+                cleaner(job_id, row["stdout_path"], row["stderr_path"])
+            except OSError:
+                continue
+            with self._transaction():
+                deleted = self._connection.execute(
+                    "DELETE FROM job_deletions WHERE job_id = ?", (job_id,)
+                )
+                finalized += deleted.rowcount
+        return finalized
 
     def _insert_outbox(self, row: sqlite3.Row) -> None:
         spec = JobSpec.from_dict(json.loads(row["spec_json"]))
@@ -956,7 +1085,7 @@ def _secure_file(path: Path) -> None:
 def _secure_sqlite_files(database: Path) -> None:
     for path in (database, Path(f"{database}-wal"), Path(f"{database}-shm")):
         try:
-            validate_private_path(path)
+            validate_private_file(path)
         except FileNotFoundError:
             pass
 

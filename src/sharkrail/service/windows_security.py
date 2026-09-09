@@ -8,7 +8,7 @@ import stat
 import tempfile
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 _UNSAFE_SHARED_DIRECTORIES = {
     Path("/"),
@@ -182,6 +182,65 @@ def validate_private_path(path: Path) -> None:
     _validate_private_windows_acl(path)
 
 
+def validate_private_file(path: Path) -> None:
+    """Require a service-owned regular file with no access for other users."""
+
+    if os.name != "nt":
+        _validate_posix_private_path(path, directory=False)
+        return
+    metadata = os.lstat(path)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if attributes & reparse or path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError(f"private path is not a regular file: {path}")
+    _validate_private_windows_acl(path)
+
+
+def read_verified_text_file(path: Path, *, forbidden_permissions: int) -> str:
+    """Read a sensitive regular file through the descriptor that was validated.
+
+    POSIX components are opened relative to non-following directory descriptors.
+    Windows rejects reparse points in every component and validates the DACL on
+    the same final file handle used for the read.
+    """
+
+    absolute = Path(os.path.abspath(path))
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        descriptor = _open_verified_windows_file(absolute)
+    else:
+        descriptor = _open_verified_posix_file(absolute)
+    try:
+        _validate_sensitive_file_descriptor(
+            descriptor,
+            absolute,
+            forbidden_permissions=forbidden_permissions,
+        )
+        if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+            _validate_private_windows_handle(descriptor, absolute)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _open_verified_posix_file(path: Path) -> int:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(path.anchor or os.sep, directory_flags)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(component, directory_flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        return os.open(path.name, flags, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
 def _is_unsafe_shared_directory(path: Path) -> bool:
     candidates = set(_UNSAFE_SHARED_DIRECTORIES)
     candidates.add(Path(os.path.abspath(tempfile.gettempdir())))
@@ -216,12 +275,25 @@ def _validate_posix_private_path(path: Path, *, directory: Optional[bool]) -> No
 
 
 def _validate_private_file_descriptor(descriptor: int, path: Path) -> None:
+    _validate_sensitive_file_descriptor(
+        descriptor,
+        path,
+        forbidden_permissions=0o077,
+    )
+
+
+def _validate_sensitive_file_descriptor(
+    descriptor: int,
+    path: Path,
+    *,
+    forbidden_permissions: int,
+) -> None:
     metadata = os.fstat(descriptor)
     if not stat.S_ISREG(metadata.st_mode):
         raise PermissionError(f"private path is not a regular file: {path}")
-    if metadata.st_uid != os.geteuid():
+    if os.name != "nt" and metadata.st_uid != os.geteuid():
         raise PermissionError(f"private path is not owned by the service user: {path}")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
+    if os.name != "nt" and stat.S_IMODE(metadata.st_mode) & forbidden_permissions:
         raise PermissionError(f"private path permissions are too broad: {path}")
 
 
@@ -235,6 +307,13 @@ if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix
     _DACL_SECURITY_INFORMATION = 0x00000004
     _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
     _ACL_SIZE_INFORMATION_CLASS = 2
+    _GENERIC_READ = 0x80000000
+    _FILE_SHARE_READ = 0x00000001
+    _OPEN_EXISTING = 3
+    _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+    _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
     _TOKEN_QUERY = 0x0008
     _TOKEN_USER_CLASS = 1
     _ERROR_INSUFFICIENT_BUFFER = 122
@@ -273,6 +352,20 @@ if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix
             ("AclBytesFree", wintypes.DWORD),
         ]
 
+    class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
 
@@ -281,6 +374,23 @@ if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix
     _kernel32.CloseHandle.restype = wintypes.BOOL
     _kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
     _kernel32.LocalFree.restype = ctypes.c_void_p
+    _kernel32.GetFileAttributesW.argtypes = (wintypes.LPCWSTR,)
+    _kernel32.GetFileAttributesW.restype = wintypes.DWORD
+    _kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    _kernel32.CreateFileW.restype = wintypes.HANDLE
+    _kernel32.GetFileInformationByHandle.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
+    )
+    _kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
 
     _advapi32.OpenProcessToken.argtypes = (
         wintypes.HANDLE,
@@ -338,6 +448,17 @@ if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix
         ctypes.POINTER(ctypes.c_void_p),
     )
     _advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    _advapi32.GetSecurityInfo.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    _advapi32.GetSecurityInfo.restype = wintypes.DWORD
     _advapi32.GetAclInformation.argtypes = (
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -360,6 +481,55 @@ if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix
     def _result_error(operation: str, error: int) -> OSError:
         detail = ctypes.FormatError(error)  # type: ignore[attr-defined]
         return OSError(error, f"{operation} failed: {detail}")
+
+    def _open_verified_windows_file(path: Path) -> int:
+        import msvcrt
+
+        windows_msvcrt: Any = msvcrt
+        current = Path(path.anchor)
+        for component in path.parts[1:-1]:
+            current /= component
+            attributes = _kernel32.GetFileAttributesW(str(current))
+            if attributes == _INVALID_FILE_ATTRIBUTES:
+                raise _last_error("GetFileAttributesW")
+            if not attributes & _FILE_ATTRIBUTE_DIRECTORY:
+                raise PermissionError(
+                    f"sensitive path component is not a directory: {current}"
+                )
+            if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                raise PermissionError(
+                    f"sensitive path contains a reparse point: {current}"
+                )
+        handle = _kernel32.CreateFileW(
+            str(path),
+            _GENERIC_READ,
+            _FILE_SHARE_READ,
+            None,
+            _OPEN_EXISTING,
+            _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid = ctypes.c_void_p(-1).value
+        if handle == invalid:
+            raise _last_error("CreateFileW")
+        try:
+            information = _BY_HANDLE_FILE_INFORMATION()
+            if not _kernel32.GetFileInformationByHandle(
+                handle, ctypes.byref(information)
+            ):
+                raise _last_error("GetFileInformationByHandle")
+            if information.dwFileAttributes & (
+                _FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise PermissionError(
+                    f"sensitive path is not a non-reparse regular file: {path}"
+                )
+            return windows_msvcrt.open_osfhandle(
+                int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            )
+        except BaseException:
+            _kernel32.CloseHandle(handle)
+            raise
 
     def _sid_string(sid: ctypes.c_void_p) -> str:
         value = wintypes.LPWSTR()
@@ -483,49 +653,80 @@ if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix
         if result:
             raise _result_error("GetNamedSecurityInfoW", result)
         try:
-            trusted = set(_ALWAYS_TRUSTED_SIDS)
-            trusted.add(_current_user_sid())
-            if not owner.value or _sid_string(owner) not in trusted:
-                raise PermissionError(
-                    f"sensitive file owner is outside the service trust boundary: {path}"
-                )
-            if not dacl.value:
-                raise PermissionError(
-                    f"sensitive file has an unrestricted DACL: {path}"
-                )
-            information = _ACL_SIZE_INFORMATION()
-            if not _advapi32.GetAclInformation(
-                dacl,
-                ctypes.byref(information),
-                ctypes.sizeof(information),
-                _ACL_SIZE_INFORMATION_CLASS,
-            ):
-                raise _last_error("GetAclInformation")
-            for index in range(information.AceCount):
-                ace = ctypes.c_void_p()
-                if not _advapi32.GetAce(dacl, index, ctypes.byref(ace)):
-                    raise _last_error("GetAce")
-                assert ace.value is not None
-                address = int(ace.value)
-                header = _ACE_HEADER.from_address(address)
-                if header.AceFlags & _INHERIT_ONLY_ACE:
-                    continue
-                if header.AceType in _NON_GRANT_ACE_TYPES:
-                    continue
-                if header.AceType not in _ALLOW_ACE_TYPES:
-                    raise PermissionError(
-                        f"sensitive file has an unsupported access ACE: {path}"
-                    )
-                mask = wintypes.DWORD.from_address(address + 4).value
-                if not mask:
-                    continue
-                sid_address = _ace_sid_address(address, header.AceType, header.AceSize)
-                trustee = _sid_string(ctypes.c_void_p(sid_address))
-                if trustee not in trusted:
-                    raise PermissionError(
-                        "sensitive file grants access outside the service trust "
-                        f"boundary: {path} ({trustee})"
-                    )
+            _validate_windows_security_descriptor(owner, dacl, path)
         finally:
             if descriptor.value:
                 _kernel32.LocalFree(descriptor)
+
+    def _validate_private_windows_handle(descriptor: int, path: Path) -> None:
+        import msvcrt
+
+        windows_msvcrt: Any = msvcrt
+        owner = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        security_descriptor = ctypes.c_void_p()
+        handle = wintypes.HANDLE(windows_msvcrt.get_osfhandle(descriptor))
+        result = _advapi32.GetSecurityInfo(
+            handle,
+            _SE_FILE_OBJECT,
+            _OWNER_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(security_descriptor),
+        )
+        if result:
+            raise _result_error("GetSecurityInfo", result)
+        try:
+            _validate_windows_security_descriptor(owner, dacl, path)
+        finally:
+            if security_descriptor.value:
+                _kernel32.LocalFree(security_descriptor)
+
+    def _validate_windows_security_descriptor(
+        owner: ctypes.c_void_p,
+        dacl: ctypes.c_void_p,
+        path: Path,
+    ) -> None:
+        trusted = set(_ALWAYS_TRUSTED_SIDS)
+        trusted.add(_current_user_sid())
+        if not owner.value or _sid_string(owner) not in trusted:
+            raise PermissionError(
+                f"sensitive file owner is outside the service trust boundary: {path}"
+            )
+        if not dacl.value:
+            raise PermissionError(f"sensitive file has an unrestricted DACL: {path}")
+        information = _ACL_SIZE_INFORMATION()
+        if not _advapi32.GetAclInformation(
+            dacl,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            _ACL_SIZE_INFORMATION_CLASS,
+        ):
+            raise _last_error("GetAclInformation")
+        for index in range(information.AceCount):
+            ace = ctypes.c_void_p()
+            if not _advapi32.GetAce(dacl, index, ctypes.byref(ace)):
+                raise _last_error("GetAce")
+            assert ace.value is not None
+            address = int(ace.value)
+            header = _ACE_HEADER.from_address(address)
+            if header.AceFlags & _INHERIT_ONLY_ACE:
+                continue
+            if header.AceType in _NON_GRANT_ACE_TYPES:
+                continue
+            if header.AceType not in _ALLOW_ACE_TYPES:
+                raise PermissionError(
+                    f"sensitive file has an unsupported access ACE: {path}"
+                )
+            mask = wintypes.DWORD.from_address(address + 4).value
+            if not mask:
+                continue
+            sid_address = _ace_sid_address(address, header.AceType, header.AceSize)
+            trustee = _sid_string(ctypes.c_void_p(sid_address))
+            if trustee not in trusted:
+                raise PermissionError(
+                    "sensitive file grants access outside the service trust "
+                    f"boundary: {path} ({trustee})"
+                )

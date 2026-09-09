@@ -44,6 +44,7 @@ python -m ruff check .
 python -m ruff format --check .
 python -m mypy src/sharkrail
 python -m pytest --timeout=20
+python -c "import shutil; shutil.rmtree('dist/current', ignore_errors=True)"
 python -m build --outdir dist/current
 python -m twine check dist/current/*
 ```

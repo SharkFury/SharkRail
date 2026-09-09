@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import multiprocessing
 import os
 import socket
 import socketserver
@@ -16,12 +17,14 @@ import urllib.request
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import Mock, call
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
 
 import pytest
 
 from sharkrail.runtime.policy import ExecutionPolicy, PolicyViolation
 from sharkrail.runtime.sessions import SessionManager
+from sharkrail.service import master as master_module
 from sharkrail.service.config import (
     CallbackEndpoint,
     ConfigError,
@@ -34,7 +37,11 @@ from sharkrail.service.config import (
     ServiceConfig,
 )
 from sharkrail.service.http import JobHTTPServer
-from sharkrail.service.master import ControlMaster, _cleanup_orphan_processes
+from sharkrail.service.master import (
+    ControlMaster,
+    _cleanup_orphan_processes,
+    _service_ownership_messages,
+)
 from sharkrail.service.models import JobPhase, OutboxRecord
 from sharkrail.service.server import JobService, _post_callback
 from sharkrail.service.store import StoreError
@@ -50,10 +57,12 @@ class _LoopbackHTTPServer(ThreadingHTTPServer):
         self.server_port = int(self.server_address[1])
 
 
-def _exiting_worker(_config_path, _parent_pid, heartbeat, _execution_policy):
+def _exiting_worker(_config_path, _parent_pid, heartbeat, _execution_policy, ownership):
     if heartbeat is not None:
         heartbeat.send((time.monotonic(), {"ready": True, "active_processes": []}))
         heartbeat.close()
+    if ownership is not None:
+        ownership.close()
 
 
 def _config(tmp_path: Path, **changes):
@@ -106,6 +115,29 @@ def test_direct_service_construction_validates_configuration(tmp_path):
             ),
             state_dir=tmp_path,
         )
+
+
+def test_service_constructor_failure_releases_durable_instance_lock(tmp_path):
+    blocked_output = tmp_path / "not-a-directory"
+    blocked_output.write_bytes(b"file")
+    base = _config(tmp_path)
+    durable = replace(
+        base,
+        job_store=JobStoreSettings(url="sqlite:///jobs.db"),
+        output_store=OutputStoreSettings(url=f"file://{blocked_output}"),
+    )
+
+    with pytest.raises(PermissionError, match="not a directory"):
+        JobService(durable, state_dir=tmp_path)
+
+    reopened = JobService(
+        replace(
+            durable,
+            output_store=OutputStoreSettings(url="file://./valid-output"),
+        ),
+        state_dir=tmp_path,
+    )
+    reopened.close()
 
 
 def test_service_executes_and_retains_bounded_output(tmp_path):
@@ -958,17 +990,18 @@ def test_callback_redirect_is_not_followed_or_given_signature(tmp_path):
         state_dir=tmp_path,
     )
     try:
-        service._deliver(
-            OutboxRecord(
-                event_id="event",
-                job_id="job",
-                tenant_id="tenant",
-                endpoint_id="redirect",
-                payload={"event_id": "event"},
-                attempts=0,
-                next_attempt_at=time.time(),
+        with patch.object(service.store, "outbox_failed", return_value=True):
+            service._deliver(
+                OutboxRecord(
+                    event_id="event",
+                    job_id="job",
+                    tenant_id="tenant",
+                    endpoint_id="redirect",
+                    payload={"event_id": "event"},
+                    attempts=0,
+                    next_attempt_at=time.time(),
+                )
             )
-        )
         assert redirected_headers == []
     finally:
         service.close()
@@ -995,31 +1028,140 @@ def test_master_bounds_repeated_worker_crashes(tmp_path):
     assert master.run() == 70
 
 
+def test_master_ownership_registration_is_synchronous_and_independent_of_health(
+    monkeypatch,
+):
+    master_connection, worker_connection = multiprocessing.Pipe(duplex=True)
+    owned = {}
+    record = {
+        "ownership_id": "owner-1",
+        "pid": 123,
+        "pgid": 123,
+        "process_tree": "process_group",
+        "birth_identity": "linux:456",
+        "job_handle": None,
+    }
+    monkeypatch.setattr(
+        "sharkrail.service.master.process_birth_identity", lambda _pid: "linux:456"
+    )
+    monkeypatch.setattr(os, "getpgid", lambda _pid: 123)
+    try:
+        worker_connection.send(("register", "request-1", record))
+        _service_ownership_messages(master_connection, owned, max_records=1)
+        assert worker_connection.recv() == ("ack", "request-1", True, None)
+        assert owned == {"owner-1": record}
+
+        worker_connection.send(("unregister", "request-2", {"ownership_id": "owner-1"}))
+        _service_ownership_messages(master_connection, owned, max_records=1)
+        assert worker_connection.recv() == ("ack", "request-2", True, None)
+        assert owned == {}
+    finally:
+        master_connection.close()
+        worker_connection.close()
+
+
+def test_master_duplicates_windows_job_only_while_registering(monkeypatch):
+    master_connection, worker_connection = multiprocessing.Pipe(duplex=True)
+    owned: dict[str, dict[str, object]] = {}
+    record = {
+        "ownership_id": "owner-1",
+        "pid": 123,
+        "pgid": None,
+        "process_tree": "job_object",
+        "birth_identity": "windows:456",
+        "source_pid": 77,
+        "source_job_handle": 88,
+    }
+    job = Mock()
+    monkeypatch.setattr(master_module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(
+        master_module, "process_birth_identity", lambda _pid: "windows:456"
+    )
+    duplicate = Mock(return_value=99)
+    monkeypatch.setattr(master_module, "duplicate_job_handle_from_process", duplicate)
+    monkeypatch.setattr(master_module.WindowsJob, "from_handle", Mock(return_value=job))
+    try:
+        worker_connection.send(("register", "request-1", record))
+        _service_ownership_messages(
+            master_connection, owned, max_records=1, worker_pid=77
+        )
+        assert worker_connection.recv() == ("ack", "request-1", True, None)
+        duplicate.assert_called_once_with(77, 88)
+        assert owned["owner-1"]["job_handle"] == 99
+
+        worker_connection.send(("unregister", "request-2", {"ownership_id": "owner-1"}))
+        _service_ownership_messages(
+            master_connection, owned, max_records=1, worker_pid=77
+        )
+        assert worker_connection.recv() == ("ack", "request-2", True, None)
+        job.terminate.assert_not_called()
+        job.close.assert_called_once_with()
+    finally:
+        master_connection.close()
+        worker_connection.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 def test_orphan_cleanup_uses_reported_pgid_after_leader_exit(monkeypatch):
     killed = []
+
+    def killpg(pgid, signum):
+        if signum != 0:
+            killed.append((pgid, signum))
+
+    monkeypatch.setattr(os, "killpg", killpg)
     monkeypatch.setattr(
-        os, "killpg", lambda pgid, signum: killed.append((pgid, signum))
+        "sharkrail.service.master.process_birth_identity", lambda _pid: None
     )
 
     _cleanup_orphan_processes(
-        [{"pid": 123, "pgid": 456, "process_tree": "process_group"}]
+        [
+            {
+                "pid": 123,
+                "pgid": 456,
+                "process_tree": "process_group",
+                "birth_identity": "posix:original",
+            }
+        ]
     )
 
     assert killed == [(456, 9)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_orphan_cleanup_rejects_a_reused_process_identity(monkeypatch):
+    killpg = Mock()
+    monkeypatch.setattr(os, "killpg", killpg)
+    monkeypatch.setattr(
+        "sharkrail.service.master.process_birth_identity", lambda _pid: "posix:new"
+    )
+
+    _cleanup_orphan_processes(
+        [
+            {
+                "pid": 123,
+                "pgid": 123,
+                "process_tree": "process_group",
+                "birth_identity": "posix:old",
+            }
+        ]
+    )
+
+    killpg.assert_not_called()
 
 
 def test_master_uses_configured_drain_deadline_before_force_kill(tmp_path):
     control = replace(ControlSettings(), worker_drain_timeout_seconds=3)
     master = ControlMaster(_config(tmp_path, control=control), None)
     worker = Mock()
-    worker.is_alive.side_effect = [True, True]
+    worker.is_alive.return_value = True
     master._worker = worker
 
-    master._terminate_worker()
+    with patch("sharkrail.service.master.time.monotonic", side_effect=[0, 2, 2.5, 4]):
+        master._terminate_worker()
 
     worker.terminate.assert_called_once_with()
-    assert worker.join.call_args_list == [call(timeout=3), call(timeout=2)]
+    assert worker.join.call_args_list == [call(timeout=0.05), call(timeout=2)]
     worker.kill.assert_called_once_with()
 
 
@@ -1043,6 +1185,42 @@ def test_controller_failures_eventually_make_service_unready(monkeypatch, tmp_pa
         assert service.health()["ready"] is False
         assert service.health()["controller_stalled"] is True
         assert service.health()["controller_errors"] > 0
+    finally:
+        service.close()
+
+
+def test_notification_store_failures_eventually_make_service_unready(
+    monkeypatch, tmp_path
+):
+    control = replace(ControlSettings(), worker_progress_timeout_seconds=1)
+    service = JobService(_config(tmp_path, control=control), state_dir=tmp_path)
+    service.start()
+    try:
+        deadline = time.monotonic() + 2
+        while (
+            service._last_notification_success is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert service._last_notification_success is not None
+
+        def fail_claim(*_args, **_kwargs):
+            raise RuntimeError("persistent notification store failure")
+
+        monkeypatch.setattr(service.store, "claim_outbox_due", fail_claim)
+        deadline = time.monotonic() + 3
+        while service.health()["ready"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        while (
+            service.health()["notification_errors"] < 5 and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+
+        health = service.health()
+        assert health["ready"] is False
+        assert health["notification_stalled"] is True
+        assert health["notification_progress_age_seconds"] >= 1
+        assert health["notification_errors"] >= 5
+        assert health["notification_consecutive_errors"] >= 5
     finally:
         service.close()
 

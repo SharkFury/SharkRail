@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import queue
 import socket
@@ -17,7 +18,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from ..runtime.policy import ExecutionPolicy
-from .windows_security import secure_private_path, validate_private_path
+from .windows_security import read_verified_text_file, secure_private_path
 
 if sys.version_info >= (3, 11):  # pragma: no cover - selected by interpreter
     import tomllib
@@ -129,10 +130,11 @@ class CallbackEndpoint:
             return self.secret
         if self.secret_file is None:
             return None
-        _validate_permissions(Path(self.secret_file))
         try:
-            return Path(self.secret_file).read_text(encoding="utf-8").strip()
-        except OSError as err:
+            return read_verified_text_file(
+                Path(self.secret_file), forbidden_permissions=0o027
+            ).strip()
+        except (OSError, UnicodeError) as err:
             raise ConfigError(
                 f"cannot read callback secret file {self.secret_file!r}: {err}"
             ) from err
@@ -300,19 +302,22 @@ def load_config(
     explicit = path is not None or explicit_env is not None or require_explicit
     raw: dict[str, Any] = {}
     selected_path: Optional[Path] = None
-    if selected.exists():
-        _validate_permissions(selected)
+    try:
+        config_text = read_verified_text_file(selected, forbidden_permissions=0o027)
+    except FileNotFoundError as err:
+        if explicit:
+            raise ConfigError(f"configuration file does not exist: {selected}") from err
+    except (OSError, UnicodeError) as err:
+        raise ConfigError(f"cannot load configuration {selected}: {err}") from err
+    else:
         try:
-            with selected.open("rb") as handle:
-                loaded = tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError) as err:
+            loaded = tomllib.loads(config_text)
+        except tomllib.TOMLDecodeError as err:
             raise ConfigError(f"cannot load configuration {selected}: {err}") from err
         if not isinstance(loaded, dict):
             raise ConfigError("configuration root must be a table")
         raw = loaded
         selected_path = selected
-    elif explicit:
-        raise ConfigError(f"configuration file does not exist: {selected}")
 
     _validate_keys(raw)
     merged = _apply_environment(raw, env)
@@ -462,12 +467,11 @@ def _validate_config(
         raise ConfigError("job_store.url and job_store.url_file are mutually exclusive")
     store_url = config.job_store.url
     if config.job_store.url_file:
-        _validate_permissions(Path(config.job_store.url_file))
         try:
-            store_url = (
-                Path(config.job_store.url_file).read_text(encoding="utf-8").strip()
-            )
-        except OSError as err:
+            store_url = read_verified_text_file(
+                Path(config.job_store.url_file), forbidden_permissions=0o027
+            ).strip()
+        except (OSError, UnicodeError) as err:
             raise ConfigError(f"cannot read job_store.url_file: {err}") from err
         if not store_url:
             raise ConfigError("job_store.url_file is empty")
@@ -535,28 +539,13 @@ def load_service_execution_policy(config: ServiceConfig) -> ExecutionPolicy:
     path = Path(configured)
     if not path.is_absolute() and config.config_path is not None:
         path = config.config_path.parent / path
-    _validate_policy_permissions(path)
     try:
-        return ExecutionPolicy.from_json(path)
-    except (OSError, TypeError, ValueError) as err:
+        value = json.loads(read_verified_text_file(path, forbidden_permissions=0o022))
+        if not isinstance(value, dict):
+            raise TypeError("execution policy must be a JSON object")
+        return ExecutionPolicy.from_dict(value)
+    except (OSError, UnicodeError, TypeError, ValueError) as err:
         raise ConfigError(f"cannot load executor policy_file {path}: {err}") from err
-
-
-def _validate_policy_permissions(path: Path) -> None:
-    if os.name == "nt":
-        _validate_permissions(path)
-        return
-    try:
-        mode = path.stat().st_mode
-    except OSError as err:
-        raise ConfigError(
-            f"cannot inspect execution policy permissions: {err}"
-        ) from err
-    if mode & 0o022:
-        raise ConfigError(
-            f"execution policy permissions are too broad: {path}; "
-            "the file must not be writable by group or other users"
-        )
 
 
 def _positive_values(config: ServiceConfig) -> None:
@@ -579,28 +568,6 @@ def _positive_values(config: ServiceConfig) -> None:
                 raise ConfigError(
                     f"{group.__class__.__name__}.{name} must be a positive integer"
                 )
-
-
-def _validate_permissions(path: Path) -> None:
-    if os.name == "nt":
-        try:
-            validate_private_path(path)
-        except OSError as err:
-            raise ConfigError(
-                f"sensitive file permissions are too broad: {path}; "
-                "expected a protected DACL limited to the service identity, "
-                "SYSTEM, and Administrators"
-            ) from err
-        return
-    try:
-        mode = path.stat().st_mode
-    except OSError as err:
-        raise ConfigError(f"cannot inspect configuration permissions: {err}") from err
-    if mode & 0o027:
-        raise ConfigError(
-            f"sensitive file permissions are too broad: {path}; "
-            "expected mode 0640 or stricter"
-        )
 
 
 def _validate_tenant_tokens(server: ServerSettings) -> None:

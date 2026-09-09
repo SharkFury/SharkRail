@@ -63,8 +63,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   validated addresses, reject unsafe destinations by default, and never follow
   callback redirects.
 - Create SQLite databases, journals, locks, and sensitive configuration files
-  with private permissions, and safely remove output files before pruning
-  expired volatile Job records.
+  with private permissions, and bound expired volatile Job retention.
+- Make ConPTY disposal cancellation-safe, reap and close stuck brokers, preserve
+  executable-not-found errors across the broker boundary, report every actual
+  tree-kill step, and isolate broker overhead from user aggregate quotas.
+- Replace heartbeat-derived process cleanup authority with synchronous
+  ownership registration, birth identities, and duplicated Windows Job handles.
+- Fail notification readiness after sustained reconciliation errors, roll back
+  partial service construction, account all persisted metadata, and recover
+  filesystem output deletion through durable idempotent finalizers.
+- Validate SQLite sidecars as service-owned private regular files and read
+  configuration, policy, and secret files through verified non-following handles.
 - Repair the MCP `session_read` input schema, avoid reverse DNS during HTTP
   binding, select IPv6 for IPv6 listeners, keep Python 3.9 mypy checks active,
   and emit unique runtime-only SBOM components.

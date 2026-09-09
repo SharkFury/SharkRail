@@ -32,10 +32,11 @@ The current release implements the useful single-host core:
 | Transactional callback Outbox, HMAC signatures, retry, and dead letters | Language SDKs and workflow orchestration |
 
 The Worker owns one authoritative SQLite connection and uses bounded role
-threads. The Master monitors heartbeat and reconciliation progress, replaces a
-failed or stalled Worker with bounded exponential backoff, and makes a
-best-effort cleanup of process groups reported by the failed Worker. Native OS
-process-tree ownership remains the primary cleanup mechanism.
+threads. The Master monitors heartbeat and reconciliation progress and replaces
+a failed or stalled Worker with bounded exponential backoff. Process ownership
+uses a separate synchronous register/ACK/unregister channel with process birth
+identities; on Windows the Master also holds a duplicated Job handle. Health
+heartbeats are diagnostics, not the ownership registry.
 
 Memory mode is intentionally volatile. Only file SQLite mode claims that an
 accepted resource survives a service restart. Output is committed when the
@@ -267,8 +268,10 @@ an explicitly degraded durability class:
   lost when the in-memory SQLite State Worker or its host exits;
 - restart recovery, multi-instance ownership, durable callbacks, and accepted-
   Job durability are not claimed;
-- Job count, metadata bytes, event history, TTL, and temporary-output bytes are
-  bounded; overload is rejected with `429` rather than risking OOM;
+- Job count, all persisted variable-length metadata (including status,
+  conditions, errors, events, Outbox rows, and deletion manifests), event
+  history, TTL, and temporary-output bytes are bounded; overload is rejected
+  with `429` rather than risking OOM;
 - submit and status responses include `"durability": "volatile"`, startup logs
   emit one prominent warning, and `/health/state` reports
   `DEGRADED_VOLATILE_STORE`;
@@ -276,9 +279,10 @@ an explicitly degraded durability class:
 
 The integrated Worker owns exactly one authoritative in-memory SQLite
 connection shared by its bounded role threads. It generates a new `store_epoch`
-on every start. If the Worker fails, the Master uses its latest heartbeat to
-make a best-effort process-group cleanup before replacement; the new Worker has
-a new empty store and epoch.
+on every start. If the Worker fails, the Master drains its synchronously
+acknowledged ownership records, validates process birth identities, and cleans
+the registered process trees before replacement; the new Worker has a new empty
+store and epoch.
 
 An absent database setting selects SQLite memory mode. An explicit
 `sqlite:///:memory:` selects it intentionally. By contrast, an invalid or
@@ -372,6 +376,13 @@ jitter and a per-role restart-rate limit. If a role repeatedly crashes, its
 circuit opens and the Master reports the role as degraded instead of creating a
 fork storm.
 
+Process ownership is carried on a distinct IPC channel. A Worker cannot expose
+a started session until the Master acknowledges its ownership record, and it
+unregisters only after native cleanup reports a fully disposed tree. POSIX
+records include the leader birth identity and process group; Windows records
+include a duplicated kill-on-close Job handle. This prevents stale health
+snapshots from being used as kill authority and makes PID reuse fail closed.
+
 Worker replacement is safe because Workers are disposable. A new Worker gets a
 new `worker_id` and `boot_id`, loads no ownership from its predecessor, and
 reacquires all work from `JobStore`. Every claim and write remains protected by
@@ -413,7 +424,9 @@ GET /health/state  dependency, queue, lease, and reconciliation diagnostics
 
 Liveness must not fail merely because the database is temporarily unavailable,
 which would create a restart storm. Readiness fails when the role cannot safely
-serve, while diagnostic state reports saturation and dependency failures.
+serve, including when notification reconciliation has not completed
+successfully within its progress deadline. Diagnostic state reports saturation,
+consecutive notification failures, and dependency failures.
 
 On graceful shutdown, the API first stops admitting new Jobs, controllers stop
 claiming new work, outstanding database transactions finish within a deadline,
@@ -598,13 +611,12 @@ Controller responsibilities stay narrow:
 - execution observes `SessionManager` and persists progress or a terminal result;
 - lease reconciliation detects lost executors and applies explicit retry policy;
 - notification reconciles terminal results with Outbox delivery state;
-- retention removes output and records expiry before final resource deletion.
+- retention transactionally records an output-deletion manifest and removes the
+  Job, then an idempotent finalizer deletes output and clears the manifest.
 
-Deleting a Job first sets a deletion timestamp. A retention finalizer prevents
-the record from disappearing until processes are stopped, output retention is
-handled, and required audit facts are durable. Finalizers must have an operator-
-visible timeout and recovery procedure so a broken cleanup path cannot retain a
-resource forever.
+Deletion manifests survive a crash between database deletion and filesystem
+cleanup. Startup reconciliation treats manifest-referenced output as committed;
+the retention loop retries the idempotent finalizer until cleanup succeeds.
 
 ## Claims, leases, and fencing
 

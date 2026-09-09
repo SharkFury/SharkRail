@@ -228,6 +228,36 @@ def test_failed_start_releases_admission_reservation():
     asyncio.run(_run())
 
 
+def test_process_ownership_is_registered_before_start_returns_and_unregistered_last():
+    class Ownership:
+        def __init__(self):
+            self.events = []
+
+        def register(self, handle):
+            assert handle.birth_identity is not None
+            handle._ownership_id = "owned"
+            self.events.append(("register", handle._disposed))
+
+        def unregister(self, handle):
+            self.events.append(("unregister", handle._disposed))
+            handle._ownership_id = None
+
+    async def _run() -> None:
+        ownership = Ownership()
+        manager = SessionManager(process_ownership=ownership)
+        session = await manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "pass"))
+        )
+        assert ownership.events == [("register", False)]
+
+        await manager.wait(session.id)
+
+        assert ownership.events == [("register", False), ("unregister", True)]
+        await manager.dispose(session.id)
+
+    asyncio.run(_run())
+
+
 def test_dispose_releases_backend_after_cancellation_error():
     class FailingInterruptBackend(PipeBackend):
         disposed = False

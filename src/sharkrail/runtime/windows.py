@@ -26,6 +26,17 @@ class WindowsJob:
         )
         self._closed = False
 
+    @classmethod
+    def from_handle(cls, handle: int) -> WindowsJob:
+        """Take ownership of a Job handle duplicated into this process."""
+
+        if os.name != "nt":
+            raise OSError("Windows Job Objects are only available on Windows")
+        job = cls.__new__(cls)
+        job._handle = handle
+        job._closed = False
+        return job
+
     def assign(self, pid: int) -> None:
         if self._closed:
             raise RuntimeError("Job Object is closed")
@@ -59,6 +70,21 @@ class WindowsJob:
             time.sleep(0.01)
         return True
 
+    def duplicate_to_process(self, pid: int) -> int:
+        """Duplicate this Job handle into another process for stable ownership."""
+
+        if self._closed:
+            raise RuntimeError("Job Object is closed")
+        return _duplicate_handle_to_process(self._handle, pid)
+
+    @property
+    def handle_value(self) -> int:
+        """Return this process's opaque handle value for controlled duplication."""
+
+        if self._closed:
+            raise RuntimeError("Job Object is closed")
+        return int(self._handle)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -79,6 +105,22 @@ class WindowsJob:
                 pass
 
 
+def process_creation_time(pid: int) -> int:
+    """Return the stable Windows creation timestamp for one live process."""
+
+    if os.name != "nt":
+        raise OSError("Windows process timestamps are only available on Windows")
+    return _process_creation_time(pid)
+
+
+def duplicate_job_handle_from_process(pid: int, handle: int) -> int:
+    """Duplicate a Job handle from a source process into this process."""
+
+    if os.name != "nt":
+        raise OSError("Windows Job Objects are only available on Windows")
+    return _duplicate_handle_from_process(pid, handle)
+
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -90,12 +132,14 @@ if os.name == "nt":
     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
     JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
     PROCESS_TERMINATE = 0x0001
+    PROCESS_DUP_HANDLE = 0x0040
     PROCESS_SET_QUOTA = 0x0100
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     THREAD_SUSPEND_RESUME = 0x0002
     TH32CS_SNAPTHREAD = 0x00000004
     ERROR_NO_MORE_FILES = 18
     INVALID_DWORD = 0xFFFFFFFF
+    DUPLICATE_SAME_ACCESS = 0x00000002
 
     class IO_COUNTERS(ctypes.Structure):
         _fields_ = [
@@ -153,7 +197,14 @@ if os.name == "nt":
             ("dwFlags", wintypes.DWORD),
         ]
 
+    class FILETIME(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", wintypes.DWORD),
+            ("dwHighDateTime", wintypes.DWORD),
+        ]
+
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     _kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
     _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     _kernel32.SetInformationJobObject.argtypes = (
@@ -173,6 +224,24 @@ if os.name == "nt":
     _kernel32.QueryInformationJobObject.restype = wintypes.BOOL
     _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+    )
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
+    _kernel32.DuplicateHandle.argtypes = (
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    _kernel32.DuplicateHandle.restype = wintypes.BOOL
     _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
@@ -244,6 +313,74 @@ def _assign_process(job: int, pid: int) -> None:
             _raise_last_error("AssignProcessToJobObject")
     finally:
         _kernel32.CloseHandle(process)
+
+
+def _duplicate_handle_to_process(handle: int, pid: int) -> int:
+    process = _kernel32.OpenProcess(PROCESS_DUP_HANDLE, False, pid)
+    if not process:
+        _raise_last_error("OpenProcess")
+    duplicate = wintypes.HANDLE()
+    try:
+        if not _kernel32.DuplicateHandle(
+            _kernel32.GetCurrentProcess(),
+            handle,
+            process,
+            ctypes.byref(duplicate),
+            0,
+            False,
+            DUPLICATE_SAME_ACCESS,
+        ):
+            _raise_last_error("DuplicateHandle")
+    finally:
+        _kernel32.CloseHandle(process)
+    if not duplicate.value:
+        raise OSError("DuplicateHandle returned an invalid Job handle")
+    return int(duplicate.value)
+
+
+def _duplicate_handle_from_process(pid: int, handle: int) -> int:
+    process = _kernel32.OpenProcess(PROCESS_DUP_HANDLE, False, pid)
+    if not process:
+        _raise_last_error("OpenProcess")
+    duplicate = wintypes.HANDLE()
+    try:
+        if not _kernel32.DuplicateHandle(
+            process,
+            handle,
+            _kernel32.GetCurrentProcess(),
+            ctypes.byref(duplicate),
+            0,
+            False,
+            DUPLICATE_SAME_ACCESS,
+        ):
+            _raise_last_error("DuplicateHandle")
+    finally:
+        _kernel32.CloseHandle(process)
+    if not duplicate.value:
+        raise OSError("DuplicateHandle returned an invalid Job handle")
+    return int(duplicate.value)
+
+
+def _process_creation_time(pid: int) -> int:
+    process = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not process:
+        _raise_last_error("OpenProcess")
+    created = FILETIME()
+    exited = FILETIME()
+    kernel = FILETIME()
+    user = FILETIME()
+    try:
+        if not _kernel32.GetProcessTimes(
+            process,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            _raise_last_error("GetProcessTimes")
+    finally:
+        _kernel32.CloseHandle(process)
+    return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
 
 
 def _resume_process(pid: int) -> None:

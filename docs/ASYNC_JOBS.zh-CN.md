@@ -27,8 +27,9 @@
 | 事务 Outbox、HMAC 签名、重试与死信 | 工作流编排与多语言 SDK |
 
 Worker 持有唯一的 SQLite 连接，并使用有界的角色线程。Master 同时检查 heartbeat 和
-调谐进度；Worker 崩溃或失去进展时，Master 会按有界指数退避替换它，并尽力清理 Worker
-最后上报的进程组。操作系统级进程树所有权仍是主要清理机制。
+调谐进度；Worker 崩溃或失去进展时，Master 会按有界指数退避替换它。进程所有权通过独立
+的同步 register/ACK/unregister 通道传递，并携带进程出生标识；Windows 上 Master 还持有
+复制的 Job handle。健康 heartbeat 只用于诊断，不再兼作所有权注册表。
 
 内存模式明确是易失模式。只有文件 SQLite 模式承诺已接受的资源记录能够跨服务重启保留。
 输出在命令结束时一次性提交，尚不支持执行中的持久化分块流。下文涉及独立
@@ -228,15 +229,16 @@ SQLite 内存模式让程序在没有数据库配置时仍可使用，但它属�
 - SQLite State Worker 或宿主退出后，Job 状态、幂等键、lease、状态历史和待投递回调
   全部丢失；
 - 不承诺重启恢复、多实例 ownership、持久回调和已接收 Job 的持久性；
-- Job 数量、metadata 字节、事件历史、TTL 和临时输出字节都有上限，过载时返回 `429`，
-  不能冒险触发 OOM；
+- Job 数量、全部持久化可变 metadata（包括后续状态、Condition、错误、事件、Outbox 和
+  删除清单）、事件历史、TTL 和临时输出字节都有上限，过载时返回 `429`，不能冒险触发
+  OOM；
 - 提交和状态响应包含 `"durability": "volatile"`，启动日志输出一次醒目警告，
   `/health/state` 报告 `DEGRADED_VOLATILE_STORE`；
 - 需要跨服务重启保留状态的调用方必须配置文件 SQLite。
 
 集成 Worker 持有唯一权威的内存 SQLite 连接，其有界角色线程共享该连接。Worker 每次
-启动生成新的 `store_epoch`。Worker 故障时，Master 根据最后一次 heartbeat 上报的信息
-尽力清理进程组，然后再启动拥有全新空状态和 epoch 的 Worker。
+启动生成新的 `store_epoch`。Worker 故障时，Master 排空已同步确认的 ownership 记录，
+校验进程出生标识并清理已注册进程树，然后再启动拥有全新空状态和 epoch 的 Worker。
 
 数据库配置缺失时选择 SQLite 内存模式；显式配置 `sqlite:///:memory:` 表示主动选择。
 相反，已经配置的文件 SQLite 无法使用时绝不能自动回退内存：Worker 启动失败，Master
@@ -306,6 +308,11 @@ Worker 写入同一个响应。
 优雅 drain；超过期限后终止 Worker 及其拥有的子进程树。替换使用带随机抖动的指数退避和
 每角色重启频率限制。某个角色连续崩溃时打开熔断器并报告 degraded，不能形成 fork storm。
 
+进程 ownership 使用独立 IPC 通道。Master ACK 之前 Worker 不会公开已启动 session；只有
+原生清理确认进程树完全 disposed 后才 unregister。POSIX 记录包含 leader 出生标识和
+process group；Windows 记录包含复制的 kill-on-close Job handle，从而避免把过期健康快照
+当作 kill 权限，并在 PID 复用时 fail closed。
+
 Worker 可随时丢弃，因此替换过程必须安全。新 Worker 使用新的 `worker_id` 和 `boot_id`，
 不能继承前任的 ownership，只能从 `JobStore` 重新领取工作；所有 claim 和写入继续接受
 lease、revision 与 fencing 校验。计划升级时启动新一代 Worker，等待 ready 后再 drain
@@ -337,7 +344,8 @@ GET /health/state  依赖、队列、lease 和调谐诊断
 ```
 
 不能因为数据库短暂不可用就让 liveness 失败，否则会形成重启风暴。角色无法安全服务时
-readiness 失败；普通过载和依赖故障通过诊断状态明确报告。
+readiness 失败；通知调谐超过进展期限仍未完整成功时也必须失败。普通过载、连续通知错误
+和依赖故障通过诊断状态明确报告。
 
 优雅停止时，API 先停止接收新 Job，Controller 停止领取新工作，未完成数据库事务在期限
 内结束，已经持有的 lease 主动释放或自然过期。异常退出时，数据库事务必须原子回滚。
@@ -496,11 +504,10 @@ async def reconcile(job_id: str) -> None:
 - Execution 观察 `SessionManager`，持久化进度或终态结果；
 - Lease Reconciler 检测失联 Executor，并应用显式重试策略；
 - Notification 将终态结果与 Outbox 投递状态调谐一致；
-- Retention 在最终删除资源前清理输出并记录过期事实。
+- Retention 在事务内记录输出删除清单并删除 Job，再由幂等 finalizer 删除输出并清除清单。
 
-删除 Job 时先设置 deletion timestamp。Retention finalizer 会阻止记录立即消失，直到进程
-终止、输出保留策略完成且必要审计事实已经持久化。Finalizer 必须有操作人员可见的超时
-和恢复流程，避免清理故障让资源永远无法删除。
+删除清单能够跨越数据库删除与文件系统清理之间的崩溃。启动调谐会把清单引用的输出视为
+已提交数据；Retention 循环持续重试幂等 finalizer，直到清理成功。
 
 ## Lease、Heartbeat 与 Fencing
 
