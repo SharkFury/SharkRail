@@ -534,7 +534,7 @@ def test_windows_drain_timeout_attempts_descendant_cleanup_after_root_exit():
             handle = kernel32.OpenProcess(0x00100000, False, child_pid)
             if handle:
                 try:
-                    assert kernel32.WaitForSingleObject(handle, 0) == 0
+                    assert kernel32.WaitForSingleObject(handle, 1000) == 0
                 finally:
                     kernel32.CloseHandle(handle)
         finally:

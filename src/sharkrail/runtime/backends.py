@@ -924,14 +924,26 @@ class WindowsPtyBackend(ExecutionBackend):
         if handle.broker is not None:
             assert handle.broker_output is not None
             while True:
-                if handle.broker_output.poll():
-                    message = handle.broker_output.recv()
+                try:
+                    available = handle.broker_output.poll()
+                    message = handle.broker_output.recv() if available else None
+                except (BrokenPipeError, EOFError, OSError):
+                    if (
+                        handle.process.returncode is not None
+                        or handle.broker.exitcode is not None
+                    ):
+                        return b""
+                    raise
+                if message is not None:
                     if message[:1] == ("data",):
                         return str(message[1]).encode("utf-8")
                     if message[:1] == ("eof",):
                         return b""
                     raise RuntimeError(_broker_error_message(message))
-                if handle.process.returncode is not None:
+                # Child exit is intentionally not EOF: the relay can still
+                # have trailing terminal output to publish. Only an explicit
+                # EOF message or broker exit closes the output stream.
+                if handle.broker.exitcode is not None:
                     return b""
                 await asyncio.sleep(0.01)
         while True:
@@ -1002,11 +1014,21 @@ class WindowsPtyBackend(ExecutionBackend):
         if handle._control_failed:
             raise RuntimeError("ConPTY broker control channel requires disposal")
         async with handle._control_lock:
-            handle.broker_control.send((operation, args))
             try:
+                handle.broker_control.send((operation, args))
                 response = await _receive_broker_message(
                     handle.broker_control, handle.broker
                 )
+            except (BrokenPipeError, EOFError, OSError):
+                # The monitor can dispose the broker after observing child
+                # exit while cancellation is between escalation steps. A
+                # closed channel is success only for idempotent termination.
+                if operation in {"sendintr", "terminate", "close"} and (
+                    handle.process.returncode is not None or handle._tree_killed
+                ):
+                    return None
+                handle._control_failed = True
+                raise
             except BaseException:
                 handle._control_failed = True
                 raise

@@ -115,6 +115,27 @@ def open_private_file(path: Path, flags: int = os.O_RDWR) -> int:
 def create_private_temp_file(directory: Path, prefix: str) -> tuple[int, str]:
     """Create a private temporary file through a verified directory handle."""
 
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        for _ in range(128):
+            name = f"{prefix}{secrets.token_hex(8)}"
+            path = directory / name
+            try:
+                descriptor = os.open(path, flags, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                secure_private_path(path, directory=False)
+            except BaseException:
+                os.close(descriptor)
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                raise
+            return descriptor, name
+        raise FileExistsError("could not allocate a unique private temporary file")
+
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     directory_flags |= getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(directory, directory_flags)

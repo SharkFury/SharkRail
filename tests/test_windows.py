@@ -312,6 +312,7 @@ def test_windows_pty_start_bounds_relay_reads():
         with (
             patch.dict(sys.modules, {"winpty": winpty}),
             patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch("sharkrail.runtime.backends.sys.platform", "test"),
             patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
         ):
             handle = await backend.start(CommandSpec("tool", ()))
@@ -419,6 +420,7 @@ def test_cancelled_windows_pty_spawn_closes_late_native_process():
         with (
             patch.dict(sys.modules, {"winpty": winpty}),
             patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch("sharkrail.runtime.backends.sys.platform", "test"),
             patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
         ):
             start = asyncio.create_task(backend.start(CommandSpec("tool", ())))
