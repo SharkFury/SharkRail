@@ -21,6 +21,7 @@ def test_ci_enforces_types_format_coverage_and_installed_wheel():
         "python -m ruff format --check .",
         "python -m mypy src/sharkrail",
         "--cov-fail-under=70",
+        "--cov-branch",
         ".github/scripts/wheel_smoke.py",
     ):
         assert gate in workflow

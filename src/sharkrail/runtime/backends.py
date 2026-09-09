@@ -7,12 +7,16 @@ depending on POSIX signals or Windows process flags.
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 import os
 import signal
 import socket
 import subprocess
+import sys
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -85,6 +89,18 @@ class WindowsProcessHandle(ProcessHandle):
 class WindowsPtyProcessHandle(PtyProcessHandle):
     native_pty: Any = None
     job: WindowsJob | None = None
+    broker: Any = None
+    broker_control: Any = None
+    broker_output: Any = None
+    _write_future: Any = field(default=None, init=False, repr=False, compare=False)
+    _write_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _control_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
+    _control_failed: bool = field(default=False, init=False, repr=False, compare=False)
+    _closing: bool = field(default=False, init=False, repr=False, compare=False)
 
 
 class CancellationStep(str, Enum):
@@ -300,8 +316,10 @@ class WindowsPipeBackend(PipeBackend):
             async with handle._tree_lock:
                 if handle._tree_killed:
                     return
-                await asyncio.to_thread(handle.job.terminate)
-                await asyncio.to_thread(handle.job.wait_empty, 1000)
+                handle.job.terminate()
+                emptied = await asyncio.to_thread(handle.job.wait_empty, 1.0)
+                if not emptied:
+                    raise TimeoutError("Windows Job still contains active processes")
                 handle._tree_killed = True
             return
         await super().kill_tree(handle)
@@ -332,8 +350,7 @@ class WindowsPipeBackend(PipeBackend):
         """Fail closed if a Job-owned suspended process cannot be resumed."""
 
         try:
-            await asyncio.to_thread(job.terminate)
-            await asyncio.to_thread(job.wait_empty, 1000)
+            job.terminate()
         except OSError:
             pass
         finally:
@@ -397,9 +414,27 @@ class PtyBackend(ExecutionBackend):
         pty_handle = _as_pty(handle)
         if pty_handle.stdin_closed:
             return
+        attributes = termios.tcgetattr(pty_handle.master_fd)
+        if not attributes[3] & termios.ICANON:
+            raise RuntimeError(
+                "stdin EOF is unavailable for a POSIX PTY in non-canonical mode"
+            )
+        veof_value = attributes[6][termios.VEOF]
+        numeric_veof = (
+            veof_value
+            if isinstance(veof_value, int)
+            else int.from_bytes(bytes(veof_value), "little")
+        )
+        if numeric_veof == os.fpathconf(pty_handle.master_fd, "PC_VDISABLE"):
+            raise RuntimeError("stdin EOF is disabled for this POSIX PTY")
+        veof = (
+            bytes((veof_value,)) if isinstance(veof_value, int) else bytes(veof_value)
+        )
+        # One VEOF submits an unterminated canonical line and the second
+        # presents EOF to the following read. Both are required for a
+        # deterministic close_stdin() operation.
+        await _write_fd(pty_handle.master_fd, veof + veof)
         pty_handle.stdin_closed = True
-        # POSIX terminal EOF (VEOF) preserves the output side of the PTY.
-        await _write_fd(pty_handle.master_fd, b"\x04")
 
     async def interrupt(self, handle: ProcessHandle) -> None:
         if handle.process.returncode is None:
@@ -487,14 +522,236 @@ class _WinPtyAsyncProcess:
         return self._returncode
 
 
+class _BrokeredWinPtyProcess:
+    """Async process facade whose ConPTY is owned by a killable broker."""
+
+    stdin = None
+    stdout = None
+    stderr = None
+
+    def __init__(self, pid: int, broker: Any, status: Any) -> None:
+        self.pid = pid
+        self._broker = broker
+        self._status = status
+        self._returncode: int | None = None
+
+    @property
+    def returncode(self) -> int | None:
+        try:
+            while self._returncode is None and self._status.poll():
+                message = self._status.recv()
+                if isinstance(message, tuple) and message[:1] == ("exit",):
+                    self._returncode = int(message[1])
+        except (EOFError, OSError):
+            pass
+        if self._returncode is None and self._broker.exitcode is not None:
+            self._returncode = int(self._broker.exitcode)
+        return self._returncode
+
+    async def wait(self) -> int:
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
+        assert self._returncode is not None
+        return self._returncode
+
+
+def _conpty_broker_main(control: Any, output: Any, status: Any) -> None:
+    """Own pywinpty in a helper process that a Windows Job can terminate."""
+
+    native: Any = None
+    try:
+        request = control.recv()
+        if not isinstance(request, tuple) or request[:1] != ("start",):
+            raise RuntimeError("invalid ConPTY broker bootstrap request")
+        _, argv, cwd, environment, dimensions, read_poll_seconds = request
+        from winpty import PtyProcess
+
+        native = PtyProcess.spawn(
+            argv,
+            cwd=cwd,
+            env=environment,
+            dimensions=dimensions,
+        )
+        relay = getattr(native, "fileobj", None)
+        if relay is not None and hasattr(relay, "settimeout"):
+            relay.settimeout(read_poll_seconds)
+        control.send(("ok", native.pid))
+
+        def relay_output() -> None:
+            exit_sent = False
+            try:
+                while True:
+                    try:
+                        text = native.read()
+                    except EOFError:
+                        break
+                    except (TimeoutError, socket.timeout):
+                        text = ""
+                    if text:
+                        output.send(("data", text))
+                    exit_code = native.exitstatus
+                    if exit_code is not None:
+                        if not exit_sent:
+                            status.send(("exit", int(exit_code)))
+                            exit_sent = True
+                        if not text:
+                            break
+            except BaseException as err:  # noqa: BLE001 - process boundary
+                try:
+                    output.send(("error", type(err).__name__, str(err)))
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+            finally:
+                try:
+                    if not exit_sent and native.exitstatus is not None:
+                        status.send(("exit", int(native.exitstatus)))
+                    output.send(("eof",))
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+
+        threading.Thread(
+            target=relay_output,
+            name="sharkrail-conpty-broker-output",
+            daemon=True,
+        ).start()
+
+        while True:
+            request = control.recv()
+            if not isinstance(request, tuple) or len(request) != 2:
+                raise RuntimeError("invalid ConPTY broker request")
+            operation, args = request
+            try:
+                if operation == "write":
+                    result = native.write(*args)
+                elif operation == "sendeof":
+                    result = native.sendeof(*args)
+                elif operation == "sendintr":
+                    result = native.sendintr(*args)
+                elif operation == "terminate":
+                    result = native.terminate(*args)
+                elif operation == "setwinsize":
+                    result = native.setwinsize(*args)
+                elif operation == "close":
+                    result = native.close(*args)
+                    control.send(("ok", result))
+                    break
+                else:
+                    raise RuntimeError(f"unknown ConPTY broker operation: {operation}")
+            except BaseException as err:  # noqa: BLE001 - process boundary
+                control.send(("error", type(err).__name__, str(err)))
+            else:
+                control.send(("ok", result))
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    except BaseException as err:  # noqa: BLE001 - process boundary
+        try:
+            control.send(("error", type(err).__name__, str(err)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        if native is not None:
+            try:
+                native.close(force=True)
+            except BaseException:  # noqa: BLE001 - process teardown
+                native = None
+        for connection in (control, output, status):
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+
 class WindowsPtyBackend(ExecutionBackend):
     """ConPTY backend powered by pywinpty on supported Windows systems."""
 
     _read_poll_seconds = 0.1
+    _spawn_timeout_seconds = 30.0
 
     async def start(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
         if os.name != "nt":
             raise NotImplementedError("ConPTY is only available on Windows")
+        if sys.platform == "win32":  # pragma: no cover - exercised by Windows CI
+            return await self._start_brokered(spec)
+        # Non-Windows unit tests patch os.name and provide an in-process fake
+        # winpty module. Keep that seam without using process-global executors.
+        return await self._start_test_double(spec)
+
+    async def _start_brokered(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
+        environment = _child_environment(spec)
+        process_limit = spec.resources.process_count
+        job = WindowsJob(
+            memory_bytes=spec.resources.memory_bytes,
+            cpu_time_seconds=spec.resources.cpu_time_seconds,
+            # The broker itself occupies one Job slot. Adding exactly one keeps
+            # the configured limit applicable to the user process tree.
+            process_count=None if process_limit is None else process_limit + 1,
+        )
+        context = multiprocessing.get_context("spawn")
+        parent_control, child_control = context.Pipe(duplex=True)
+        parent_output, child_output = context.Pipe(duplex=False)
+        parent_status, child_status = context.Pipe(duplex=False)
+        broker = context.Process(
+            target=_conpty_broker_main,
+            args=(child_control, child_output, child_status),
+            name="sharkrail-conpty-broker",
+            daemon=True,
+        )
+        try:
+            broker.start()
+            child_control.close()
+            child_output.close()
+            child_status.close()
+            broker_pid = broker.pid
+            if broker_pid is None:
+                raise RuntimeError("ConPTY broker did not publish a process ID")
+            job.assign(broker_pid)
+            parent_control.send(
+                (
+                    "start",
+                    spec.argv_list,
+                    spec.cwd,
+                    environment,
+                    (24, 80),
+                    self._read_poll_seconds,
+                )
+            )
+            response = await asyncio.wait_for(
+                _receive_broker_message(parent_control, broker),
+                self._spawn_timeout_seconds,
+            )
+            if response[:1] != ("ok",):
+                raise RuntimeError(_broker_error_message(response))
+            process = _BrokeredWinPtyProcess(int(response[1]), broker, parent_status)
+            return WindowsPtyProcessHandle(
+                process=process,
+                process_tree="job_object",
+                native_pty=None,
+                job=job,
+                broker=broker,
+                broker_control=parent_control,
+                broker_output=parent_output,
+            )
+        except BaseException:
+            try:
+                job.terminate()
+                job.wait_empty(1.0)
+            finally:
+                if broker.is_alive():
+                    broker.terminate()
+                    broker.join(timeout=2.0)
+                job.close()
+                for connection in (
+                    parent_control,
+                    parent_output,
+                    parent_status,
+                    child_control,
+                    child_output,
+                    child_status,
+                ):
+                    connection.close()
+            raise
+
+    async def _start_test_double(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
         try:
             from winpty import PtyProcess
         except ImportError as err:
@@ -508,7 +765,7 @@ class WindowsPtyBackend(ExecutionBackend):
             process_count=spec.resources.process_count,
         )
         try:
-            native = await asyncio.to_thread(
+            spawn_future = _submit_conpty_start(
                 PtyProcess.spawn,
                 spec.argv_list,
                 cwd=spec.cwd,
@@ -517,6 +774,36 @@ class WindowsPtyBackend(ExecutionBackend):
             )
         except BaseException:
             job.close()
+            raise
+        abandoned = threading.Event()
+        cleanup_lock = threading.Lock()
+        cleaned = False
+
+        def cleanup_abandoned_spawn(completed: Future[Any]) -> None:
+            nonlocal cleaned
+            if not abandoned.is_set():
+                return
+            with cleanup_lock:
+                if cleaned:
+                    return
+                cleaned = True
+            try:
+                spawned = completed.result()
+            except BaseException:  # noqa: BLE001 - native worker boundary
+                job.close()
+                return
+            try:
+                spawned.close(force=True)
+            finally:
+                job.close()
+
+        spawn_future.add_done_callback(cleanup_abandoned_spawn)
+        try:
+            native = await asyncio.shield(asyncio.wrap_future(spawn_future))
+        except BaseException:
+            abandoned.set()
+            if not spawn_future.cancel() and spawn_future.done():
+                cleanup_abandoned_spawn(spawn_future)
             raise
         # pywinpty can leave its relay socket open after the child exits, so a
         # permanently blocking read cannot reliably observe terminal EOF.
@@ -549,28 +836,72 @@ class WindowsPtyBackend(ExecutionBackend):
 
     async def write(self, handle: ProcessHandle, data: bytes) -> None:
         pty_handle = _as_windows_pty(handle)
-        if pty_handle.stdin_closed:
+        if pty_handle.stdin_closed or pty_handle._closing:
             raise RuntimeError("stdin is closed")
-        await asyncio.to_thread(
-            pty_handle.native_pty.write,
-            _windows_terminal_input(data).decode("utf-8", errors="replace"),
-        )
+        future: Any
+        if pty_handle.broker is not None:
+            with pty_handle._write_lock:
+                pending = pty_handle._write_future
+                if pending is not None and not pending.done():
+                    raise RuntimeError("a previous ConPTY write is still pending")
+                future = asyncio.create_task(
+                    self._broker_request(
+                        pty_handle,
+                        "write",
+                        _windows_terminal_input(data).decode("utf-8", errors="replace"),
+                    )
+                )
+                pty_handle._write_future = future
+        else:
+            with pty_handle._write_lock:
+                pending = pty_handle._write_future
+                if pending is not None and not pending.done():
+                    raise RuntimeError("a previous ConPTY write is still pending")
+                future = _submit_conpty_write(
+                    pty_handle.native_pty.write,
+                    _windows_terminal_input(data).decode("utf-8", errors="replace"),
+                )
+                pty_handle._write_future = future
+
+        def clear_write(completed: Any) -> None:
+            with pty_handle._write_lock:
+                if pty_handle._write_future is completed:
+                    pty_handle._write_future = None
+            if isinstance(completed, asyncio.Future) and not completed.cancelled():
+                completed.exception()
+
+        future.add_done_callback(clear_write)
+        if isinstance(future, asyncio.Future):
+            await asyncio.shield(future)
+        else:
+            await asyncio.shield(asyncio.wrap_future(future))
 
     async def close_stdin(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
         if not pty_handle.stdin_closed:
+            if pty_handle._closing:
+                raise RuntimeError("ConPTY is closing")
+            if pty_handle.broker is not None:
+                await self._broker_request(pty_handle, "sendeof")
+            else:
+                await asyncio.to_thread(pty_handle.native_pty.sendeof)
             pty_handle.stdin_closed = True
-            await asyncio.to_thread(pty_handle.native_pty.sendeof)
 
     async def interrupt(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
         if pty_handle.process.returncode is None:
-            await asyncio.to_thread(pty_handle.native_pty.sendintr)
+            if pty_handle.broker is not None:
+                await self._broker_request(pty_handle, "sendintr")
+            else:
+                await asyncio.to_thread(pty_handle.native_pty.sendintr)
 
     async def terminate(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
         if pty_handle.process.returncode is None:
-            await asyncio.to_thread(pty_handle.native_pty.terminate, False)
+            if pty_handle.broker is not None:
+                await self._broker_request(pty_handle, "terminate", False)
+            else:
+                await asyncio.to_thread(pty_handle.native_pty.terminate, False)
 
     async def kill_tree(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
@@ -578,8 +909,10 @@ class WindowsPtyBackend(ExecutionBackend):
             if handle._tree_killed:
                 return
             if pty_handle.job is not None:
-                await asyncio.to_thread(pty_handle.job.terminate)
-                await asyncio.to_thread(pty_handle.job.wait_empty, 1000)
+                pty_handle.job.terminate()
+                emptied = await asyncio.to_thread(pty_handle.job.wait_empty, 1.0)
+                if not emptied:
+                    raise TimeoutError("Windows Job still contains active processes")
             elif pty_handle.process.returncode is None:
                 await asyncio.to_thread(pty_handle.native_pty.terminate, True)
             handle._tree_killed = True
@@ -588,6 +921,31 @@ class WindowsPtyBackend(ExecutionBackend):
         del size  # pywinpty 3.x returns all currently available characters.
         if handle.output_closed:
             return b""
+        if handle.broker is not None:
+            assert handle.broker_output is not None
+            while True:
+                try:
+                    available = handle.broker_output.poll()
+                    message = handle.broker_output.recv() if available else None
+                except (BrokenPipeError, EOFError, OSError):
+                    if (
+                        handle.process.returncode is not None
+                        or handle.broker.exitcode is not None
+                    ):
+                        return b""
+                    raise
+                if message is not None:
+                    if message[:1] == ("data",):
+                        return str(message[1]).encode("utf-8")
+                    if message[:1] == ("eof",):
+                        return b""
+                    raise RuntimeError(_broker_error_message(message))
+                # Child exit is intentionally not EOF: the relay can still
+                # have trailing terminal output to publish. Only an explicit
+                # EOF message or broker exit closes the output stream.
+                if handle.broker.exitcode is not None:
+                    return b""
+                await asyncio.sleep(0.01)
         while True:
             try:
                 text = await asyncio.to_thread(handle.native_pty.read)
@@ -607,22 +965,126 @@ class WindowsPtyBackend(ExecutionBackend):
     ) -> None:
         if cols <= 0 or rows <= 0:
             raise ValueError("terminal dimensions must be positive")
-        await asyncio.to_thread(handle.native_pty.setwinsize, rows, cols)
+        if handle.broker is not None:
+            await self._broker_request(handle, "setwinsize", rows, cols)
+        else:
+            await asyncio.to_thread(handle.native_pty.setwinsize, rows, cols)
 
     async def dispose(self, handle: ProcessHandle) -> None:
         pty_handle = _as_windows_pty(handle)
         if pty_handle._disposed:
             return
+        pty_handle._closing = True
         try:
             await self.kill_tree(handle)
         finally:
             pty_handle.output_closed = True
-            if pty_handle.native_pty.isalive():
+            pending = pty_handle._write_future
+            if pending is not None and not pending.done():
+                try:
+                    if isinstance(pending, asyncio.Future):
+                        await asyncio.wait_for(asyncio.shield(pending), 2.0)
+                    else:
+                        await asyncio.wait_for(
+                            asyncio.shield(asyncio.wrap_future(pending)), 2.0
+                        )
+                except (asyncio.TimeoutError, OSError, RuntimeError):
+                    pass
+            if pty_handle.broker is not None:
+                for connection in (
+                    pty_handle.broker_control,
+                    pty_handle.broker_output,
+                    getattr(pty_handle.process, "_status", None),
+                ):
+                    if connection is not None:
+                        connection.close()
+                await asyncio.to_thread(pty_handle.broker.join, 2.0)
+            elif pty_handle.native_pty.isalive():
                 await asyncio.to_thread(pty_handle.native_pty.close, True)
             if pty_handle.job is not None:
                 pty_handle.job.close()
                 pty_handle.job = None
         pty_handle._disposed = True
+
+    async def _broker_request(
+        self, handle: WindowsPtyProcessHandle, operation: str, *args: Any
+    ) -> Any:
+        if handle.broker_control is None or handle.broker is None:
+            raise RuntimeError("ConPTY broker is unavailable")
+        if handle._control_failed:
+            raise RuntimeError("ConPTY broker control channel requires disposal")
+        async with handle._control_lock:
+            try:
+                handle.broker_control.send((operation, args))
+                response = await _receive_broker_message(
+                    handle.broker_control, handle.broker
+                )
+            except (BrokenPipeError, EOFError, OSError):
+                # The monitor can dispose the broker after observing child
+                # exit while cancellation is between escalation steps. A
+                # closed channel is success only for idempotent termination.
+                if operation in {"sendintr", "terminate", "close"} and (
+                    handle.process.returncode is not None or handle._tree_killed
+                ):
+                    return None
+                handle._control_failed = True
+                raise
+            except BaseException:
+                handle._control_failed = True
+                raise
+            if response[:1] != ("ok",):
+                raise RuntimeError(_broker_error_message(response))
+            return response[1] if len(response) > 1 else None
+
+
+def _submit_daemon_native_call(
+    operation: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Future[Any]:
+    """Run a non-Windows test double without interpreter-owned executors."""
+
+    future: Future[Any] = Future()
+
+    def invoke() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            future.set_result(operation(*args, **kwargs))
+        except BaseException as err:  # noqa: BLE001 - native worker boundary
+            future.set_exception(err)
+
+    threading.Thread(target=invoke, name="sharkrail-conpty-test", daemon=True).start()
+    return future
+
+
+def _submit_conpty_start(
+    operation: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Future[Any]:
+    return _submit_daemon_native_call(operation, *args, **kwargs)
+
+
+def _submit_conpty_write(
+    operation: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Future[Any]:
+    return _submit_daemon_native_call(operation, *args, **kwargs)
+
+
+async def _receive_broker_message(connection: Any, broker: Any) -> tuple[Any, ...]:
+    while not connection.poll():
+        if broker.exitcode is not None:
+            raise RuntimeError(
+                f"ConPTY broker exited before replying (exit code {broker.exitcode})"
+            )
+        await asyncio.sleep(0.01)
+    message = connection.recv()
+    if not isinstance(message, tuple):
+        raise TypeError("invalid response from ConPTY broker")
+    return message
+
+
+def _broker_error_message(message: tuple[Any, ...]) -> str:
+    if len(message) >= 3 and message[0] == "error":
+        return f"ConPTY broker {message[1]}: {message[2]}"
+    return "invalid response from ConPTY broker"
 
 
 def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:

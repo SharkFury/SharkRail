@@ -393,7 +393,7 @@ class SessionManager:
         spec.validate()
         if self._policy is not None:
             try:
-                self._policy.enforce(
+                spec = self._policy.effective_spec(
                     spec,
                     timeout_ms=timeout_ms,
                     max_output_bytes=(
@@ -1002,7 +1002,7 @@ class SessionManager:
     def inspect(self, session_id: str) -> dict[str, object]:
         session = self.get(session_id)
         now = time.monotonic()
-        return {
+        result: dict[str, object] = {
             "session_id": session.id,
             "trace_id": session.trace_id,
             "request_id": session.request_id,
@@ -1028,6 +1028,9 @@ class SessionManager:
             "cancellation_steps": session.cancellation_steps,
             "idle_timeout_ms": session.idle_timeout_ms,
         }
+        if session.handle.process_tree == "process_group":
+            result["pgid"] = session.handle.pid
+        return result
 
     async def _monitor(self, session: Session) -> None:
         readers: list[asyncio.Task[None]] = []
@@ -1072,6 +1075,15 @@ class SessionManager:
         if timeout_reason is not None:
             try:
                 session.completion_reason = timeout_reason
+                if CancellationStep.KILL_TREE.value not in session.cancellation_steps:
+                    session.cancellation_steps = (
+                        *session.cancellation_steps,
+                        CancellationStep.KILL_TREE.value,
+                    )
+                    await session.emit(
+                        LifecycleEventType.CANCELLATION_STEP,
+                        {"step": CancellationStep.KILL_TREE.value},
+                    )
                 await asyncio.wait_for(
                     session.backend.kill_tree(session.handle),
                     self._termination_timeout_ms / 1000,
@@ -1111,6 +1123,18 @@ class SessionManager:
                         LifecycleEventType.RESOURCE_LIMIT_HIT,
                         {"resource": "drain_time", "limit_ms": self._drain_timeout_ms},
                     )
+                    if (
+                        CancellationStep.KILL_TREE.value
+                        not in session.cancellation_steps
+                    ):
+                        session.cancellation_steps = (
+                            *session.cancellation_steps,
+                            CancellationStep.KILL_TREE.value,
+                        )
+                        await session.emit(
+                            LifecycleEventType.CANCELLATION_STEP,
+                            {"step": CancellationStep.KILL_TREE.value},
+                        )
                     await asyncio.wait_for(
                         session.backend.kill_tree(session.handle),
                         self._termination_timeout_ms / 1000,

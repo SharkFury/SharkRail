@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from sharkrail.core.models import CommandMode, CommandSpec
+from sharkrail.runtime import backends as backend_module
 from sharkrail.runtime.backends import PtyBackend, read_pty_output
 from sharkrail.runtime.executor import CommandRunner
 
@@ -54,6 +55,85 @@ def test_pty_backend_writes_and_resizes_terminal():
         await backend.dispose(handle)
 
         assert b"hello 100 40" in output
+
+    asyncio.run(_run())
+
+
+def test_pty_close_stdin_delivers_unterminated_input_then_eof():
+    async def _run() -> None:
+        backend = PtyBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import sys; print(repr(sys.stdin.read()))"),
+                mode=CommandMode.PTY,
+            )
+        )
+        output_task = asyncio.create_task(read_pty_output(backend, handle))
+        await backend.write(handle, b"unterminated")
+        await backend.close_stdin(handle)
+        await asyncio.wait_for(handle.process.wait(), timeout=2)
+        output = await output_task
+        await backend.dispose(handle)
+
+        assert b"unterminated" in output
+
+    asyncio.run(_run())
+
+
+def test_pty_close_stdin_fails_closed_in_raw_mode():
+    async def _run() -> None:
+        backend = PtyBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=(
+                    "-c",
+                    "import time,tty; tty.setraw(0); print('ready', flush=True); time.sleep(30)",
+                ),
+                mode=CommandMode.PTY,
+            )
+        )
+        try:
+            assert b"ready" in await asyncio.wait_for(backend.read(handle), timeout=1)
+            with pytest.raises(RuntimeError, match="non-canonical mode"):
+                await backend.close_stdin(handle)
+            assert handle.stdin_closed is False
+        finally:
+            await backend.kill_tree(handle)
+            await asyncio.wait_for(handle.process.wait(), timeout=2)
+            await backend.dispose(handle)
+
+    asyncio.run(_run())
+
+
+def test_pty_close_stdin_rejects_disabled_veof():
+    async def _run() -> None:
+        backend = PtyBackend()
+        handle = await backend.start(
+            CommandSpec(
+                executable=sys.executable,
+                argv=("-c", "import time; time.sleep(30)"),
+                mode=CommandMode.PTY,
+            )
+        )
+        try:
+            value = backend_module.termios.tcgetattr(handle.master_fd)[6][
+                backend_module.termios.VEOF
+            ]
+            disabled = (
+                value if isinstance(value, int) else int.from_bytes(value, "little")
+            )
+            with (
+                patch("sharkrail.runtime.backends.os.fpathconf", return_value=disabled),
+                pytest.raises(RuntimeError, match="EOF is disabled"),
+            ):
+                await backend.close_stdin(handle)
+            assert handle.stdin_closed is False
+        finally:
+            await backend.kill_tree(handle)
+            await asyncio.wait_for(handle.process.wait(), timeout=2)
+            await backend.dispose(handle)
 
     asyncio.run(_run())
 

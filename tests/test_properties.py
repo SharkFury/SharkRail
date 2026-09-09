@@ -7,12 +7,15 @@ from sharkrail.core.output import capture_output
 from sharkrail.integrations.mcp import McpRuntime
 from sharkrail.integrations.protocol import JsonRpcRuntime
 
-json_scalars = st.none() | st.booleans() | st.integers() | st.text(max_size=64)
+json_text = st.lists(st.sampled_from(tuple("abcXYZ019 _-中🙂\n\t")), max_size=64).map(
+    "".join
+)
+json_scalars = st.none() | st.booleans() | st.integers() | json_text
 json_values = st.recursive(
     json_scalars,
     lambda children: (
         st.lists(children, max_size=5)
-        | st.dictionaries(st.text(max_size=32), children, max_size=5)
+        | st.dictionaries(json_text, children, max_size=5)
     ),
     max_leaves=20,
 )

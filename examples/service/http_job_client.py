@@ -10,12 +10,20 @@ import time
 import urllib.request
 from pathlib import Path
 
+from sharkrail.runtime.policy import ExecutionPolicy
 from sharkrail.service.config import ServiceConfig
 from sharkrail.service.http import JobHTTPServer
 from sharkrail.service.server import JobService
 
 with tempfile.TemporaryDirectory(prefix="sharkrail-http-example-") as directory:
-    service = JobService(ServiceConfig(), state_dir=Path(directory))
+    policy = ExecutionPolicy(
+        allowed_executables=frozenset({sys.executable}),
+        allow_parent_environment=False,
+        require_timeout=True,
+    )
+    service = JobService(
+        ServiceConfig(), state_dir=Path(directory), execution_policy=policy
+    )
     server = JobHTTPServer(("127.0.0.1", 0), service)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     service.start()

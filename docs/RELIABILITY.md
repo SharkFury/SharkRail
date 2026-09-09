@@ -46,10 +46,11 @@ Windows Job Objects and POSIX process groups cover ordinary descendants.
 Processes with sufficient privileges can deliberately escape these mechanisms.
 Windows pipe processes are created suspended, assigned to their Job Object, and
 only then resumed. Assignment or resume failure is fail-closed, so user code
-does not run under the weaker `taskkill` fallback. ConPTY creation is owned by
-`pywinpty`, which does not expose a suspended-create hook; its process is
-assigned immediately after spawn and this limitation is reported in the
-security model.
+does not run under the weaker `taskkill` fallback. Each ConPTY is owned by a
+dedicated broker process. The broker is placed in its kill-on-close Job Object
+before it may invoke `pywinpty`, so a blocked native spawn, read, or write can be
+terminated without pinning an interpreter worker thread. Job accounting must
+report zero active processes before cleanup is considered complete.
 WSL cleanup is best effort until an in-distribution supervisor is available.
 Resource-limit behavior also follows OS semantics; for example, POSIX process
 limits may be account-wide and not every memory failure has a uniquely

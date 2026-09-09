@@ -109,7 +109,10 @@ The default cumulative input limit is 16 MiB per session.
 
 ### `session.close_stdin`
 
-Closes pipe stdin or sends terminal EOF.
+Pipe mode closes the input pipe. A POSIX PTY in canonical mode sends the
+terminal's configured VEOF twice so unterminated buffered input is submitted
+before EOF. POSIX raw/non-canonical terminals have no half-close EOF primitive;
+the method fails explicitly instead of injecting `0x04` as ordinary input.
 
 ### `session.resize`
 

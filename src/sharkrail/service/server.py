@@ -8,6 +8,7 @@ import hmac
 import http.client
 import json
 import logging
+import math
 import socket
 import ssl
 import threading
@@ -23,10 +24,12 @@ from uuid import uuid4
 from ..core.errors import SharkRailError
 from ..core.models import CommandMode, CommandSpec
 from ..runtime.executor import CompletionReason
+from ..runtime.policy import ExecutionPolicy
 from ..runtime.sessions import SessionManager
 from .config import (
     CallbackEndpoint,
     ServiceConfig,
+    load_service_execution_policy,
     state_directory,
     validate_callback_destination,
     validate_service_config,
@@ -42,28 +45,39 @@ LOGGER = logging.getLogger("sharkrail.runtime.service")
 class _ActiveRun:
     loop: asyncio.AbstractEventLoop
     manager: SessionManager
-    session_id: str
+    session_id: Optional[str]
     attempt_id: str
+    start_task: asyncio.Task[Any]
 
 
 class JobService:
     """Own the JobStore, reconcilers, execution pool, and callback dispatcher."""
 
     def __init__(
-        self, config: ServiceConfig, *, state_dir: Optional[Path] = None
+        self,
+        config: ServiceConfig,
+        *,
+        state_dir: Optional[Path] = None,
+        execution_policy: Optional[ExecutionPolicy] = None,
     ) -> None:
         config = validate_service_config(config, resolve_callbacks=False)
         self.config = config
+        self.execution_policy = execution_policy or load_service_execution_policy(
+            config
+        )
         self.worker_id = f"worker_{uuid4().hex}"
         resolved_state_dir = state_dir or state_directory()
+        store_limits = (
+            config.volatile_store
+            if config.durability == "volatile"
+            else config.durable_store
+        )
         self.store = SqliteJobStore(
             config.job_store.url,
-            max_jobs=config.volatile_store.max_jobs
-            if config.durability == "volatile"
-            else 2**31 - 1,
-            max_metadata_bytes=config.volatile_store.max_metadata_bytes,
-            max_event_records=config.volatile_store.max_event_records,
-            job_ttl_seconds=config.volatile_store.job_ttl_seconds,
+            max_jobs=store_limits.max_jobs,
+            max_metadata_bytes=store_limits.max_metadata_bytes,
+            max_event_records=store_limits.max_event_records,
+            job_ttl_seconds=store_limits.job_ttl_seconds,
             max_queued_jobs=config.admission.max_queued_jobs,
             max_queued_jobs_per_tenant=config.admission.max_queued_jobs_per_tenant,
             state_dir=resolved_state_dir,
@@ -79,6 +93,9 @@ class JobService:
             ),
         )
         self.store.set_output_cleaner(self.output.delete_job)
+        removed_outputs = self.output.reconcile(self.store.referenced_output_job_ids())
+        if removed_outputs:
+            LOGGER.warning("removed %d uncommitted output directories", removed_outputs)
         self._executor = ThreadPoolExecutor(
             max_workers=config.executor.workers,
             thread_name_prefix="sharkrail-executor",
@@ -119,8 +136,10 @@ class JobService:
         self._started = False
         self._closed = False
         self._last_controller_progress = time.monotonic()
+        self._last_controller_success: Optional[float] = None
         self._last_notification_progress = time.monotonic()
         self._last_lease_renew = 0.0
+        self._last_store_reconcile = 0.0
         self._controller_errors = 0
         self._notification_errors = 0
 
@@ -136,6 +155,11 @@ class JobService:
             LOGGER.warning(
                 "DEGRADED_VOLATILE_STORE: Job state and callbacks are lost on restart"
             )
+        # Successful recovery is the controller's initial complete state pass.
+        # Subsequent reconciliation failures age this timestamp until ready
+        # becomes false instead of briefly failing readiness during startup.
+        self._last_controller_success = time.monotonic()
+        self._last_controller_progress = self._last_controller_success
         self._started = True
         for thread in (*self._controllers, *self._notification_workers):
             thread.start()
@@ -155,9 +179,12 @@ class JobService:
             active = tuple(self._active.values())
         for run in active:
             try:
-                asyncio.run_coroutine_threadsafe(
-                    run.manager.cancel(run.session_id), run.loop
-                ).result(timeout=self.config.control.worker_drain_timeout_seconds)
+                if run.session_id is None:
+                    run.loop.call_soon_threadsafe(run.start_task.cancel)
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        run.manager.cancel(run.session_id), run.loop
+                    ).result(timeout=self.config.control.worker_drain_timeout_seconds)
             except Exception:
                 LOGGER.exception("failed to cancel session during service shutdown")
         for thread in (*self._controllers, *self._notification_workers):
@@ -173,6 +200,11 @@ class JobService:
         self, tenant_id: str, idempotency_key: str, payload: dict[str, Any]
     ) -> tuple[JobRecord, bool]:
         spec = JobSpec.from_dict(payload)
+        self.execution_policy.effective_spec(
+            self._command_spec(spec),
+            timeout_ms=_seconds_to_ms(spec.timeout_seconds),
+            max_output_bytes=spec.max_output_bytes,
+        )
         if spec.callback_endpoint_id:
             endpoint = self.config.callback_endpoints.get(spec.callback_endpoint_id)
             if endpoint is None or endpoint.tenant_id != tenant_id:
@@ -204,9 +236,12 @@ class JobService:
             active = self._active.get(job_id)
         if active is not None and requested.spec.desired_state == "cancelled":
             try:
-                asyncio.run_coroutine_threadsafe(
-                    active.manager.cancel(active.session_id), active.loop
-                ).result(timeout=5)
+                if active.session_id is None:
+                    active.loop.call_soon_threadsafe(active.start_task.cancel)
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        active.manager.cancel(active.session_id), active.loop
+                    ).result(timeout=5)
             except Exception:
                 LOGGER.exception("failed to signal cancellation for Job %s", job_id)
         return self.get(job_id, tenant_id)
@@ -217,6 +252,8 @@ class JobService:
             active = len(self._active)
             active_processes: list[dict[str, object]] = []
             for job_id, run in self._active.items():
+                if run.session_id is None:
+                    continue
                 try:
                     inspected = run.manager.inspect(run.session_id)
                 except SharkRailError:
@@ -225,6 +262,7 @@ class JobService:
                     {
                         "job_id": job_id,
                         "pid": inspected["pid"],
+                        "pgid": inspected.get("pgid"),
                         "process_tree": inspected["process_tree"],
                     }
                 )
@@ -240,6 +278,11 @@ class JobService:
             and oldest_notification_age
             > self.config.notifications.request_timeout_seconds + 5.0
         )
+        controller_stalled = (
+            self._last_controller_success is None
+            or now - self._last_controller_success
+            > self.config.control.worker_progress_timeout_seconds
+        )
         degraded = self.config.durability == "volatile"
         return {
             "live": not self._stop.is_set(),
@@ -249,6 +292,7 @@ class JobService:
                 and all(thread.is_alive() for thread in self._controllers)
                 and all(thread.is_alive() for thread in self._notification_workers)
                 and not notification_stalled
+                and not controller_stalled
             ),
             "degraded": degraded,
             "reason": "DEGRADED_VOLATILE_STORE" if degraded else None,
@@ -263,6 +307,7 @@ class JobService:
             ),
             "notification_inflight": notification_inflight,
             "notification_stalled": notification_stalled,
+            "controller_stalled": controller_stalled,
             "oldest_notification_age_seconds": (
                 round(oldest_notification_age, 3)
                 if oldest_notification_age is not None
@@ -276,7 +321,6 @@ class JobService:
     def _controller_loop(self) -> None:
         while not self._stop.wait(0.05):
             try:
-                self._last_controller_progress = time.monotonic()
                 with self._schedule_lock:
                     with self._active_lock:
                         capacity = self.config.executor.workers - len(self._inflight)
@@ -296,6 +340,24 @@ class JobService:
                 ):
                     self._renew_active_leases()
                     self._last_lease_renew = time.monotonic()
+                if (
+                    time.monotonic() - self._last_store_reconcile
+                    >= self.config.executor.heartbeat_seconds
+                ):
+                    with self._active_lock:
+                        inflight = tuple(self._inflight)
+                    recovered = self.store.recover_expired_leases(
+                        exclude_job_ids=inflight
+                    )
+                    if recovered:
+                        LOGGER.warning(
+                            "recovered %d Jobs with expired executor leases", recovered
+                        )
+                    self.store.prune_expired()
+                    self._last_store_reconcile = time.monotonic()
+                self._last_controller_success = time.monotonic()
+                self._last_controller_progress = self._last_controller_success
+                self._controller_errors = 0
             except Exception:
                 self._controller_errors += 1
                 LOGGER.exception("controller reconciliation failed")
@@ -325,8 +387,12 @@ class JobService:
         assert claimed.attempt_id is not None
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        manager = SessionManager(default_max_output_bytes=claimed.spec.max_output_bytes)
+        manager = SessionManager(
+            default_max_output_bytes=claimed.spec.max_output_bytes,
+            policy=self.execution_policy,
+        )
         registered = False
+        output_paths: tuple[str, str] | None = None
         try:
             if self._stop.is_set():
                 self.store.finish(
@@ -361,14 +427,8 @@ class JobService:
                     output_truncated=False,
                 )
                 return
-            spec = CommandSpec(
-                executable=claimed.spec.command[0],
-                argv=claimed.spec.command[1:],
-                cwd=claimed.spec.cwd,
-                env=claimed.spec.env,
-                mode=CommandMode.PIPE,
-            )
-            session = loop.run_until_complete(
+            spec = self._command_spec(claimed.spec)
+            start_task = loop.create_task(
                 manager.start(
                     spec,
                     timeout_ms=_seconds_to_ms(claimed.spec.timeout_seconds),
@@ -381,10 +441,18 @@ class JobService:
                 self._active[claimed.id] = _ActiveRun(
                     loop=loop,
                     manager=manager,
-                    session_id=session.id,
+                    session_id=None,
                     attempt_id=claimed.attempt_id,
+                    start_task=start_task,
                 )
                 registered = True
+            if self._stop.is_set():
+                start_task.cancel()
+            session = loop.run_until_complete(start_task)
+            with self._active_lock:
+                active = self._active.get(claimed.id)
+                if active is not None:
+                    active.session_id = session.id
                 current = self.store.get(claimed.id)
                 self.store.mark_running(claimed.id, claimed.attempt_id, self.worker_id)
                 cancel_requested = current.spec.desired_state == "cancelled"
@@ -393,10 +461,12 @@ class JobService:
             result = loop.run_until_complete(manager.wait(session.id))
             if result is None:
                 raise RuntimeError("session ended without a result")
-            stdout_path = self.output.write(claimed.id, "stdout", result.stdout_bytes)
-            stderr_path = self.output.write(claimed.id, "stderr", result.stderr_bytes)
+            output_paths = self.output.write_job(
+                claimed.id, result.stdout_bytes, result.stderr_bytes
+            )
+            stdout_path, stderr_path = output_paths
             phase = _phase_for_result(result.reason, result.exit_code)
-            self.store.finish(
+            self._finish_with_retries(
                 claimed.id,
                 claimed.attempt_id,
                 self.worker_id,
@@ -410,11 +480,39 @@ class JobService:
                 stderr_bytes=len(result.stderr_bytes),
                 output_truncated=result.output_truncated,
             )
+            output_paths = None
             loop.run_until_complete(manager.dispose(session.id))
+        except asyncio.CancelledError:
+            LOGGER.info(
+                "Job %s start was cancelled before session registration", claimed.id
+            )
+            self._discard_uncommitted_output(claimed.id, output_paths)
+            try:
+                current = self.store.get(claimed.id)
+                cancelled = current.spec.desired_state == "cancelled"
+                self._finish_with_retries(
+                    claimed.id,
+                    claimed.attempt_id,
+                    self.worker_id,
+                    phase=JobPhase.CANCELED if cancelled else JobPhase.EXECUTOR_LOST,
+                    exit_code=None,
+                    reason=(
+                        "cancelled" if cancelled else "service_shutdown_during_start"
+                    ),
+                    error=None,
+                    stdout_path=None,
+                    stderr_path=None,
+                    stdout_bytes=0,
+                    stderr_bytes=0,
+                    output_truncated=False,
+                )
+            except Exception:
+                LOGGER.exception("could not persist interrupted Job %s", claimed.id)
         except Exception as err:
             LOGGER.exception("Job %s failed in execution boundary", claimed.id)
+            self._discard_uncommitted_output(claimed.id, output_paths)
             try:
-                self.store.finish(
+                self._finish_with_retries(
                     claimed.id,
                     claimed.attempt_id,
                     self.worker_id,
@@ -428,7 +526,7 @@ class JobService:
                     stderr_bytes=0,
                     output_truncated=False,
                 )
-            except StoreError:
+            except Exception:
                 LOGGER.exception("could not persist Job failure for %s", claimed.id)
         finally:
             if registered:
@@ -439,6 +537,39 @@ class JobService:
             except Exception:
                 LOGGER.exception("session cleanup failed for Job %s", claimed.id)
             loop.close()
+
+    @staticmethod
+    def _command_spec(spec: JobSpec) -> CommandSpec:
+        return CommandSpec(
+            executable=spec.command[0],
+            argv=spec.command[1:],
+            cwd=spec.cwd,
+            env=spec.env,
+            mode=CommandMode.PIPE,
+            inherit_env=False,
+        )
+
+    def _finish_with_retries(self, *args: Any, **kwargs: Any) -> JobRecord:
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                return self.store.finish(*args, **kwargs)
+            except Exception as err:  # noqa: BLE001 - persistence retry boundary
+                last_error = err
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
+    def _discard_uncommitted_output(
+        self, job_id: str, output_paths: tuple[str, str] | None
+    ) -> None:
+        if output_paths is None:
+            return
+        try:
+            self.output.delete_job(job_id, *output_paths)
+        except OSError:
+            LOGGER.exception("could not remove uncommitted output for Job %s", job_id)
 
     def _notification_loop(self) -> None:
         while not self._stop.wait(0.1):
@@ -613,7 +744,9 @@ class JobService:
 
 
 def _seconds_to_ms(value: Optional[float]) -> Optional[int]:
-    return None if value is None else int(value * 1000)
+    if value is None:
+        return None
+    return max(1, math.ceil(value * 1000))
 
 
 def _phase_for_result(reason: CompletionReason, exit_code: int) -> JobPhase:

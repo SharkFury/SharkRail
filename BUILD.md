@@ -60,8 +60,9 @@ Formatting does not replace `ruff check`; run both before opening a pull request
 
 ```bash
 python -m pip install build twine
-python -m build
-python -m twine check dist/*
+python -c "import shutil; shutil.rmtree('dist/current', ignore_errors=True)"
+python -m build --outdir dist/current
+python -m twine check dist/current/*
 ```
 
 Then install the wheel into a fresh environment and test the installed artifact,
@@ -69,8 +70,16 @@ not the source tree:
 
 ```bash
 python -m venv .wheel-venv
-.wheel-venv/bin/python -m pip install dist/*.whl
+.wheel-venv/bin/python -m pip install dist/current/*.whl
 .wheel-venv/bin/python .github/scripts/wheel_smoke.py
+```
+
+PowerShell equivalent:
+
+```powershell
+py -m venv .wheel-venv
+.\.wheel-venv\Scripts\python.exe -m pip install (Get-ChildItem dist/current/*.whl).FullName
+.\.wheel-venv\Scripts\python.exe .github/scripts/wheel_smoke.py
 ```
 
 The build must produce one source distribution and one platform-independent
@@ -97,9 +106,10 @@ Windows with Python 3.9, 3.11, and 3.14. CI runs tests, reliability stress
 coverage, Ruff, dependency and compatibility checks, capability smoke tests,
 distribution builds, per-job deadlines, and a 70% coverage gate.
 
-Tagged releases retest all three operating systems, use PyPI trusted publishing,
-generate a CycloneDX SBOM, attest artifacts, and attach verified assets to a
-GitHub Release. See [docs/RELEASING.md](docs/RELEASING.md).
+Tagged releases retest all three operating systems, generate a CycloneDX SBOM,
+attest artifacts, and attach verified assets to a GitHub Release. PyPI
+publication is currently disabled. See
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Generated files
 

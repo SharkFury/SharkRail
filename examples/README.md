@@ -96,7 +96,7 @@ sharkrail mcp
 # Inspect configuration and start the asynchronous HTTP service.
 sharkrail config paths
 sharkrail config sample
-sharkrail server
+sharkrail server --policy examples/security/policy.json
 ```
 
 On Windows, replace `python` with the appropriate interpreter command when it

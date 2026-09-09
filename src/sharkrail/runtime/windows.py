@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import NoReturn
 
 
@@ -41,12 +42,22 @@ class WindowsJob:
         if not self._closed:
             _terminate_job(self._handle, exit_code)
 
-    def wait_empty(self, timeout_ms: int) -> bool:
-        """Wait until the Job has no active processes after termination."""
+    def active_processes(self) -> int:
+        """Return the authoritative number of processes still in this Job."""
 
         if self._closed:
-            return True
-        return _wait_for_job(self._handle, timeout_ms)
+            return 0
+        return _active_processes(self._handle)
+
+    def wait_empty(self, timeout: float) -> bool:
+        """Wait until Job accounting confirms that its process tree is empty."""
+
+        deadline = time.monotonic() + timeout
+        while self.active_processes() != 0:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
 
     def close(self) -> None:
         if self._closed:
@@ -77,6 +88,7 @@ if os.name == "nt":
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
     JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
     JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+    JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS = 1
     PROCESS_TERMINATE = 0x0001
     PROCESS_SET_QUOTA = 0x0100
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -118,6 +130,18 @@ if os.name == "nt":
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
+    class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("TotalUserTime", ctypes.c_longlong),
+            ("TotalKernelTime", ctypes.c_longlong),
+            ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+            ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+            ("TotalPageFaultCount", wintypes.DWORD),
+            ("TotalProcesses", wintypes.DWORD),
+            ("ActiveProcesses", wintypes.DWORD),
+            ("TotalTerminatedProcesses", wintypes.DWORD),
+        ]
+
     class THREADENTRY32(ctypes.Structure):
         _fields_ = [
             ("dwSize", wintypes.DWORD),
@@ -139,14 +163,20 @@ if os.name == "nt":
         wintypes.DWORD,
     )
     _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.QueryInformationJobObject.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    _kernel32.QueryInformationJobObject.restype = wintypes.BOOL
     _kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     _kernel32.OpenProcess.restype = wintypes.HANDLE
     _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     _kernel32.TerminateJobObject.restype = wintypes.BOOL
-    _kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
     _kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
@@ -254,13 +284,18 @@ def _terminate_job(job: int, exit_code: int) -> None:
         _raise_last_error("TerminateJobObject")
 
 
-def _wait_for_job(job: int, timeout_ms: int) -> bool:
-    result = _kernel32.WaitForSingleObject(job, timeout_ms)
-    if result == 0:
-        return True
-    if result == 258:
-        return False
-    _raise_last_error("WaitForSingleObject")
+def _active_processes(job: int) -> int:
+    information = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+    returned = wintypes.DWORD()
+    if not _kernel32.QueryInformationJobObject(
+        job,
+        JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+        ctypes.byref(returned),
+    ):
+        _raise_last_error("QueryInformationJobObject")
+    return int(information.ActiveProcesses)
 
 
 def _close_handle(handle: int) -> None:

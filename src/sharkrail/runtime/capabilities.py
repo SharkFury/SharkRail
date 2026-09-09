@@ -50,10 +50,6 @@ def collect() -> Capability:
         degraded: list[str] = []
         if pty_available:
             features.extend(("pty", "resize"))
-            degraded.append(
-                "ConPTY Job assignment occurs immediately after pywinpty spawn; "
-                "suspended-create isolation is available only in pipe mode"
-            )
         else:
             degraded.append("pywinpty is unavailable; ConPTY is disabled")
         if not wsl_available:

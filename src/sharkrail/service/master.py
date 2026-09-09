@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..observability.telemetry import configure_logging
+from ..runtime.policy import ExecutionPolicy
 from .config import ServiceConfig, load_config
 from .http import serve_http
 from .server import JobService
@@ -23,6 +24,7 @@ def run_worker(
     config_path: Optional[str],
     parent_pid: Optional[int] = None,
     heartbeat: Optional[Connection] = None,
+    execution_policy: Optional[ExecutionPolicy] = None,
 ) -> None:
     config = (
         load_config(Path(config_path), require_explicit=True)
@@ -30,7 +32,7 @@ def run_worker(
         else load_config()
     )
     configure_logging(config.logging.level)
-    service = JobService(config)
+    service = JobService(config, execution_policy=execution_policy)
     if parent_pid is not None:
         _start_parent_watch(parent_pid)
     if heartbeat is not None:
@@ -55,19 +57,28 @@ class ControlMaster:
         config_path: Optional[Path],
         *,
         worker_target: Callable[
-            [Optional[str], Optional[int], Optional[Connection]], None
+            [
+                Optional[str],
+                Optional[int],
+                Optional[Connection],
+                Optional[ExecutionPolicy],
+            ],
+            None,
         ] = run_worker,
+        execution_policy: Optional[ExecutionPolicy] = None,
     ) -> None:
         self.config = config
         self.config_path = config_path
         self._worker_target = worker_target
+        self._execution_policy = execution_policy
         self._stop = threading.Event()
         self._worker: Optional[BaseProcess] = None
 
     def stop(self, *_args: object) -> None:
+        # The run loop owns the single drain deadline. Signal handlers only
+        # request shutdown so they cannot accidentally start a second, shorter
+        # termination sequence.
         self._stop.set()
-        if self._worker is not None and self._worker.is_alive():
-            self._worker.terminate()
 
     def run(self) -> int:
         previous_handlers = {
@@ -87,6 +98,7 @@ class ControlMaster:
                         str(self.config_path) if self.config_path else None,
                         os.getpid(),
                         heartbeat_writer,
+                        self._execution_policy,
                     ),
                     name="sharkrail-control-worker",
                 )
@@ -95,7 +107,10 @@ class ControlMaster:
                 heartbeat_writer.close()
                 last_progress = time.monotonic()
                 active_processes: list[dict[str, object]] = []
-                while worker.is_alive() and not self._stop.wait(0.2):
+                worker_stalled = False
+                while worker.is_alive():
+                    if self._stop.wait(0.2):
+                        break
                     try:
                         while heartbeat_reader.poll():
                             _, health = heartbeat_reader.recv()
@@ -121,17 +136,18 @@ class ControlMaster:
                         time.monotonic() - last_progress
                         > self.config.control.worker_progress_timeout_seconds
                     ):
-                        worker.terminate()
+                        worker_stalled = True
                         break
                 heartbeat_reader.close()
-                worker.join(timeout=1)
-                if worker.is_alive():
-                    worker.kill()
-                    worker.join(timeout=2)
-                if not self._stop.is_set() and worker.exitcode not in {0, None}:
-                    _cleanup_orphan_processes(active_processes)
-                if self._stop.is_set():
+                if self._stop.is_set() or worker_stalled or worker.is_alive():
                     self._terminate_worker()
+                else:
+                    worker.join()
+                # A root can exit before descendants that still hold inherited
+                # descriptors. Every worker-exit path therefore performs the
+                # same final ownership sweep, including graceful master stop.
+                _cleanup_orphan_processes(active_processes)
+                if self._stop.is_set():
                     return 0
                 now = time.monotonic()
                 window = self.config.control.worker_restart_window_seconds
@@ -202,8 +218,16 @@ def _cleanup_orphan_processes(processes: list[dict[str, object]]) -> None:
                     timeout=5,
                 )
             else:
-                if mechanism != "process_group" or os.getpgid(pid) != pid:
+                pgid = process.get("pgid")
+                if (
+                    mechanism != "process_group"
+                    or not isinstance(pgid, int)
+                    or pgid <= 0
+                ):
                     continue
-                os.killpg(pid, signal.SIGKILL)
+                # Process-group IDs remain valid after their original leader
+                # exits. Checking getpgid(leader_pid) here would skip exactly
+                # the descendant-only orphan tree this sweep must remove.
+                os.killpg(pgid, signal.SIGKILL)
         except (OSError, subprocess.SubprocessError):
             pass

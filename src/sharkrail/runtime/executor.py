@@ -118,7 +118,7 @@ class CommandRunner:
         spec.validate()
         if self._dry_run and self._policy is not None:
             try:
-                self._policy.enforce(
+                self._policy.effective_spec(
                     spec,
                     timeout_ms=timeout_ms,
                     max_output_bytes=self._max_output_bytes,

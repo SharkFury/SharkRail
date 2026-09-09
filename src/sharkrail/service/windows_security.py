@@ -3,14 +3,171 @@
 from __future__ import annotations
 
 import os
+import secrets
+import stat
+import tempfile
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
+
+_UNSAFE_SHARED_DIRECTORIES = {
+    Path("/"),
+    Path("/tmp"),
+    Path("/var/tmp"),
+    Path("/dev/shm"),
+}
+
+
+def ensure_private_directory(path: Path) -> bool:
+    """Create a service-owned directory, or validate an existing one.
+
+    Existing directories are never chmod'ed on POSIX.  This is important for
+    configured storage URLs: a typo such as ``file:///`` must not mutate a
+    shared or system directory.
+    """
+
+    path = Path(os.path.abspath(path))
+    if os.name != "nt" and _is_unsafe_shared_directory(path):
+        raise PermissionError(f"refusing to use shared system directory: {path}")
+    if os.path.lexists(path):
+        _validate_posix_private_path(path, directory=True)
+        if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+            if path.is_symlink() or not path.is_dir():
+                raise PermissionError(f"private path is not a real directory: {path}")
+            validate_private_path(path)
+        return False
+    missing: list[Path] = []
+    candidate = path
+    while not os.path.lexists(candidate):
+        missing.append(candidate)
+        if candidate.parent == candidate:
+            break
+        candidate = candidate.parent
+    for candidate in reversed(missing):
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            _validate_posix_private_path(candidate, directory=True)
+            if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+                if candidate.is_symlink() or not candidate.is_dir():
+                    raise PermissionError(
+                        f"private path is not a real directory: {candidate}"
+                    )
+                validate_private_path(candidate)
+        else:
+            secure_private_path(candidate, directory=True)
+    return True
+
+
+def open_private_file(path: Path, flags: int = os.O_RDWR) -> int:
+    """Open/create one private regular file without following its final name."""
+
+    path = Path(path)
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        created = not path.exists()
+        descriptor = os.open(path, flags | os.O_CREAT, 0o600)
+        try:
+            if created:
+                secure_private_path(path, directory=False)
+            else:
+                validate_private_path(path)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(path.parent, directory_flags)
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(
+                path.name,
+                flags | os.O_CREAT | os.O_EXCL | nofollow,
+                0o600,
+                dir_fd=directory,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(
+                path.name,
+                flags | nofollow | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory,
+            )
+            created = False
+        try:
+            if os.name != "nt":
+                if created:
+                    os.fchmod(descriptor, 0o600)
+                _validate_private_file_descriptor(descriptor, path)
+            elif created:  # pragma: no cover - exercised by Windows CI
+                secure_private_path(path, directory=False)
+            else:  # pragma: no cover - exercised by Windows CI
+                validate_private_path(path)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+    finally:
+        os.close(directory)
+
+
+def create_private_temp_file(directory: Path, prefix: str) -> tuple[int, str]:
+    """Create a private temporary file through a verified directory handle."""
+
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        for _ in range(128):
+            name = f"{prefix}{secrets.token_hex(8)}"
+            path = directory / name
+            try:
+                descriptor = os.open(path, flags, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                secure_private_path(path, directory=False)
+            except BaseException:
+                os.close(descriptor)
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                raise
+            return descriptor, name
+        raise FileExistsError("could not allocate a unique private temporary file")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(directory, directory_flags)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        for _ in range(128):
+            name = f"{prefix}{secrets.token_hex(8)}"
+            try:
+                descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+            except FileExistsError:
+                continue
+            if os.name != "nt":
+                os.fchmod(descriptor, 0o600)
+            return descriptor, name
+    finally:
+        os.close(directory_fd)
+    raise FileExistsError("could not allocate a unique private temporary file")
 
 
 def secure_private_path(path: Path, *, directory: bool | None = None) -> None:
-    """Restrict a Windows path to the service identity, SYSTEM, and admins."""
+    """Restrict a sensitive path to the service identity on every platform."""
 
     if os.name != "nt":
+        is_directory = path.is_dir() if directory is None else directory
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        if is_directory:
+            flags |= getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(path, flags)
+        try:
+            os.fchmod(descriptor, 0o700 if is_directory else 0o600)
+        finally:
+            os.close(descriptor)
         return
     is_directory = path.is_dir() if directory is None else directory
     _set_private_windows_acl(path, directory=is_directory)
@@ -20,8 +177,52 @@ def validate_private_path(path: Path) -> None:
     """Reject a Windows path whose owner or allow ACEs cross the trust boundary."""
 
     if os.name != "nt":
+        _validate_posix_private_path(path, directory=None)
         return
     _validate_private_windows_acl(path)
+
+
+def _is_unsafe_shared_directory(path: Path) -> bool:
+    candidates = set(_UNSAFE_SHARED_DIRECTORIES)
+    candidates.add(Path(os.path.abspath(tempfile.gettempdir())))
+    for candidate in tuple(candidates):
+        try:
+            candidates.add(candidate.resolve())
+        except OSError:
+            continue
+    return path in candidates
+
+
+def _validate_posix_private_path(path: Path, *, directory: Optional[bool]) -> None:
+    if os.name == "nt":
+        return
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        raise
+    except OSError as err:
+        raise PermissionError(f"cannot inspect private path {path}: {err}") from err
+    if stat.S_ISLNK(metadata.st_mode):
+        raise PermissionError(f"private path must not be a symbolic link: {path}")
+    if directory is True and not stat.S_ISDIR(metadata.st_mode):
+        raise PermissionError(f"private path is not a directory: {path}")
+    if directory is False and not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError(f"private path is not a regular file: {path}")
+    if metadata.st_uid != os.geteuid():
+        raise PermissionError(f"private path is not owned by the service user: {path}")
+    forbidden = 0o022 if directory is not False else 0o077
+    if stat.S_IMODE(metadata.st_mode) & forbidden:
+        raise PermissionError(f"private path permissions are too broad: {path}")
+
+
+def _validate_private_file_descriptor(descriptor: int, path: Path) -> None:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError(f"private path is not a regular file: {path}")
+    if metadata.st_uid != os.geteuid():
+        raise PermissionError(f"private path is not owned by the service user: {path}")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise PermissionError(f"private path permissions are too broad: {path}")
 
 
 if os.name == "nt":  # pragma: no cover - exercised by the Windows CI matrix

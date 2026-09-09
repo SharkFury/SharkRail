@@ -42,6 +42,24 @@ def test_policy_allows_named_executable_and_bounded_request(tmp_path: Path):
     )
 
 
+def test_policy_materializes_omitted_resource_ceilings():
+    policy = ExecutionPolicy(
+        max_memory_bytes=4096,
+        max_cpu_time_seconds=2,
+        max_process_count=3,
+    )
+
+    effective = policy.effective_spec(
+        CommandSpec("python", ()), timeout_ms=1000, max_output_bytes=1024
+    )
+
+    assert effective.resources == ResourceLimits(
+        memory_bytes=4096,
+        cpu_time_seconds=2,
+        process_count=3,
+    )
+
+
 @pytest.mark.parametrize(
     ("policy", "spec", "timeout_ms", "output_bytes", "rule"),
     [
@@ -153,23 +171,16 @@ def test_wsl_policy_denylist_checks_launcher_and_linux_executable(denied: str):
     assert raised.value.rule == "denied_executables"
 
 
-def test_wsl_policy_checks_linux_working_directory_lexically():
+def test_wsl_policy_fails_closed_for_physical_working_directory_boundary():
     policy = ExecutionPolicy(allowed_cwd_roots=(Path("/workspace"),))
     allowed = direct_command(
         "python3",
         target=Target.WSL,
         wsl=WslOptions(cwd="/workspace/project"),
     )
-    escaped = direct_command(
-        "python3",
-        target=Target.WSL,
-        wsl=WslOptions(cwd="/workspace/project/../../outside"),
-    )
-
-    policy.enforce(allowed, timeout_ms=1, max_output_bytes=1)
     with pytest.raises(PolicyViolation) as raised:
-        policy.enforce(escaped, timeout_ms=1, max_output_bytes=1)
-    assert raised.value.rule == "allowed_cwd_roots"
+        policy.enforce(allowed, timeout_ms=1, max_output_bytes=1)
+    assert raised.value.rule == "wsl_cwd_physical_resolution"
 
 
 @pytest.mark.parametrize("cwd", [None, "workspace/project", "~"])
@@ -179,7 +190,7 @@ def test_wsl_policy_rejects_unverifiable_working_directory(cwd):
 
     with pytest.raises(PolicyViolation) as raised:
         policy.enforce(spec, timeout_ms=1, max_output_bytes=1)
-    assert raised.value.rule == "allowed_cwd_roots"
+    assert raised.value.rule == "wsl_cwd_physical_resolution"
 
 
 @pytest.mark.parametrize(

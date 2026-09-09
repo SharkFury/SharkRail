@@ -16,7 +16,11 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from .models import JobPhase, JobRecord, JobSpec, OutboxRecord, utc_now
-from .windows_security import secure_private_path
+from .windows_security import (
+    ensure_private_directory,
+    open_private_file,
+    validate_private_path,
+)
 
 
 class StoreError(RuntimeError):
@@ -74,8 +78,7 @@ class SqliteJobStore:
         self._instance_lock: Optional[_InstanceLock] = None
         if location != ":memory:":
             self._database_path = Path(location)
-            self._database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            secure_private_path(self._database_path.parent, directory=True)
+            ensure_private_directory(self._database_path.parent)
             self._instance_lock = _InstanceLock(Path(location + ".lock"))
             self._instance_lock.acquire()
         try:
@@ -123,6 +126,16 @@ class SqliteJobStore:
         self, cleaner: Callable[[str, Optional[str], Optional[str]], None]
     ) -> None:
         self._output_cleaner = cleaner
+
+    def referenced_output_job_ids(self) -> set[str]:
+        """Return Jobs whose published output is committed in the database."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id FROM jobs WHERE stdout_path IS NOT NULL "
+                "OR stderr_path IS NOT NULL"
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
 
     def _configure(self) -> None:
         with self._lock:
@@ -600,6 +613,53 @@ class SqliteJobStore:
                 self._insert_outbox(updated)
             return len(rows)
 
+    def recover_expired_leases(self, *, exclude_job_ids: tuple[str, ...] = ()) -> int:
+        """Finalize attempts whose executor stopped renewing its lease."""
+
+        excluded = set(exclude_job_ids)
+        recovered = 0
+        with self._transaction():
+            rows = self._connection.execute(
+                "SELECT * FROM jobs WHERE phase IN (?, ?) "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
+                (JobPhase.ASSIGNED.value, JobPhase.RUNNING.value, time.time()),
+            ).fetchall()
+            for row in rows:
+                if str(row["id"]) in excluded:
+                    continue
+                revision = int(row["revision"]) + 1
+                now = utc_now()
+                spec_data = json.loads(row["spec_json"])
+                cancelled = spec_data.get("desired_state") == "cancelled"
+                phase = JobPhase.CANCELED if cancelled else JobPhase.EXECUTOR_LOST
+                reason = "cancelled" if cancelled else "executor_lease_expired"
+                updated = self._connection.execute(
+                    "UPDATE jobs SET phase = ?, observed_generation = generation, "
+                    "revision = ?, completed_at = ?, updated_at = ?, reason = ?, "
+                    "lease_expires_at = NULL WHERE id = ? AND revision = ? "
+                    "AND lease_expires_at <= ?",
+                    (
+                        phase.value,
+                        revision,
+                        now,
+                        now,
+                        reason,
+                        row["id"],
+                        row["revision"],
+                        time.time(),
+                    ),
+                )
+                if updated.rowcount != 1:
+                    continue
+                recovered += 1
+                self._event(str(row["id"]), revision, f"job.{phase.value}")
+                terminal = self._connection.execute(
+                    "SELECT * FROM jobs WHERE id = ?", (row["id"],)
+                ).fetchone()
+                assert terminal is not None
+                self._insert_outbox(terminal)
+        return recovered
+
     def outbox_due(self, limit: int = 100) -> tuple[OutboxRecord, ...]:
         with self._lock:
             rows = self._connection.execute(
@@ -767,16 +827,13 @@ class SqliteJobStore:
             "VALUES (?, ?, ?, ?)",
             (job_id, revision, kind, utc_now()),
         )
-        if self.volatile:
-            self._connection.execute(
-                "DELETE FROM resource_events WHERE seq IN "
-                "(SELECT seq FROM resource_events ORDER BY seq DESC LIMIT -1 OFFSET ?)",
-                (self._max_event_records,),
-            )
+        self._connection.execute(
+            "DELETE FROM resource_events WHERE seq IN "
+            "(SELECT seq FROM resource_events ORDER BY seq DESC LIMIT -1 OFFSET ?)",
+            (self._max_event_records,),
+        )
 
     def prune_expired(self) -> int:
-        if not self.volatile:
-            return 0
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=self._job_ttl_seconds)
         ).isoformat()
@@ -785,7 +842,10 @@ class SqliteJobStore:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT id, stdout_path, stderr_path FROM jobs "
-                f"WHERE phase IN ({placeholders}) AND completed_at < ?",
+                f"WHERE phase IN ({placeholders}) AND completed_at < ? "
+                "AND NOT EXISTS (SELECT 1 FROM callback_outbox "
+                "WHERE callback_outbox.job_id = jobs.id "
+                "AND callback_outbox.state IN ('pending', 'delivering'))",
                 (*terminal, cutoff),
             ).fetchall()
         cleaned_ids: list[str] = []
@@ -806,7 +866,9 @@ class SqliteJobStore:
             for job_id in cleaned_ids:
                 result = self._connection.execute(
                     f"DELETE FROM jobs WHERE id = ? AND phase IN ({placeholders}) "
-                    "AND completed_at < ?",
+                    "AND completed_at < ? AND NOT EXISTS (SELECT 1 "
+                    "FROM callback_outbox WHERE callback_outbox.job_id = jobs.id "
+                    "AND callback_outbox.state IN ('pending', 'delivering'))",
                     (job_id, *terminal, cutoff),
                 )
                 deleted += result.rowcount
@@ -887,21 +949,14 @@ def _sqlite_location(url: str, *, state_dir: Optional[Path]) -> str:
 
 
 def _secure_file(path: Path) -> None:
-    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        if os.name != "nt":
-            os.fchmod(descriptor, 0o600)
-    finally:
-        os.close(descriptor)
-    secure_private_path(path, directory=False)
+    descriptor = open_private_file(path)
+    os.close(descriptor)
 
 
 def _secure_sqlite_files(database: Path) -> None:
     for path in (database, Path(f"{database}-wal"), Path(f"{database}-shm")):
         try:
-            if os.name != "nt":
-                path.chmod(0o600)
-            secure_private_path(path, directory=False)
+            validate_private_path(path)
         except FileNotFoundError:
             pass
 
@@ -912,11 +967,8 @@ class _InstanceLock:
         self._descriptor: Optional[int] = None
 
     def acquire(self) -> None:
-        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        descriptor = open_private_file(self.path)
         try:
-            if os.name != "nt":
-                os.fchmod(descriptor, 0o600)
-            secure_private_path(self.path, directory=False)
             if os.name == "nt":  # pragma: no cover - exercised on Windows CI
                 import msvcrt
 

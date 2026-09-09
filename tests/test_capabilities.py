@@ -47,7 +47,7 @@ def test_windows_capabilities_report_missing_optional_runtimes():
     assert capability.verification["pty"] == "unavailable"
 
 
-def test_windows_capabilities_disclose_conpty_assignment_window():
+def test_windows_capabilities_report_brokered_conpty_without_assignment_gap():
     with ExitStack() as stack:
         stack.enter_context(
             patch(
@@ -66,4 +66,6 @@ def test_windows_capabilities_disclose_conpty_assignment_window():
         capability = collect()
 
     assert capability.modes == ("pipe", "pty")
-    assert any("suspended-create" in reason for reason in capability.degraded_reasons)
+    assert not any(
+        "suspended-create" in reason for reason in capability.degraded_reasons
+    )

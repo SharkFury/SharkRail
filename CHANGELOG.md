@@ -4,7 +4,7 @@ Notable changes to SharkRail are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and package releases
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.1.3] - 2026-09-09
 
 ### Added
 
@@ -35,6 +35,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fail closed on unsafe pre-existing POSIX storage paths, publish Job output
+  pairs atomically, reconcile crash leftovers, and bound durable retention.
+- Materialize host resource ceilings for Job execution and reject policy-denied
+  submissions before persistence.
+- Drain Workers using the configured global deadline and sweep reported POSIX
+  process groups even after their leaders exit.
+- Isolate each Windows ConPTY in a pre-contained broker process, serialize close
+  against writes, and verify zero active Job processes after termination.
+- Bound and isolate blocking ConPTY spawn/write calls, clean up late spawn
+  results after cancellation, and remove invalid waits on Windows Job handles.
+- Make HTTP Job execution deny-all without a host policy, always use a clean
+  child environment, recover expired executor leases, cancel starts during
+  shutdown, and roll back partially persisted output pairs.
+- Preserve pending callback records during volatile TTL cleanup, reconcile TTL
+  without requiring a new submission, harden existing state/output directory
+  permissions, and fail closed for unverifiable WSL cwd symlink boundaries.
+- Send both canonical POSIX VEOF transitions for unterminated input and reject
+  close-stdin in raw PTY mode where no reliable half-close exists.
 - Reap POSIX process groups after root exit and on caller cancellation, account
   stdin before potentially blocking writes, make POSIX PTY I/O cancellable, and
   flush incremental UTF-8 decoders at EOF without misclassifying valid U+FFFD.

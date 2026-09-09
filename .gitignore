@@ -1,4 +1,5 @@
 .venv/
+.wheel-venv/
 build/
 dist/
 *.egg-info/

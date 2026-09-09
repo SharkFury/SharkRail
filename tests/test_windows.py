@@ -2,6 +2,8 @@ import asyncio
 import os
 import socket
 import sys
+import threading
+import time
 from types import ModuleType
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -241,7 +243,7 @@ def test_windows_pipe_resume_failure_terminates_owned_job():
 
         job.assign.assert_called_once_with(123)
         job.terminate.assert_called_once_with()
-        job.wait_empty.assert_called_once_with(1000)
+        job.wait_empty.assert_not_called()
         job.close.assert_called_once_with()
         assert process.killed is True
 
@@ -264,7 +266,7 @@ def test_windows_pipe_dispose_also_closes_standard_input():
     asyncio.run(_run())
 
 
-def test_windows_pipe_kill_waits_for_job_processes_to_exit():
+def test_windows_pipe_kill_waits_for_authoritative_empty_job_accounting():
     async def _run() -> None:
         job = Mock()
         handle = WindowsProcessHandle(process=FakeProcess(), job=job)
@@ -272,7 +274,7 @@ def test_windows_pipe_kill_waits_for_job_processes_to_exit():
         await WindowsPipeBackend().kill_tree(handle)
 
         job.terminate.assert_called_once_with()
-        job.wait_empty.assert_called_once_with(1000)
+        job.wait_empty.assert_called_once_with(1.0)
 
     asyncio.run(_run())
 
@@ -310,6 +312,7 @@ def test_windows_pty_start_bounds_relay_reads():
         with (
             patch.dict(sys.modules, {"winpty": winpty}),
             patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch("sharkrail.runtime.backends.sys.platform", "test"),
             patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
         ):
             handle = await backend.start(CommandSpec("tool", ()))
@@ -344,6 +347,138 @@ def test_windows_pty_does_not_spawn_when_job_construction_fails():
             await backend.start(CommandSpec("tool", ()))
 
         pty_process.spawn.assert_not_called()
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_broker_is_job_owned_before_user_spawn_is_released():
+    async def _run() -> None:
+        events = []
+        control_parent = Mock()
+        control_parent.poll.return_value = True
+        control_parent.recv.return_value = ("ok", 123)
+        control_parent.send.side_effect = lambda _message: events.append(
+            "start-request"
+        )
+        output_parent = Mock()
+        status_parent = Mock()
+        child_connections = [Mock(), Mock(), Mock()]
+        pipes = iter(
+            (
+                (control_parent, child_connections[0]),
+                (output_parent, child_connections[1]),
+                (status_parent, child_connections[2]),
+            )
+        )
+        context = Mock()
+        context.Pipe.side_effect = lambda **_kwargs: next(pipes)
+        broker = Mock(pid=42, exitcode=None)
+        context.Process.return_value = broker
+        job = Mock()
+        job.assign.side_effect = lambda _pid: events.append("job-assigned")
+
+        with (
+            patch(
+                "sharkrail.runtime.backends.multiprocessing.get_context",
+                return_value=context,
+            ),
+            patch(
+                "sharkrail.runtime.backends.WindowsJob", return_value=job
+            ) as job_type,
+        ):
+            handle = await WindowsPtyBackend()._start_brokered(
+                CommandSpec("tool", (), resources=ResourceLimits(process_count=3))
+            )
+
+        assert handle.pid == 123
+        assert events == ["job-assigned", "start-request"]
+        job_type.assert_called_once_with(
+            memory_bytes=None, cpu_time_seconds=None, process_count=4
+        )
+
+    asyncio.run(_run())
+
+
+def test_cancelled_windows_pty_spawn_closes_late_native_process():
+    async def _run() -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        native = Mock(pid=123)
+
+        def blocked_spawn(*_args, **_kwargs):
+            entered.set()
+            release.wait(2)
+            return native
+
+        pty_process = Mock()
+        pty_process.spawn.side_effect = blocked_spawn
+        winpty = ModuleType("winpty")
+        winpty.PtyProcess = pty_process
+        job = Mock()
+        backend = WindowsPtyBackend()
+
+        with (
+            patch.dict(sys.modules, {"winpty": winpty}),
+            patch("sharkrail.runtime.backends.os.name", "nt"),
+            patch("sharkrail.runtime.backends.sys.platform", "test"),
+            patch("sharkrail.runtime.backends.WindowsJob", return_value=job),
+        ):
+            start = asyncio.create_task(backend.start(CommandSpec("tool", ())))
+            assert await asyncio.to_thread(entered.wait, 1)
+            start.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start
+            release.set()
+            deadline = time.monotonic() + 1
+            while not native.close.called and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+
+        native.close.assert_called_once_with(force=True)
+        job.close.assert_called_once_with()
+
+    asyncio.run(_run())
+
+
+def test_cancelled_windows_pty_write_rejects_overlapping_writes():
+    async def _run() -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_write(_data):
+            entered.set()
+            release.wait(2)
+
+        native = Mock()
+        native.write.side_effect = blocked_write
+        handle = WindowsPtyProcessHandle(process=Mock(), native_pty=native)
+        backend = WindowsPtyBackend()
+
+        first = asyncio.create_task(backend.write(handle, b"first"))
+        assert await asyncio.to_thread(entered.wait, 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        with pytest.raises(RuntimeError, match="previous ConPTY write"):
+            await backend.write(handle, b"second")
+        release.set()
+        deadline = time.monotonic() + 1
+        while handle._write_future is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert handle._write_future is None
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_rejects_new_writes_after_close_begins():
+    async def _run() -> None:
+        native = Mock()
+        handle = WindowsPtyProcessHandle(process=Mock(), native_pty=native)
+        handle._closing = True
+
+        with pytest.raises(RuntimeError, match="stdin is closed"):
+            await WindowsPtyBackend().write(handle, b"late")
+
+        native.write.assert_not_called()
 
     asyncio.run(_run())
 

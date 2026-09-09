@@ -79,6 +79,7 @@ jobs:
           python -m pytest
           --timeout=20
           --cov=sharkrail
+          --cov-branch
           --cov-report=term-missing
           --cov-fail-under=70
 
