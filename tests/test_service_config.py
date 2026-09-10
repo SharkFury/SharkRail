@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from sharkrail.service.config import (
+    CallbackEndpoint,
     ConfigError,
     _getaddrinfo_with_timeout,
     example_config_text,
@@ -34,6 +35,29 @@ def test_missing_implicit_config_uses_volatile_sqlite(monkeypatch, tmp_path):
     )
     config = load_config(environ={})
     assert config.job_store.url == "sqlite:///:memory:"
+    assert config.durability == "volatile"
+    assert config.config_path is None
+
+
+def test_darwin_missing_implicit_config_uses_volatile_defaults(monkeypatch):
+    expected = system_config_path(platform="darwin", environ={})
+
+    monkeypatch.setattr(
+        "sharkrail.service.config.system_config_path", lambda **_kwargs: expected
+    )
+
+    def missing(path, *, forbidden_permissions):
+        assert path == expected
+        assert forbidden_permissions == 0o027
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(
+        "sharkrail.service.config.read_verified_text_file",
+        missing,
+    )
+
+    config = load_config(environ={})
+
     assert config.durability == "volatile"
     assert config.config_path is None
 
@@ -69,18 +93,18 @@ def test_config_rejects_world_readable_secrets(tmp_path):
 
 def test_config_enforces_windows_private_dacl(monkeypatch, tmp_path):
     path = _write_config(tmp_path / "service.toml", "[server]\n")
-    monkeypatch.setattr("sharkrail.service.config.os.name", "nt")
     denied = PermissionError("Everyone has read access")
 
-    def reject(_path):
+    def reject(_path, *, forbidden_permissions):
+        assert forbidden_permissions == 0o027
         raise denied
 
     monkeypatch.setattr(
-        "sharkrail.service.config.validate_private_path",
+        "sharkrail.service.config.read_verified_text_file",
         reject,
     )
 
-    with pytest.raises(ConfigError, match="protected DACL") as error:
+    with pytest.raises(ConfigError, match="cannot load configuration") as error:
         load_config(path)
 
     assert error.value.__cause__ is denied
@@ -153,7 +177,8 @@ def test_callback_rejects_non_public_destination_by_default(tmp_path):
     path = _write_config(
         tmp_path / "service.toml",
         '[callback_endpoints.local]\ntenant_id = "default"\n'
-        'url = "http://127.0.0.1/hook"\n',
+        'url = "http://127.0.0.1/hook"\n'
+        'secret = "test-secret"\n',
     )
 
     with pytest.raises(ConfigError, match="non-public address"):
@@ -165,11 +190,34 @@ def test_callback_private_destination_requires_explicit_opt_in(tmp_path):
         tmp_path / "service.toml",
         '[callback_endpoints.local]\ntenant_id = "default"\n'
         'url = "http://127.0.0.1/hook"\n'
+        'secret = "test-secret"\n'
         "allow_private_networks = true\n",
     )
 
     config = load_config(path)
     assert config.callback_endpoints["local"].allow_private_networks is True
+
+
+def test_callback_without_authentication_is_rejected():
+    endpoint = CallbackEndpoint(
+        url="https://example.com/callback",
+        tenant_id="tenant",
+    )
+
+    with pytest.raises(ConfigError, match="requires secret or secret_file"):
+        endpoint.resolved_secret()
+
+
+def test_empty_callback_secret_file_is_rejected(tmp_path):
+    secret = _write_config(tmp_path / "empty-secret", " \n")
+    endpoint = CallbackEndpoint(
+        url="https://example.com/callback",
+        tenant_id="tenant",
+        secret_file=str(secret),
+    )
+
+    with pytest.raises(ConfigError, match="is empty"):
+        endpoint.resolved_secret()
 
 
 def test_callback_requires_tenant_and_strict_private_network_flag(tmp_path):
@@ -203,7 +251,8 @@ def test_callback_rejects_non_unicast_destinations(tmp_path, address):
     path = _write_config(
         tmp_path / "non-unicast.toml",
         '[callback_endpoints.unsafe]\ntenant_id = "default"\n'
-        f'url = "http://{address}/hook"\n',
+        f'url = "http://{address}/hook"\n'
+        'secret = "test-secret"\n',
     )
 
     with pytest.raises(ConfigError, match="non-public address"):
@@ -298,8 +347,58 @@ def test_service_execution_policy_rejects_group_writable_file(tmp_path):
         f"[executor]\npolicy_file = {json.dumps(str(policy))}\n",
     )
 
-    with pytest.raises(ConfigError, match="policy permissions are too broad"):
+    with pytest.raises(ConfigError, match="permissions are too broad"):
         load_config(config)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_sensitive_file_reads_reject_symlinked_parent(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    config = _write_config(real / "service.toml", "[server]\n")
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="cannot load configuration"):
+        load_config(linked / config.name)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink and FIFO semantics")
+def test_sensitive_file_reads_reject_final_symlinks_and_fifos(tmp_path):
+    real_config = _write_config(tmp_path / "real.toml", "[server]\n")
+    linked_config = tmp_path / "linked.toml"
+    linked_config.symlink_to(real_config)
+    with pytest.raises(ConfigError, match="cannot load configuration"):
+        load_config(linked_config)
+
+    fifo_config = tmp_path / "fifo.toml"
+    os.mkfifo(fifo_config, 0o600)
+    with pytest.raises(ConfigError, match="regular file"):
+        load_config(fifo_config)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_policy_and_callback_secret_reject_symlinks(tmp_path):
+    policy = _write_config(tmp_path / "policy.json", "{}")
+    policy_link = tmp_path / "policy-link.json"
+    policy_link.symlink_to(policy)
+    configured = _write_config(
+        tmp_path / "service.toml",
+        f"[executor]\npolicy_file = {json.dumps(str(policy_link))}\n",
+    )
+    with pytest.raises(ConfigError, match="cannot load executor policy_file"):
+        load_config(configured)
+
+    secret = _write_config(tmp_path / "secret", "secret")
+    secret_link = tmp_path / "secret-link"
+    secret_link.symlink_to(secret)
+    endpoint = CallbackEndpoint(
+        url="https://example.com/callback",
+        tenant_id="tenant",
+        secret_file=str(secret_link),
+    )
+    with pytest.raises(ConfigError, match="cannot read callback secret"):
+        endpoint.resolved_secret()
 
 
 def test_system_paths_follow_platform_conventions():
@@ -309,6 +408,12 @@ def test_system_paths_follow_platform_conventions():
     assert (
         system_config_path(platform="win32", environ={"ProgramData": r"D:\SharedData"})
         == Path(r"D:\SharedData") / "SharkRail" / "sharkrail.toml"
+    )
+    assert system_config_path(platform="darwin", environ={}) == Path(
+        "/private/etc/sharkrail/sharkrail.toml"
+    )
+    assert state_directory(platform="darwin", environ={}) == Path(
+        "/private/var/lib/sharkrail"
     )
     assert (
         state_directory(platform="win32", environ={"ProgramData": r"D:\SharedData"})

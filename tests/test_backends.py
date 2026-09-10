@@ -2,6 +2,8 @@ import asyncio
 import os
 import signal
 import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -10,6 +12,7 @@ from sharkrail.runtime.backends import (
     CancellationPolicy,
     CancellationStep,
     PipeBackend,
+    ProcessHandle,
     cancel_process,
     wait_for_exit,
 )
@@ -96,7 +99,11 @@ def test_cancel_process_escalates_when_interrupt_is_ignored():
             CancellationPolicy(interrupt_grace_ms=10, terminate_grace_ms=1000),
         )
 
-        assert steps == (CancellationStep.INTERRUPT, CancellationStep.TERMINATE)
+        assert steps == (
+            CancellationStep.INTERRUPT,
+            CancellationStep.TERMINATE,
+            CancellationStep.KILL_TREE,
+        )
         assert handle.process.returncode == -signal.SIGTERM
 
     asyncio.run(_run())
@@ -156,6 +163,27 @@ def test_cancellation_reports_steps_before_attempting_them():
         steps = await cancel_process(backend, handle, step_handler=report)
 
         assert reported == list(steps)
+
+    asyncio.run(_run())
+
+
+def test_cancellation_reports_cleanup_of_an_already_exited_owned_tree():
+    async def _run() -> None:
+        backend = Mock()
+        backend.kill_tree = AsyncMock()
+        handle = ProcessHandle(
+            process=SimpleNamespace(returncode=0), process_tree="process_group"
+        )
+        reported: list[CancellationStep] = []
+
+        async def report(step: CancellationStep) -> None:
+            reported.append(step)
+
+        steps = await cancel_process(backend, handle, step_handler=report)
+
+        assert steps == (CancellationStep.KILL_TREE,)
+        assert reported == [CancellationStep.KILL_TREE]
+        backend.kill_tree.assert_awaited_once_with(handle)
 
     asyncio.run(_run())
 

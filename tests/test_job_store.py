@@ -258,6 +258,8 @@ def test_stale_callback_delivery_cannot_overwrite_new_claim():
 def test_job_spec_applies_non_optional_bounded_resource_limits():
     defaulted = JobSpec.from_dict({"command": ["echo"]})
     assert defaulted.timeout_seconds == DEFAULT_JOB_TIMEOUT_SECONDS
+    with_empty_argument = JobSpec.from_dict({"command": ["echo", ""]})
+    assert with_empty_argument.command == ("echo", "")
 
     with pytest.raises(ValueError, match="unknown Job field"):
         JobSpec.from_dict({"command": ["echo"], "timeoutSeconds": 1})
@@ -458,7 +460,7 @@ def test_existing_shared_state_and_output_directories_are_rejected(tmp_path: Pat
 
 
 def test_ttl_output_cleanup_failure_keeps_record_for_retry(tmp_path: Path):
-    store = SqliteJobStore(job_ttl_seconds=0)
+    store = SqliteJobStore("sqlite:///jobs.db", state_dir=tmp_path, job_ttl_seconds=0)
     output = FileOutputStore("file://./output", state_dir=tmp_path)
     attempts = 0
     real_delete = output.delete_job
@@ -479,14 +481,21 @@ def test_ttl_output_cleanup_failure_keeps_record_for_retry(tmp_path: Path):
         _finish(store, job.id, claimed.attempt_id, stdout_path=stdout)
         time.sleep(0.002)
 
-        assert store.prune_expired() == 0
-        assert store.get(job.id).id == job.id
-        assert Path(stdout).exists()
-
         assert store.prune_expired() == 1
         with pytest.raises(JobNotFound):
             store.get(job.id)
+        assert Path(stdout).exists()
+        assert store.stats()["pending_output_deletions"] == 1
+
+        store.close()
+        store = SqliteJobStore(
+            "sqlite:///jobs.db", state_dir=tmp_path, job_ttl_seconds=0
+        )
+        store.set_output_cleaner(real_delete)
+        assert job.id in store.referenced_output_job_ids()
+        assert store.prune_expired() == 0
         assert not Path(stdout).exists()
+        assert store.stats()["pending_output_deletions"] == 0
     finally:
         store.close()
         output.close()
@@ -505,9 +514,11 @@ def test_ttl_cleanup_refuses_path_outside_output_root(tmp_path: Path):
         _finish(store, job.id, claimed.attempt_id, stdout_path=str(external))
         time.sleep(0.002)
 
-        assert store.prune_expired() == 0
+        assert store.prune_expired() == 1
         assert external.read_bytes() == b"secret"
-        assert store.get(job.id).id == job.id
+        with pytest.raises(JobNotFound):
+            store.get(job.id)
+        assert store.stats()["pending_output_deletions"] == 1
     finally:
         store.close()
         output.close()
@@ -613,20 +624,37 @@ def test_durable_store_hardens_state_database_and_lock_paths(monkeypatch, tmp_pa
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
-def test_existing_insecure_sqlite_sidecars_are_rejected_without_chmod(tmp_path):
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_existing_insecure_sqlite_sidecars_are_rejected_without_chmod(tmp_path, suffix):
     database = tmp_path / "jobs.db"
     sidecars = (Path(f"{database}-wal"), Path(f"{database}-shm"))
     for path in (database, *sidecars):
         path.write_bytes(b"")
-        path.chmod(0o644)
+        path.chmod(0o600)
+    Path(f"{database}{suffix}").chmod(0o644)
 
     with pytest.raises(PermissionError, match="permissions are too broad"):
         SqliteJobStore("sqlite:///jobs.db", state_dir=tmp_path)
-    assert [stat.S_IMODE(path.stat().st_mode) for path in (database, *sidecars)] == [
-        0o644,
-        0o644,
-        0o644,
-    ]
+    assert stat.S_IMODE(Path(f"{database}{suffix}").stat().st_mode) == 0o644
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file types only")
+@pytest.mark.parametrize("kind", ["fifo", "symlink"])
+def test_sqlite_sidecars_must_be_regular_files(tmp_path, kind):
+    database = tmp_path / "jobs.db"
+    database.write_bytes(b"")
+    database.chmod(0o600)
+    sidecar = Path(f"{database}-wal")
+    if kind == "fifo":
+        os.mkfifo(sidecar, 0o600)
+    else:
+        target = tmp_path / "target"
+        target.write_bytes(b"")
+        target.chmod(0o600)
+        sidecar.symlink_to(target)
+
+    with pytest.raises(PermissionError, match="regular file|symbolic link"):
+        SqliteJobStore("sqlite:///jobs.db", state_dir=tmp_path)
 
 
 def test_existing_outbox_schema_is_migrated_with_delivery_fencing(tmp_path):
@@ -677,6 +705,57 @@ def test_volatile_metadata_admission_is_bounded():
     try:
         with pytest.raises(AdmissionLimited):
             store.submit("tenant", "key", JobSpec(("echo", "long-command")))
+    finally:
+        store.close()
+
+
+def test_metadata_limit_applies_to_terminal_state_events_and_outbox():
+    store = SqliteJobStore(max_metadata_bytes=1024)
+    try:
+        job, _ = store.submit(
+            "tenant",
+            "key",
+            JobSpec(("echo",), callback_endpoint_id="receiver"),
+        )
+        claimed = store.claim_next("worker", 30)
+        assert claimed is not None and claimed.attempt_id is not None
+
+        with pytest.raises(AdmissionLimited, match="metadata capacity"):
+            store.finish(
+                job.id,
+                claimed.attempt_id,
+                "worker",
+                phase=JobPhase.FAILED,
+                exit_code=1,
+                reason="oversized",
+                error={"detail": "x" * (100 * 1024)},
+                stdout_path=None,
+                stderr_path=None,
+                stdout_bytes=0,
+                stderr_bytes=0,
+                output_truncated=False,
+            )
+
+        assert store.get(job.id).phase == JobPhase.ASSIGNED
+        assert store.stats()["metadata_bytes"] <= 1024
+        assert store.outbox_due() == ()
+    finally:
+        store.close()
+
+
+def test_metadata_usage_counter_tracks_updates_and_cascade_deletes():
+    store = SqliteJobStore(job_ttl_seconds=0)
+    try:
+        baseline = store.stats()["metadata_bytes"]
+        job, _ = store.submit("tenant", "key", JobSpec(("echo",)))
+        claimed = store.claim_next("worker", 30)
+        assert claimed is not None and claimed.attempt_id is not None
+        _finish(store, job.id, claimed.attempt_id)
+        assert store.stats()["metadata_bytes"] > baseline
+        time.sleep(0.002)
+
+        assert store.prune_expired() == 1
+        assert store.stats()["metadata_bytes"] == baseline
     finally:
         store.close()
 

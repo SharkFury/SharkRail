@@ -4,7 +4,7 @@ Notable changes to SharkRail are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and package releases
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.3] - 2026-09-09
+## [0.1.3] - Unreleased
 
 ### Added
 
@@ -35,6 +35,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Preserve child stderr and timeout exit code 124 in the human CLI, accept empty
+  argument values, and return structured JSON for CLI validation failures.
+- Use canonical macOS system paths without weakening verified no-follow reads.
+- Require callback signing secrets, return stable JSON for unexpected HTTP
+  failures, and strictly validate JSON-RPC control parameter types and ranges.
 - Fail closed on unsafe pre-existing POSIX storage paths, publish Job output
   pairs atomically, reconcile crash leftovers, and bound durable retention.
 - Materialize host resource ceilings for Job execution and reject policy-denied
@@ -63,8 +68,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   validated addresses, reject unsafe destinations by default, and never follow
   callback redirects.
 - Create SQLite databases, journals, locks, and sensitive configuration files
-  with private permissions, and safely remove output files before pruning
-  expired volatile Job records.
+  with private permissions, and bound expired volatile Job retention.
+- Make ConPTY disposal cancellation-safe, reap and close stuck brokers, preserve
+  executable-not-found errors across the broker boundary, report every actual
+  tree-kill step, and isolate broker overhead from user aggregate quotas.
+- Replace heartbeat-derived process cleanup authority with synchronous
+  ownership registration, birth identities, and duplicated Windows Job handles.
+- Fail notification readiness after sustained reconciliation errors, roll back
+  partial service construction, account all persisted metadata, and recover
+  filesystem output deletion through durable idempotent finalizers.
+- Validate SQLite sidecars as service-owned private regular files and read
+  configuration, policy, and secret files through verified non-following handles.
 - Repair the MCP `session_read` input schema, avoid reverse DNS during HTTP
   binding, select IPv6 for IPv6 listeners, keep Python 3.9 mypy checks active,
   and emit unique runtime-only SBOM components.

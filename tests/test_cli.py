@@ -118,6 +118,113 @@ def test_sharkrail_run_idle_timeout_json_exit_code():
     assert payload["reason"] == "idle_timeout"
 
 
+@pytest.mark.parametrize("option", ["--timeout-ms", "--idle-timeout-ms"])
+def test_sharkrail_plain_timeout_exit_code(option):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            option,
+            "50",
+            sys.executable,
+            "--",
+            "-c",
+            "import time; time.sleep(10)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 124
+
+
+def test_sharkrail_plain_output_preserves_child_streams():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            sys.executable,
+            "--",
+            "-c",
+            "import sys; print('OUT'); print('ERR', file=sys.stderr)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    # text=True normalizes platform line endings; a doubled Windows CRLF would
+    # surface as an extra blank line here.
+    assert result.stdout == "OUT\n"
+    assert result.stderr == "ERR\n"
+
+
+def test_sharkrail_json_validation_error_is_structured():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            "--memory-bytes",
+            "0",
+            "echo",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 2
+    assert payload["error"]["code"] == "INVALID_REQUEST"
+    assert payload["error"]["stage"] == "validate"
+    assert "Traceback" not in result.stderr
+
+
+def test_sharkrail_direct_command_preserves_empty_argument():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sharkrail",
+            "run",
+            "--json",
+            sys.executable,
+            "--",
+            "-c",
+            "import sys; print(repr(sys.argv[1]))",
+            "",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["stdout"].strip() == "''"
+
+
 def test_sharkrail_version():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"

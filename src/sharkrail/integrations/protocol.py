@@ -22,6 +22,10 @@ from .schema import protocol_schema
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_PENDING_REQUESTS = 256
+MAX_EVENT_PAGE_SIZE = 100
+MAX_CONTROL_WAIT_MS = 24 * 60 * 60 * 1000
+MAX_CANCELLATION_GRACE_MS = 5 * 60 * 1000
+MAX_TERMINAL_DIMENSION = 65535
 
 
 class StdioRuntime(Protocol):
@@ -177,12 +181,24 @@ class JsonRpcRuntime:
             return _session_dict(self.manager.get(_required_str(params, "session_id")))
         if method in {"session.subscribe", "session.events"}:
             session_id = _required_str(params, "session_id")
-            cursor = int(params.get("cursor", 0))
+            cursor = _bounded_int(params, "cursor", default=0, minimum=0)
             events, next_cursor, has_more = await self.manager.event_page(
                 session_id,
                 cursor=cursor,
-                wait_ms=int(params.get("wait_ms", 0)),
-                limit=int(params.get("limit", 100)),
+                wait_ms=_bounded_int(
+                    params,
+                    "wait_ms",
+                    default=0,
+                    minimum=0,
+                    maximum=MAX_CONTROL_WAIT_MS,
+                ),
+                limit=_bounded_int(
+                    params,
+                    "limit",
+                    default=MAX_EVENT_PAGE_SIZE,
+                    minimum=1,
+                    maximum=MAX_EVENT_PAGE_SIZE,
+                ),
             )
             return {
                 "events": [_event_dict(event) for event in events],
@@ -200,8 +216,18 @@ class JsonRpcRuntime:
         if method == "session.resize":
             await self.manager.resize(
                 _required_str(params, "session_id"),
-                int(params["cols"]),
-                int(params["rows"]),
+                _bounded_int(
+                    params,
+                    "cols",
+                    minimum=1,
+                    maximum=MAX_TERMINAL_DIMENSION,
+                ),
+                _bounded_int(
+                    params,
+                    "rows",
+                    minimum=1,
+                    maximum=MAX_TERMINAL_DIMENSION,
+                ),
             )
             return {"resized": True}
         if method == "session.interrupt":
@@ -211,17 +237,40 @@ class JsonRpcRuntime:
             steps = await self.manager.cancel(
                 _required_str(params, "session_id"),
                 CancellationPolicy(
-                    interrupt_grace_ms=int(params.get("interrupt_grace_ms", 1000)),
-                    terminate_grace_ms=int(params.get("terminate_grace_ms", 1000)),
-                    kill_tree_grace_ms=int(params.get("kill_tree_grace_ms", 2000)),
-                    skip_interrupt=bool(params.get("force", False)),
+                    interrupt_grace_ms=_bounded_int(
+                        params,
+                        "interrupt_grace_ms",
+                        default=1000,
+                        minimum=0,
+                        maximum=MAX_CANCELLATION_GRACE_MS,
+                    ),
+                    terminate_grace_ms=_bounded_int(
+                        params,
+                        "terminate_grace_ms",
+                        default=1000,
+                        minimum=0,
+                        maximum=MAX_CANCELLATION_GRACE_MS,
+                    ),
+                    kill_tree_grace_ms=_bounded_int(
+                        params,
+                        "kill_tree_grace_ms",
+                        default=2000,
+                        minimum=1,
+                        maximum=MAX_CANCELLATION_GRACE_MS,
+                    ),
+                    skip_interrupt=_optional_bool(params, "force", default=False),
                 ),
             )
             return {"steps": steps}
         if method == "session.wait":
             result = await self.manager.wait(
                 _required_str(params, "session_id"),
-                timeout_ms=_optional_int(params, "wait_timeout_ms"),
+                timeout_ms=_optional_bounded_int(
+                    params,
+                    "wait_timeout_ms",
+                    minimum=0,
+                    maximum=MAX_CONTROL_WAIT_MS,
+                ),
             )
             return None if result is None else _result_dict(result)
         if method == "session.dispose":
@@ -435,6 +484,49 @@ def _optional_int(params: dict[str, Any], key: str) -> Optional[int]:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{key} must be an integer")
+    return value
+
+
+def _bounded_int(
+    params: dict[str, Any],
+    key: str,
+    *,
+    default: Optional[int] = None,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    if key not in params:
+        if default is None:
+            raise KeyError(key)
+        return default
+    value = params[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{key} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{key} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{key} must be no greater than {maximum}")
+    return value
+
+
+def _optional_bounded_int(
+    params: dict[str, Any],
+    key: str,
+    *,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
+    if params.get(key) is None:
+        return None
+    return _bounded_int(params, key, minimum=minimum, maximum=maximum)
+
+
+def _optional_bool(params: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    if key not in params:
+        return default
+    value = params[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be a boolean")
     return value
 
 

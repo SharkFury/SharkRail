@@ -1,6 +1,6 @@
 # SharkRail Product and Architecture
 
-Status: v0.1 implementation
+Status: v0.1.3 release candidate (unreleased)
 
 Product: SharkRail
 
@@ -33,9 +33,10 @@ checkpoints, runtime restart recovery, or model context management. See the
 [native API comparison](VALUE.md#native-process-apis-vs-sharkrail) for the
 adoption boundary.
 
-An [optional self-hosted asynchronous job layer](ASYNC_JOBS.md) is documented as
-a future design proposal. It is not part of the implemented v0.1 contract and
-does not change the guarantees listed on this page.
+An [optional self-hosted asynchronous job layer](ASYNC_JOBS.md) has an
+experimental single-host implementation in the unreleased v0.1.3 candidate.
+Its multi-host architecture remains a future design and it is not yet a
+production-ready part of the stable v0.1 execution contract.
 
 ## Users and jobs
 
@@ -144,10 +145,10 @@ WSL commands are launched with structured `wsl.exe --exec` arguments. The Window
 ## Trust and security
 
 The v0.1 local execution core is single-user and uses stdio; that core opens no
-listening socket. The optional asynchronous Job service under `Unreleased` is a
-separate, experimental single-host layer with a loopback-only HTTP listener,
-credential-bound tenant identities, protected local state, and registered
-callbacks. See [ASYNC_JOBS.md](ASYNC_JOBS.md) and
+listening socket. The optional asynchronous Job service in the unreleased
+v0.1.3 candidate is a separate, experimental single-host layer with a
+loopback-only HTTP listener, credential-bound tenant identities, protected
+local state, and registered callbacks. See [ASYNC_JOBS.md](ASYNC_JOBS.md) and
 [CONFIGURATION.md](CONFIGURATION.md) for its additional trust boundary.
 
 The local execution core does not elevate privileges, store credentials, upload

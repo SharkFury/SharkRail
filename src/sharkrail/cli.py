@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from .integrations.protocol import JsonRpcRuntime, serve_stdio
 from .observability.telemetry import EventRecorder, configure_logging
 from .runtime.capabilities import collect
 from .runtime.doctor import diagnose, format_report, write_diagnostic_bundle
-from .runtime.executor import CommandRunner
+from .runtime.executor import CommandResult, CommandRunner
 from .runtime.policy import ExecutionPolicy
 from .runtime.routing import Shell, Target, WslOptions, direct_command, shell_command
 from .runtime.sessions import SessionManager
@@ -272,17 +273,23 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
                 ensure_ascii=False,
             )
         )
-        if result.timed_out:
-            return 124
-        if result.exit_code != 0:
-            return result.exit_code
-        return 0
+        return _result_exit_code(result)
 
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="")
-    return 1 if result.timed_out else result.exit_code
+    if result.stdout_bytes:
+        sys.stdout.buffer.write(result.stdout_bytes)
+        sys.stdout.buffer.flush()
+    if result.stderr_bytes:
+        sys.stderr.buffer.write(result.stderr_bytes)
+        sys.stderr.buffer.flush()
+    return _result_exit_code(result)
+
+
+def _result_exit_code(result: CommandResult) -> int:
+    """Apply one CLI exit-code contract to every output renderer."""
+
+    if result.timed_out:
+        return 124
+    return result.exit_code
 
 
 def main() -> int:
@@ -297,7 +304,24 @@ def main() -> int:
             parser.error(f"invalid execution policy: {err}")
 
     if ns.command in {"run", "shell"}:
-        return asyncio.run(_run_cmd(ns))
+        try:
+            return asyncio.run(_run_cmd(ns))
+        except (TypeError, ValueError) as err:
+            if ns.json:
+                print(
+                    json.dumps(
+                        {
+                            "error": {
+                                "code": "INVALID_REQUEST",
+                                "stage": "validate",
+                                "message": str(err),
+                            }
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return 2
+            parser.error(str(err))
 
     if ns.command == "capabilities":
         capability = collect()

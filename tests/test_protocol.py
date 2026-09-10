@@ -3,6 +3,8 @@ import base64
 import io
 import sys
 
+import pytest
+
 from sharkrail.core.models import CommandSpec
 from sharkrail.integrations.protocol import JsonRpcRuntime, serve_stdio
 
@@ -91,6 +93,31 @@ def test_protocol_returns_structured_errors():
         assert invalid is not None and invalid["error"]["code"] == -32602
         assert missing is not None
         assert missing["error"]["data"]["code"] == "EXECUTABLE_NOT_FOUND"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        ("session.cancel", {"session_id": "unused", "force": "false"}),
+        (
+            "session.cancel",
+            {"session_id": "unused", "interrupt_grace_ms": "7"},
+        ),
+        ("session.subscribe", {"session_id": "unused", "cursor": False}),
+        ("session.subscribe", {"session_id": "unused", "wait_ms": -1}),
+        ("session.subscribe", {"session_id": "unused", "limit": 1.5}),
+        ("session.subscribe", {"session_id": "unused", "limit": 101}),
+        ("session.resize", {"session_id": "unused", "cols": 0, "rows": 24}),
+        ("session.wait", {"session_id": "unused", "wait_timeout_ms": "10"}),
+    ],
+)
+def test_protocol_rejects_coerced_or_out_of_range_control_types(method, params):
+    async def _run() -> None:
+        response = await JsonRpcRuntime().dispatch(request(method, params))
+        assert response is not None
+        assert response["error"]["code"] == -32602
 
     asyncio.run(_run())
 

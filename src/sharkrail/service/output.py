@@ -41,10 +41,20 @@ class FileOutputStore:
             if parsed.scheme != "file":
                 raise ValueError("only file:// output storage is supported")
             raw_path = unquote(parsed.path)
-            if parsed.netloc and parsed.netloc not in {"", "localhost", "."}:
-                raw_path = f"//{parsed.netloc}{raw_path}"
             if url.startswith("file://./"):
                 raw_path = url[len("file://") :]
+            elif os.name == "nt":  # pragma: no cover - exercised by Windows CI
+                raw_path = raw_path.replace("/", "\\")
+                if re.fullmatch(r"[A-Za-z]:", parsed.netloc):
+                    # Be liberal with the commonly emitted file://C:/... form.
+                    raw_path = parsed.netloc + raw_path
+                elif parsed.netloc not in {"", "localhost"}:
+                    raw_path = f"\\\\{parsed.netloc}{raw_path}"
+                elif re.match(r"^\\[A-Za-z]:\\", raw_path):
+                    # RFC 8089 local drive URI: file:///C:/path.
+                    raw_path = raw_path[1:]
+            elif parsed.netloc and parsed.netloc not in {"", "localhost", "."}:
+                raw_path = f"//{parsed.netloc}{raw_path}"
             path = Path(raw_path or "./output")
             self.root = path if path.is_absolute() else (state_dir or Path.cwd()) / path
             ensure_private_directory(self.root)

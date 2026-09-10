@@ -330,9 +330,11 @@ def test_monitor_bounds_backend_disposal():
         backend = PipeBackend()
         manager = SessionManager(backend=backend, termination_timeout_ms=100)
         handle = ProcessHandle(process=FinishedProcess())
+        release_dispose = asyncio.Event()
 
         async def stalled_dispose(_handle: object) -> None:
-            await asyncio.Event().wait()
+            await release_dispose.wait()
+            handle._disposed = True
 
         with (
             patch.object(backend, "start", return_value=handle),
@@ -350,6 +352,8 @@ def test_monitor_bounds_backend_disposal():
         assert result.error.stage == ErrorStage.DISPOSE
         assert session.state == SessionState.FAILED
         assert session.events[-1].payload["resources_disposed"] is False
+        assert session.dispose_task is not None and not session.dispose_task.done()
+        release_dispose.set()
         await manager.dispose(session.id)
 
     asyncio.run(_run())

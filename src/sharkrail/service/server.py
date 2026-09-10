@@ -14,6 +14,7 @@ import ssl
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -25,7 +26,7 @@ from ..core.errors import SharkRailError
 from ..core.models import CommandMode, CommandSpec
 from ..runtime.executor import CompletionReason
 from ..runtime.policy import ExecutionPolicy
-from ..runtime.sessions import SessionManager
+from ..runtime.sessions import ProcessOwnership, SessionManager
 from .config import (
     CallbackEndpoint,
     ServiceConfig,
@@ -50,29 +51,13 @@ class _ActiveRun:
     start_task: asyncio.Task[Any]
 
 
-class JobService:
-    """Own the JobStore, reconcilers, execution pool, and callback dispatcher."""
+def _open_service_resources(
+    config: ServiceConfig, resolved_state_dir: Path, store_limits: Any
+) -> tuple[SqliteJobStore, FileOutputStore, ThreadPoolExecutor, ThreadPoolExecutor]:
+    """Acquire constructor resources atomically and roll back in reverse order."""
 
-    def __init__(
-        self,
-        config: ServiceConfig,
-        *,
-        state_dir: Optional[Path] = None,
-        execution_policy: Optional[ExecutionPolicy] = None,
-    ) -> None:
-        config = validate_service_config(config, resolve_callbacks=False)
-        self.config = config
-        self.execution_policy = execution_policy or load_service_execution_policy(
-            config
-        )
-        self.worker_id = f"worker_{uuid4().hex}"
-        resolved_state_dir = state_dir or state_directory()
-        store_limits = (
-            config.volatile_store
-            if config.durability == "volatile"
-            else config.durable_store
-        )
-        self.store = SqliteJobStore(
+    with ExitStack() as resources:
+        store = SqliteJobStore(
             config.job_store.url,
             max_jobs=store_limits.max_jobs,
             max_metadata_bytes=store_limits.max_metadata_bytes,
@@ -82,7 +67,8 @@ class JobService:
             max_queued_jobs_per_tenant=config.admission.max_queued_jobs_per_tenant,
             state_dir=resolved_state_dir,
         )
-        self.output = FileOutputStore(
+        resources.callback(store.close)
+        output = FileOutputStore(
             config.output_store.url,
             state_dir=resolved_state_dir,
             volatile=config.durability == "volatile",
@@ -92,23 +78,57 @@ class JobService:
                 else config.output_store.max_total_bytes
             ),
         )
-        self.store.set_output_cleaner(self.output.delete_job)
-        removed_outputs = self.output.reconcile(self.store.referenced_output_job_ids())
+        resources.callback(output.close)
+        store.set_output_cleaner(output.delete_job)
+        removed_outputs = output.reconcile(store.referenced_output_job_ids())
         if removed_outputs:
             LOGGER.warning("removed %d uncommitted output directories", removed_outputs)
-        self._executor = ThreadPoolExecutor(
+        executor = ThreadPoolExecutor(
             max_workers=config.executor.workers,
             thread_name_prefix="sharkrail-executor",
         )
-        self._notification_executor = ThreadPoolExecutor(
+        resources.callback(executor.shutdown, wait=True, cancel_futures=False)
+        notification_executor = ThreadPoolExecutor(
             max_workers=config.notifications.max_concurrent_deliveries,
             thread_name_prefix="sharkrail-callback",
+        )
+        resources.callback(
+            notification_executor.shutdown, wait=True, cancel_futures=False
+        )
+        resources.pop_all()
+    return store, output, executor, notification_executor
+
+
+class JobService:
+    """Own the JobStore, reconcilers, execution pool, and callback dispatcher."""
+
+    def __init__(
+        self,
+        config: ServiceConfig,
+        *,
+        state_dir: Optional[Path] = None,
+        execution_policy: Optional[ExecutionPolicy] = None,
+        process_ownership: ProcessOwnership | None = None,
+    ) -> None:
+        config = validate_service_config(config, resolve_callbacks=False)
+        self.config = config
+        self.execution_policy = execution_policy or load_service_execution_policy(
+            config
+        )
+        self.worker_id = f"worker_{uuid4().hex}"
+        self._process_ownership = process_ownership
+        resolved_state_dir = state_dir or state_directory()
+        store_limits = (
+            config.volatile_store
+            if config.durability == "volatile"
+            else config.durable_store
         )
         self._notification_slots = threading.BoundedSemaphore(
             config.notifications.max_concurrent_deliveries
         )
         self._notification_state_lock = threading.Lock()
         self._notification_started: dict[str, float] = {}
+        self._notification_unpersisted: set[str] = set()
         self._callback_resolution_slots = threading.BoundedSemaphore(
             config.notifications.max_concurrent_deliveries
         )
@@ -137,11 +157,19 @@ class JobService:
         self._closed = False
         self._last_controller_progress = time.monotonic()
         self._last_controller_success: Optional[float] = None
-        self._last_notification_progress = time.monotonic()
+        self._notification_started_at = time.monotonic()
+        self._last_notification_success: Optional[float] = None
         self._last_lease_renew = 0.0
         self._last_store_reconcile = 0.0
         self._controller_errors = 0
         self._notification_errors = 0
+        self._notification_consecutive_errors = 0
+        (
+            self.store,
+            self.output,
+            self._executor,
+            self._notification_executor,
+        ) = _open_service_resources(config, resolved_state_dir, store_limits)
 
     def start(self) -> None:
         if self._closed:
@@ -273,10 +301,19 @@ class JobService:
                 if self._notification_started
                 else None
             )
+            last_notification_success = self._last_notification_success
+            notification_consecutive_errors = self._notification_consecutive_errors
+            notification_unpersisted = len(self._notification_unpersisted)
+        notification_success_age = now - (
+            last_notification_success or self._notification_started_at
+        )
         notification_stalled = (
             oldest_notification_age is not None
             and oldest_notification_age
             > self.config.notifications.request_timeout_seconds + 5.0
+        ) or (
+            notification_success_age
+            > self.config.control.worker_progress_timeout_seconds
         )
         controller_stalled = (
             self._last_controller_success is None
@@ -302,9 +339,7 @@ class JobService:
             "controller_progress_age_seconds": round(
                 now - self._last_controller_progress, 3
             ),
-            "notification_progress_age_seconds": round(
-                now - self._last_notification_progress, 3
-            ),
+            "notification_progress_age_seconds": round(notification_success_age, 3),
             "notification_inflight": notification_inflight,
             "notification_stalled": notification_stalled,
             "controller_stalled": controller_stalled,
@@ -315,6 +350,8 @@ class JobService:
             ),
             "controller_errors": self._controller_errors,
             "notification_errors": self._notification_errors,
+            "notification_consecutive_errors": notification_consecutive_errors,
+            "notification_unpersisted": notification_unpersisted,
             "store": self.store.stats(),
         }
 
@@ -390,6 +427,7 @@ class JobService:
         manager = SessionManager(
             default_max_output_bytes=claimed.spec.max_output_bytes,
             policy=self.execution_policy,
+            process_ownership=self._process_ownership,
         )
         registered = False
         output_paths: tuple[str, str] | None = None
@@ -572,27 +610,15 @@ class JobService:
             LOGGER.exception("could not remove uncommitted output for Job %s", job_id)
 
     def _notification_loop(self) -> None:
-        while not self._stop.wait(0.1):
+        while not self._stop.is_set():
             capacity = 0
             for _ in range(self.config.notifications.max_concurrent_deliveries):
                 if not self._notification_slots.acquire(blocking=False):
                     break
                 capacity += 1
             if capacity == 0:
-                with self._notification_state_lock:
-                    oldest = (
-                        min(self._notification_started.values())
-                        if self._notification_started
-                        else None
-                    )
-                if (
-                    oldest is None
-                    or time.monotonic() - oldest
-                    <= self.config.notifications.request_timeout_seconds + 5.0
-                ):
-                    self._last_notification_progress = time.monotonic()
+                self._stop.wait(0.1)
                 continue
-            self._last_notification_progress = time.monotonic()
             try:
                 records = self.store.claim_outbox_due(
                     capacity,
@@ -605,20 +631,29 @@ class JobService:
             except Exception:
                 for _ in range(capacity):
                     self._notification_slots.release()
-                self._notification_errors += 1
+                self._notification_failed()
                 LOGGER.exception("notification reconciliation failed")
-                self._stop.wait(min(5.0, 0.1 * self._notification_errors))
+                self._stop.wait(min(5.0, 0.1 * self._notification_consecutive_errors))
                 continue
             for _ in range(capacity - len(records)):
                 self._notification_slots.release()
+            scheduling_failed = False
             for record in records:
                 try:
                     self._notification_executor.submit(self._deliver_boundary, record)
                 except Exception as err:
                     self._notification_slots.release()
-                    self._notification_errors += 1
+                    scheduling_failed = True
+                    self._notification_failed()
                     LOGGER.exception("notification scheduling failed")
-                    self._retry_delivery(record, str(err), permanent=False)
+                    try:
+                        self._retry_delivery(record, str(err), permanent=False)
+                    except Exception:
+                        self._notification_failed(record.event_id)
+                        LOGGER.exception("notification retry persistence failed")
+            if not scheduling_failed:
+                self._notification_succeeded()
+            self._stop.wait(0.1)
 
     def _deliver_boundary(self, record: OutboxRecord) -> None:
         tracking_id = record.delivery_attempt_id or record.event_id
@@ -627,14 +662,37 @@ class JobService:
         try:
             self._deliver(record)
         except Exception as err:
-            self._notification_errors += 1
+            self._notification_failed()
             LOGGER.exception("notification delivery boundary failed")
-            self._retry_delivery(record, str(err), permanent=False)
+            try:
+                self._retry_delivery(record, str(err), permanent=False)
+            except Exception:
+                self._notification_failed(record.event_id)
+                LOGGER.exception("notification failure persistence failed")
+            else:
+                self._notification_succeeded(record.event_id)
+        else:
+            self._notification_succeeded(record.event_id)
         finally:
             with self._notification_state_lock:
                 self._notification_started.pop(tracking_id, None)
-            self._last_notification_progress = time.monotonic()
             self._notification_slots.release()
+
+    def _notification_succeeded(self, persisted_event_id: str | None = None) -> None:
+        with self._notification_state_lock:
+            if persisted_event_id is not None:
+                self._notification_unpersisted.discard(persisted_event_id)
+            if self._notification_unpersisted:
+                return
+            self._last_notification_success = time.monotonic()
+            self._notification_consecutive_errors = 0
+
+    def _notification_failed(self, unpersisted_event_id: str | None = None) -> None:
+        with self._notification_state_lock:
+            if unpersisted_event_id is not None:
+                self._notification_unpersisted.add(unpersisted_event_id)
+            self._notification_errors += 1
+            self._notification_consecutive_errors += 1
 
     def _resolve_callback_destination(
         self, endpoint: CallbackEndpoint, *, timeout: float
@@ -675,13 +733,15 @@ class JobService:
     def _deliver(self, record: OutboxRecord) -> None:
         endpoint = self.config.callback_endpoints.get(record.endpoint_id)
         if endpoint is None or endpoint.tenant_id != record.tenant_id:
-            self.store.outbox_failed(
+            persisted = self.store.outbox_failed(
                 record.event_id,
                 record.delivery_attempt_id,
                 "callback endpoint no longer belongs to Job tenant",
                 next_attempt_at=time.time(),
                 permanent=True,
             )
+            if not persisted:
+                raise StoreError("callback failure state was not persisted")
             return
         body = json.dumps(record.payload, separators=(",", ":")).encode("utf-8")
         timestamp = str(int(time.time()))
@@ -691,13 +751,12 @@ class JobService:
             "X-SharkRail-Timestamp": timestamp,
         }
         secret = endpoint.resolved_secret()
-        if secret:
-            signature = hmac.new(
-                secret.encode("utf-8"),
-                timestamp.encode("ascii") + b"." + body,
-                hashlib.sha256,
-            ).hexdigest()
-            headers["X-SharkRail-Signature"] = f"sha256={signature}"
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            timestamp.encode("ascii") + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+        headers["X-SharkRail-Signature"] = f"sha256={signature}"
         deadline = time.monotonic() + self.config.notifications.request_timeout_seconds
         try:
             hostname, port, addresses = self._resolve_callback_destination(
@@ -719,7 +778,10 @@ class JobService:
                 timeout=remaining,
             )
             if 200 <= status < 300:
-                self.store.outbox_delivered(record.event_id, record.delivery_attempt_id)
+                if not self.store.outbox_delivered(
+                    record.event_id, record.delivery_attempt_id
+                ):
+                    raise StoreError("callback delivery state was not persisted")
                 return
             raise RuntimeError(f"callback returned HTTP {status}")
         except _CallbackHTTPError as err:
@@ -734,13 +796,15 @@ class JobService:
         attempts = record.attempts + 1
         exhausted = attempts >= self.config.notifications.max_attempts
         delay = min(3600.0, 5.0 * (2 ** min(attempts, 9)))
-        self.store.outbox_failed(
+        persisted = self.store.outbox_failed(
             record.event_id,
             record.delivery_attempt_id,
             error,
             next_attempt_at=time.time() + delay,
             permanent=permanent or exhausted,
         )
+        if not persisted:
+            raise StoreError("callback retry state was not persisted")
 
 
 def _seconds_to_ms(value: Optional[float]) -> Optional[int]:

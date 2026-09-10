@@ -12,7 +12,7 @@ import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Protocol
 from uuid import uuid4
 
 from ..core.errors import ErrorCode, ErrorStage, ExecutionError, SharkRailError
@@ -37,6 +37,12 @@ from .executor import (
     LifecycleEventType,
 )
 from .policy import ExecutionPolicy, PolicyViolation
+
+
+class ProcessOwnership(Protocol):
+    def register(self, handle: ProcessHandle) -> None: ...
+
+    def unregister(self, handle: ProcessHandle) -> None: ...
 
 
 @dataclass
@@ -145,6 +151,7 @@ class Session:
     next_event_seq: int = 0
     completed_at_monotonic: Optional[float] = None
     monitor_task: Optional[asyncio.Task[None]] = None
+    dispose_task: Optional[asyncio.Task[None]] = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancellation_steps: tuple[str, ...] = ()
@@ -329,6 +336,7 @@ class SessionManager:
         max_event_page_bytes: int = 256 * 1024,
         event_recorder: Optional[EventRecorder] = None,
         policy: ExecutionPolicy | None = None,
+        process_ownership: ProcessOwnership | None = None,
     ) -> None:
         if default_max_output_bytes < 0:
             raise ValueError("default_max_output_bytes must be non-negative")
@@ -363,6 +371,7 @@ class SessionManager:
         self._max_event_page_bytes = max_event_page_bytes
         self._event_recorder = event_recorder
         self._policy = policy
+        self._process_ownership = process_ownership
         self._sessions: dict[str, Session] = {}
         self._disposed_session_ids: deque[str] = deque(maxlen=1024)
         self._expired_session_ids: deque[str] = deque(maxlen=1024)
@@ -501,6 +510,8 @@ class SessionManager:
         session: Session | None = None
         registered = False
         try:
+            if self._process_ownership is not None:
+                self._process_ownership.register(handle)
             session = Session(
                 id=str(uuid4()),
                 spec=spec,
@@ -918,7 +929,7 @@ class SessionManager:
             await self.wait(session_id, timeout_ms=self._shutdown_timeout_ms)
         try:
             await asyncio.wait_for(
-                session.backend.dispose(session.handle),
+                asyncio.shield(self._dispose_session_backend(session)),
                 self._termination_timeout_ms / 1000,
             )
         except asyncio.TimeoutError as err:
@@ -1164,7 +1175,7 @@ class SessionManager:
 
         try:
             await asyncio.wait_for(
-                session.backend.dispose(session.handle),
+                asyncio.shield(self._dispose_session_backend(session)),
                 self._termination_timeout_ms / 1000,
             )
             disposed = True
@@ -1353,8 +1364,34 @@ class SessionManager:
                 )
         finally:
             await asyncio.wait_for(
-                backend.dispose(handle), self._termination_timeout_ms / 1000
+                asyncio.shield(self._dispose_registered_handle(backend, handle)),
+                self._termination_timeout_ms / 1000,
             )
+
+    async def _dispose_session_backend(self, session: Session) -> None:
+        if session.handle._disposed and (
+            self._process_ownership is None or session.handle._ownership_id is None
+        ):
+            return
+        if session.dispose_task is None:
+            session.dispose_task = asyncio.create_task(
+                self._dispose_registered_handle(session.backend, session.handle)
+            )
+            session.dispose_task.add_done_callback(_consume_task_outcome)
+        await asyncio.shield(session.dispose_task)
+
+    async def _dispose_registered_handle(
+        self, backend: ExecutionBackend, handle: ProcessHandle
+    ) -> None:
+        try:
+            await backend.dispose(handle)
+        finally:
+            if (
+                handle._disposed
+                and handle._ownership_id is not None
+                and self._process_ownership is not None
+            ):
+                await asyncio.to_thread(self._process_ownership.unregister, handle)
 
     async def _read_pipe(
         self,

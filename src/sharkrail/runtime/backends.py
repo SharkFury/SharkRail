@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from ..core.models import CommandSpec
+from .process_identity import process_birth_identity
 from .windows import WindowsJob
 
 if os.name != "nt":
@@ -62,11 +63,16 @@ class ProcessHandle:
     process: Any
     stdin_closed: bool = False
     process_tree: str = "unknown"
+    birth_identity: str | None = None
     degraded_reasons: tuple[str, ...] = ()
     _disposed: bool = field(default=False, init=False, repr=False, compare=False)
     _tree_killed: bool = field(default=False, init=False, repr=False, compare=False)
     _tree_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False, compare=False
+    )
+    _dispose_task: Any = field(default=None, init=False, repr=False, compare=False)
+    _ownership_id: str | None = field(
+        default=None, init=False, repr=False, compare=False
     )
 
     @property
@@ -89,6 +95,7 @@ class WindowsProcessHandle(ProcessHandle):
 class WindowsPtyProcessHandle(PtyProcessHandle):
     native_pty: Any = None
     job: WindowsJob | None = None
+    broker_job: WindowsJob | None = None
     broker: Any = None
     broker_control: Any = None
     broker_output: Any = None
@@ -179,6 +186,7 @@ class PipeBackend(ExecutionBackend):
         return ProcessHandle(
             process=process,
             process_tree="taskkill_fallback" if os.name == "nt" else "process_group",
+            birth_identity=process_birth_identity(process.pid),
         )
 
     def _windows_creation_flags(self) -> int:
@@ -308,6 +316,7 @@ class WindowsPipeBackend(PipeBackend):
         return WindowsProcessHandle(
             process=handle.process,
             process_tree="job_object",
+            birth_identity=handle.birth_identity,
             job=job,
         )
 
@@ -401,6 +410,7 @@ class PtyBackend(ExecutionBackend):
         return PtyProcessHandle(
             process=process,
             process_tree="process_group",
+            birth_identity=process_birth_identity(process.pid),
             master_fd=master_fd,
         )
 
@@ -559,19 +569,37 @@ def _conpty_broker_main(control: Any, output: Any, status: Any) -> None:
     """Own pywinpty in a helper process that a Windows Job can terminate."""
 
     native: Any = None
+    user_job: WindowsJob | None = None
     try:
-        request = control.recv()
+        try:
+            request = control.recv()
+        except (BrokenPipeError, EOFError, OSError):
+            return
         if not isinstance(request, tuple) or request[:1] != ("start",):
             raise RuntimeError("invalid ConPTY broker bootstrap request")
-        _, argv, cwd, environment, dimensions, read_poll_seconds = request
+        (
+            _,
+            argv,
+            cwd,
+            environment,
+            dimensions,
+            read_poll_seconds,
+            user_job_handle,
+        ) = request
         from winpty import PtyProcess
 
-        native = PtyProcess.spawn(
-            argv,
-            cwd=cwd,
-            env=environment,
-            dimensions=dimensions,
-        )
+        try:
+            user_job = WindowsJob.from_handle(int(user_job_handle))
+            native = PtyProcess.spawn(
+                argv,
+                cwd=cwd,
+                env=environment,
+                dimensions=dimensions,
+            )
+            user_job.assign(native.pid)
+        except BaseException as err:  # noqa: BLE001 - process boundary
+            _send_broker_error(control, err)
+            return
         relay = getattr(native, "fileobj", None)
         if relay is not None and hasattr(relay, "settimeout"):
             relay.settimeout(read_poll_seconds)
@@ -638,27 +666,46 @@ def _conpty_broker_main(control: Any, output: Any, status: Any) -> None:
                 else:
                     raise RuntimeError(f"unknown ConPTY broker operation: {operation}")
             except BaseException as err:  # noqa: BLE001 - process boundary
-                control.send(("error", type(err).__name__, str(err)))
+                _send_broker_error(control, err)
             else:
                 control.send(("ok", result))
-    except (BrokenPipeError, EOFError, OSError):
+    except (BrokenPipeError, EOFError):
         pass
     except BaseException as err:  # noqa: BLE001 - process boundary
-        try:
-            control.send(("error", type(err).__name__, str(err)))
-        except (BrokenPipeError, EOFError, OSError):
-            pass
+        _send_broker_error(control, err)
     finally:
         if native is not None:
             try:
                 native.close(force=True)
             except BaseException:  # noqa: BLE001 - process teardown
                 native = None
+        if user_job is not None:
+            try:
+                user_job.close()
+            except OSError:
+                pass
         for connection in (control, output, status):
             try:
                 connection.close()
             except OSError:
                 pass
+
+
+def _send_broker_error(connection: Any, error: BaseException) -> None:
+    """Send a data-only error envelope without attempting to pickle exceptions."""
+
+    try:
+        connection.send(
+            (
+                "error",
+                type(error).__name__,
+                str(error),
+                getattr(error, "errno", None),
+                getattr(error, "winerror", None),
+            )
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
 
 
 class WindowsPtyBackend(ExecutionBackend):
@@ -678,14 +725,19 @@ class WindowsPtyBackend(ExecutionBackend):
 
     async def _start_brokered(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
         environment = _child_environment(spec)
-        process_limit = spec.resources.process_count
-        job = WindowsJob(
-            memory_bytes=spec.resources.memory_bytes,
-            cpu_time_seconds=spec.resources.cpu_time_seconds,
-            # The broker itself occupies one Job slot. Adding exactly one keeps
-            # the configured limit applicable to the user process tree.
-            process_count=None if process_limit is None else process_limit + 1,
-        )
+        # Keep the broker in an unmetered ownership Job and place only the user
+        # process tree in the nested resource Job. This preserves kill-on-close
+        # ownership without charging broker memory or CPU to the user's limits.
+        broker_job = WindowsJob()
+        try:
+            user_job = WindowsJob(
+                memory_bytes=spec.resources.memory_bytes,
+                cpu_time_seconds=spec.resources.cpu_time_seconds,
+                process_count=spec.resources.process_count,
+            )
+        except BaseException:
+            broker_job.close()
+            raise
         context = multiprocessing.get_context("spawn")
         parent_control, child_control = context.Pipe(duplex=True)
         parent_output, child_output = context.Pipe(duplex=False)
@@ -704,7 +756,8 @@ class WindowsPtyBackend(ExecutionBackend):
             broker_pid = broker.pid
             if broker_pid is None:
                 raise RuntimeError("ConPTY broker did not publish a process ID")
-            job.assign(broker_pid)
+            broker_job.assign(broker_pid)
+            user_job_handle = user_job.duplicate_to_process(broker_pid)
             parent_control.send(
                 (
                     "start",
@@ -713,6 +766,7 @@ class WindowsPtyBackend(ExecutionBackend):
                     environment,
                     (24, 80),
                     self._read_poll_seconds,
+                    user_job_handle,
                 )
             )
             response = await asyncio.wait_for(
@@ -720,26 +774,27 @@ class WindowsPtyBackend(ExecutionBackend):
                 self._spawn_timeout_seconds,
             )
             if response[:1] != ("ok",):
-                raise RuntimeError(_broker_error_message(response))
+                _raise_broker_error(response)
             process = _BrokeredWinPtyProcess(int(response[1]), broker, parent_status)
             return WindowsPtyProcessHandle(
                 process=process,
                 process_tree="job_object",
+                birth_identity=process_birth_identity(process.pid),
                 native_pty=None,
-                job=job,
+                job=user_job,
+                broker_job=broker_job,
                 broker=broker,
                 broker_control=parent_control,
                 broker_output=parent_output,
             )
         except BaseException:
             try:
-                job.terminate()
-                job.wait_empty(1.0)
+                user_job.terminate()
             finally:
-                if broker.is_alive():
-                    broker.terminate()
-                    broker.join(timeout=2.0)
-                job.close()
+                # Both kill-on-close boundaries are released before any join,
+                # so cancellation cannot strand the broker or user tree.
+                user_job.close()
+                broker_job.close()
                 for connection in (
                     parent_control,
                     parent_output,
@@ -748,7 +803,11 @@ class WindowsPtyBackend(ExecutionBackend):
                     child_output,
                     child_status,
                 ):
-                    connection.close()
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+            await asyncio.to_thread(_reap_broker_process, broker)
             raise
 
     async def _start_test_double(self, spec: CommandSpec) -> WindowsPtyProcessHandle:
@@ -824,6 +883,7 @@ class WindowsPtyBackend(ExecutionBackend):
         return WindowsPtyProcessHandle(
             process=process,
             process_tree="job_object",
+            birth_identity=process_birth_identity(process.pid),
             degraded_reasons=(
                 (
                     "ConPTY Job assignment occurs after pywinpty spawn; use pipe "
@@ -974,37 +1034,79 @@ class WindowsPtyBackend(ExecutionBackend):
         pty_handle = _as_windows_pty(handle)
         if pty_handle._disposed:
             return
+        if pty_handle._dispose_task is None:
+            pty_handle._dispose_task = asyncio.create_task(
+                self._dispose_owned_pty(pty_handle)
+            )
+            pty_handle._dispose_task.add_done_callback(_consume_future_outcome)
+        await asyncio.shield(pty_handle._dispose_task)
+
+    async def _dispose_owned_pty(self, pty_handle: WindowsPtyProcessHandle) -> None:
+        if pty_handle._disposed:
+            return
         pty_handle._closing = True
+        cleanup_error: BaseException | None = None
         try:
-            await self.kill_tree(handle)
+            await self.kill_tree(pty_handle)
+        except BaseException as err:  # noqa: BLE001 - cleanup must continue
+            cleanup_error = err
         finally:
-            pty_handle.output_closed = True
-            pending = pty_handle._write_future
-            if pending is not None and not pending.done():
+            # Releasing both kill-on-close handles is intentionally synchronous.
+            # No await may intervene between a failed/slow empty check and this
+            # final ownership boundary.
+            for attribute in ("job", "broker_job"):
+                job = getattr(pty_handle, attribute)
+                if job is None:
+                    continue
                 try:
-                    if isinstance(pending, asyncio.Future):
-                        await asyncio.wait_for(asyncio.shield(pending), 2.0)
-                    else:
-                        await asyncio.wait_for(
-                            asyncio.shield(asyncio.wrap_future(pending)), 2.0
-                        )
-                except (asyncio.TimeoutError, OSError, RuntimeError):
-                    pass
-            if pty_handle.broker is not None:
-                for connection in (
-                    pty_handle.broker_control,
-                    pty_handle.broker_output,
-                    getattr(pty_handle.process, "_status", None),
-                ):
-                    if connection is not None:
+                    job.close()
+                except BaseException as err:  # noqa: BLE001 - cleanup boundary
+                    if cleanup_error is None:
+                        cleanup_error = err
+                finally:
+                    setattr(pty_handle, attribute, None)
+            pty_handle.output_closed = True
+            pty_handle._tree_killed = True
+            pty_handle._disposed = True
+
+        if pty_handle.broker is not None:
+            for connection in (
+                pty_handle.broker_control,
+                pty_handle.broker_output,
+                getattr(pty_handle.process, "_status", None),
+            ):
+                if connection is not None:
+                    try:
                         connection.close()
-                await asyncio.to_thread(pty_handle.broker.join, 2.0)
-            elif pty_handle.native_pty.isalive():
-                await asyncio.to_thread(pty_handle.native_pty.close, True)
-            if pty_handle.job is not None:
-                pty_handle.job.close()
-                pty_handle.job = None
-        pty_handle._disposed = True
+                    except OSError:
+                        pass
+            reaper = _submit_daemon_native_call(_reap_broker_process, pty_handle.broker)
+            try:
+                await asyncio.shield(asyncio.wrap_future(reaper))
+            except BaseException as err:  # noqa: BLE001 - cleanup boundary
+                if cleanup_error is None:
+                    cleanup_error = err
+        elif pty_handle.native_pty is not None:
+            try:
+                if pty_handle.native_pty.isalive():
+                    await asyncio.to_thread(pty_handle.native_pty.close, True)
+            except BaseException as err:  # noqa: BLE001 - cleanup boundary
+                if cleanup_error is None:
+                    cleanup_error = err
+
+        pending = pty_handle._write_future
+        if pending is not None and not pending.done():
+            try:
+                if isinstance(pending, asyncio.Future):
+                    await asyncio.wait_for(asyncio.shield(pending), 0.25)
+                else:
+                    await asyncio.wait_for(
+                        asyncio.shield(asyncio.wrap_future(pending)), 0.25
+                    )
+            except (asyncio.TimeoutError, OSError, RuntimeError):
+                pass
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def _broker_request(
         self, handle: WindowsPtyProcessHandle, operation: str, *args: Any
@@ -1033,7 +1135,7 @@ class WindowsPtyBackend(ExecutionBackend):
                 handle._control_failed = True
                 raise
             if response[:1] != ("ok",):
-                raise RuntimeError(_broker_error_message(response))
+                _raise_broker_error(response)
             return response[1] if len(response) > 1 else None
 
 
@@ -1068,6 +1170,48 @@ def _submit_conpty_write(
     return _submit_daemon_native_call(operation, *args, **kwargs)
 
 
+def _consume_future_outcome(completed: Any) -> None:
+    if not completed.cancelled():
+        completed.exception()
+
+
+def _reap_broker_process(broker: Any) -> None:
+    """Boundedly reap and close a multiprocessing broker in every exit state."""
+
+    cleanup_error: BaseException | None = None
+    try:
+        try:
+            broker.join(timeout=1.0)
+        except (AssertionError, ValueError) as err:
+            # A Process whose start failed has no child to reap, but still owns
+            # a local Process object that must be closed below.
+            cleanup_error = err
+        try:
+            alive = broker.is_alive()
+        except (AssertionError, ValueError):
+            alive = False
+        if alive:
+            broker.terminate()
+            broker.join(timeout=1.0)
+            alive = broker.is_alive()
+        if alive:
+            broker.kill()
+            broker.join(timeout=1.0)
+            alive = broker.is_alive()
+        if alive:
+            cleanup_error = TimeoutError("ConPTY broker did not exit after kill")
+    finally:
+        try:
+            broker.close()
+        except (AttributeError, ValueError) as err:
+            if cleanup_error is None:
+                cleanup_error = err
+    if cleanup_error is not None and not isinstance(
+        cleanup_error, (AssertionError, ValueError)
+    ):
+        raise cleanup_error
+
+
 async def _receive_broker_message(connection: Any, broker: Any) -> tuple[Any, ...]:
     while not connection.poll():
         if broker.exitcode is not None:
@@ -1085,6 +1229,27 @@ def _broker_error_message(message: tuple[Any, ...]) -> str:
     if len(message) >= 3 and message[0] == "error":
         return f"ConPTY broker {message[1]}: {message[2]}"
     return "invalid response from ConPTY broker"
+
+
+def _raise_broker_error(message: tuple[Any, ...]) -> None:
+    detail = _broker_error_message(message)
+    if len(message) < 3 or message[0] != "error":
+        raise RuntimeError(detail)
+    error_type = str(message[1])
+    native_errno = message[3] if len(message) > 3 else None
+    errno_value = native_errno if isinstance(native_errno, int) else None
+    native_winerror = message[4] if len(message) > 4 else None
+    winerror_value = native_winerror if isinstance(native_winerror, int) else None
+    error_args: tuple[Any, ...] = (errno_value, str(message[2]))
+    if winerror_value is not None:
+        error_args = (*error_args, None, winerror_value)
+    if error_type == "FileNotFoundError":
+        raise FileNotFoundError(*error_args)
+    if error_type == "PermissionError":
+        raise PermissionError(*error_args)
+    if error_type == "OSError":
+        raise OSError(*error_args)
+    raise RuntimeError(detail)
 
 
 def _resource_limiter(spec: CommandSpec) -> Optional[Callable[[], None]]:
@@ -1204,10 +1369,17 @@ async def cancel_process(
     policy = policy or CancellationPolicy()
     policy.validate()
     steps: list[CancellationStep] = []
+
+    async def kill_tree() -> None:
+        steps.append(CancellationStep.KILL_TREE)
+        if step_handler is not None:
+            await step_handler(CancellationStep.KILL_TREE)
+        await backend.kill_tree(handle)
+
     if handle.process.returncode is not None:
         if handle.process_tree != "unknown":
-            await backend.kill_tree(handle)
-        return ()
+            await kill_tree()
+        return tuple(steps)
 
     if not policy.skip_interrupt:
         steps.append(CancellationStep.INTERRUPT)
@@ -1218,7 +1390,7 @@ async def cancel_process(
             # Waiting for the root does not prove that descendants in the
             # session-owned process tree exited with it.
             if handle.process_tree != "unknown":
-                await backend.kill_tree(handle)
+                await kill_tree()
             return tuple(steps)
 
     steps.append(CancellationStep.TERMINATE)
@@ -1227,13 +1399,10 @@ async def cancel_process(
     await backend.terminate(handle)
     if await wait_for_exit(handle, policy.terminate_grace_ms / 1000):
         if handle.process_tree != "unknown":
-            await backend.kill_tree(handle)
+            await kill_tree()
         return tuple(steps)
 
-    steps.append(CancellationStep.KILL_TREE)
-    if step_handler is not None:
-        await step_handler(CancellationStep.KILL_TREE)
-    await backend.kill_tree(handle)
+    await kill_tree()
     if not await wait_for_exit(handle, policy.kill_tree_grace_ms / 1000):
         raise TimeoutError("process tree did not exit after forced termination")
     return tuple(steps)

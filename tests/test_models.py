@@ -22,12 +22,11 @@ def test_command_spec_validation_empty_executable():
         assert "executable" in str(err)
 
 
-def test_command_spec_reject_empty_arg():
-    try:
-        CommandSpec(executable="echo", argv=("",)).validate()
-        assert False
-    except ValueError:
-        pass
+def test_command_spec_preserves_empty_arg():
+    spec = CommandSpec(executable="echo", argv=("",))
+
+    spec.validate()
+    assert spec.argv_list == ["echo", ""]
 
 
 def test_command_spec_rejects_invalid_environment_name():

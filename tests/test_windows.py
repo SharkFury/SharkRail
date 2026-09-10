@@ -4,12 +4,14 @@ import socket
 import sys
 import threading
 import time
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from sharkrail.core.models import CommandSpec, ResourceLimits
+from sharkrail.core.errors import ErrorCode, SharkRailError
+from sharkrail.core.models import CommandMode, CommandSpec, ResourceLimits
 from sharkrail.runtime.backends import (
     PipeBackend,
     ProcessHandle,
@@ -19,15 +21,20 @@ from sharkrail.runtime.backends import (
     WindowsPtyBackend,
     WindowsPtyProcessHandle,
     _child_environment,
+    _conpty_broker_main,
+    _raise_broker_error,
     _windows_terminal_input,
     _WinPtyAsyncProcess,
     pipe_backend,
     pty_backend,
 )
+from sharkrail.runtime.sessions import SessionManager
 from sharkrail.runtime.windows import WindowsJob
 from sharkrail.service import windows_security
 from sharkrail.service.windows_security import (
+    read_verified_text_file,
     secure_private_path,
+    validate_private_file,
     validate_private_path,
 )
 
@@ -76,10 +83,34 @@ def test_windows_terminal_input_translates_lf_without_doubling_crlf():
     assert _windows_terminal_input(b"first\nsecond\r\n") == b"first\r\nsecond\r\n"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows ConPTY fixture")
+def test_windows_conpty_missing_executable_keeps_start_error_classification():
+    async def _run() -> None:
+        manager = SessionManager()
+        try:
+            with pytest.raises(SharkRailError) as raised:
+                await manager.start(
+                    CommandSpec(
+                        "sharkrail-definitely-missing.exe", (), mode=CommandMode.PTY
+                    )
+                )
+            assert raised.value.error.code == ErrorCode.EXECUTABLE_NOT_FOUND
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(_run())
+
+
 @pytest.mark.skipif(os.name == "nt", reason="non-Windows guard assertion")
 def test_windows_job_has_explicit_platform_guard():
     with pytest.raises(OSError, match="only available on Windows"):
         WindowsJob()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX device path")
+def test_private_file_validation_rejects_device():
+    with pytest.raises(PermissionError, match="regular file"):
+        validate_private_file(Path("/dev/null"))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACL integration")
@@ -92,6 +123,7 @@ def test_windows_private_directory_acl_is_inherited(tmp_path):
 
     validate_private_path(private)
     validate_private_path(child)
+    assert read_verified_text_file(child, forbidden_permissions=0o027) == "secret"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACL integration")
@@ -374,8 +406,10 @@ def test_windows_pty_broker_is_job_owned_before_user_spawn_is_released():
         context.Pipe.side_effect = lambda **_kwargs: next(pipes)
         broker = Mock(pid=42, exitcode=None)
         context.Process.return_value = broker
-        job = Mock()
-        job.assign.side_effect = lambda _pid: events.append("job-assigned")
+        broker_job = Mock()
+        broker_job.assign.side_effect = lambda _pid: events.append("job-assigned")
+        user_job = Mock()
+        user_job.duplicate_to_process.return_value = 84
 
         with (
             patch(
@@ -383,7 +417,8 @@ def test_windows_pty_broker_is_job_owned_before_user_spawn_is_released():
                 return_value=context,
             ),
             patch(
-                "sharkrail.runtime.backends.WindowsJob", return_value=job
+                "sharkrail.runtime.backends.WindowsJob",
+                side_effect=(broker_job, user_job),
             ) as job_type,
         ):
             handle = await WindowsPtyBackend()._start_brokered(
@@ -392,9 +427,146 @@ def test_windows_pty_broker_is_job_owned_before_user_spawn_is_released():
 
         assert handle.pid == 123
         assert events == ["job-assigned", "start-request"]
-        job_type.assert_called_once_with(
-            memory_bytes=None, cpu_time_seconds=None, process_count=4
+        assert job_type.call_args_list == [
+            call(),
+            call(memory_bytes=None, cpu_time_seconds=None, process_count=3),
+        ]
+        broker_job.assign.assert_called_once_with(42)
+        user_job.duplicate_to_process.assert_called_once_with(42)
+        assert control_parent.send.call_args.args[0][-1] == 84
+        assert handle.job is user_job
+        assert handle.broker_job is broker_job
+
+    asyncio.run(_run())
+
+
+def test_conpty_broker_preserves_missing_executable_details():
+    control = Mock()
+    control.recv.return_value = (
+        "start",
+        ["missing.exe"],
+        None,
+        {},
+        (24, 80),
+        0.1,
+        123,
+    )
+    output = Mock()
+    status = Mock()
+    winpty = ModuleType("winpty")
+    winpty.PtyProcess = Mock()
+    winpty.PtyProcess.spawn.side_effect = FileNotFoundError(2, "missing executable")
+    user_job = Mock()
+
+    with (
+        patch.dict(sys.modules, {"winpty": winpty}),
+        patch.object(WindowsJob, "from_handle", return_value=user_job),
+    ):
+        _conpty_broker_main(control, output, status)
+
+    error = control.send.call_args_list[0].args[0]
+    assert error[:3] == (
+        "error",
+        "FileNotFoundError",
+        "[Errno 2] missing executable",
+    )
+    assert error[3] == 2
+    with pytest.raises(FileNotFoundError) as raised:
+        _raise_broker_error(error)
+    assert raised.value.errno == 2
+    user_job.close.assert_called_once_with()
+
+
+def test_windows_pty_dispose_closes_jobs_before_stuck_broker_reaping():
+    async def _run() -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Broker:
+            exitcode = None
+
+            def __init__(self):
+                self.alive = True
+                self.terminated = False
+                self.closed = False
+
+            def join(self, timeout):
+                if not self.terminated:
+                    entered.set()
+                    release.wait(2)
+                else:
+                    self.alive = False
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.alive = False
+
+            def close(self):
+                self.closed = True
+
+        broker = Broker()
+        user_job = Mock()
+        user_job.wait_empty.return_value = True
+        broker_job = Mock()
+        process = Mock(returncode=None, _status=Mock())
+        handle = WindowsPtyProcessHandle(
+            process=process,
+            job=user_job,
+            broker_job=broker_job,
+            broker=broker,
+            broker_control=Mock(),
+            broker_output=Mock(),
         )
+
+        disposing = asyncio.create_task(WindowsPtyBackend().dispose(handle))
+        assert await asyncio.to_thread(entered.wait, 1)
+        disposing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await disposing
+
+        assert handle._disposed is True
+        assert handle._tree_killed is True
+        user_job.close.assert_called_once_with()
+        broker_job.close.assert_called_once_with()
+        release.set()
+        deadline = time.monotonic() + 1
+        while not broker.closed and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert broker.terminated is True
+        assert broker.closed is True
+
+    asyncio.run(_run())
+
+
+def test_windows_pty_dispose_is_terminal_when_active_zero_check_fails():
+    async def _run() -> None:
+        user_job = Mock()
+        user_job.wait_empty.return_value = False
+        broker_job = Mock()
+        native = Mock()
+        native.isalive.return_value = False
+        handle = WindowsPtyProcessHandle(
+            process=Mock(returncode=None),
+            native_pty=native,
+            job=user_job,
+            broker_job=broker_job,
+        )
+
+        with pytest.raises(TimeoutError, match="active processes"):
+            await WindowsPtyBackend().dispose(handle)
+
+        assert handle._disposed is True
+        assert handle._tree_killed is True
+        assert handle.job is None
+        assert handle.broker_job is None
+        user_job.close.assert_called_once_with()
+        broker_job.close.assert_called_once_with()
+        await WindowsPtyBackend().dispose(handle)
 
     asyncio.run(_run())
 

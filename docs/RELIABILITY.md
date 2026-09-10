@@ -49,8 +49,12 @@ only then resumed. Assignment or resume failure is fail-closed, so user code
 does not run under the weaker `taskkill` fallback. Each ConPTY is owned by a
 dedicated broker process. The broker is placed in its kill-on-close Job Object
 before it may invoke `pywinpty`, so a blocked native spawn, read, or write can be
-terminated without pinning an interpreter worker thread. Job accounting must
-report zero active processes before cleanup is considered complete.
+terminated without pinning an interpreter worker thread. The broker and user
+tree use separate Job Objects: only the user Job carries requested aggregate
+memory, CPU-time, and process-count limits, while the broker Job provides an
+unmetered ownership boundary. Cleanup closes both kill-on-close handles before
+awaiting broker reaping and reaches a repeatable disposed state even when Job
+accounting cannot report zero before the deadline.
 WSL cleanup is best effort until an in-distribution supervisor is available.
 Resource-limit behavior also follows OS semantics; for example, POSIX process
 limits may be account-wide and not every memory failure has a uniquely
