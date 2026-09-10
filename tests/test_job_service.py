@@ -140,7 +140,7 @@ def test_service_constructor_failure_releases_durable_instance_lock(tmp_path):
         output_store=OutputStoreSettings(url=blocked_output.as_uri()),
     )
 
-    with pytest.raises(PermissionError, match="not a directory"):
+    with pytest.raises(PermissionError, match=r"not a (?:real )?directory"):
         JobService(durable, state_dir=tmp_path)
 
     reopened = JobService(
