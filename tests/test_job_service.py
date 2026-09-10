@@ -137,7 +137,7 @@ def test_service_constructor_failure_releases_durable_instance_lock(tmp_path):
     durable = replace(
         base,
         job_store=JobStoreSettings(url="sqlite:///jobs.db"),
-        output_store=OutputStoreSettings(url=f"file://{blocked_output}"),
+        output_store=OutputStoreSettings(url=blocked_output.as_uri()),
     )
 
     with pytest.raises(PermissionError, match="not a directory"):
@@ -1080,6 +1080,7 @@ def test_master_bounds_repeated_worker_crashes(tmp_path):
     assert master.run() == 70
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process group registration")
 def test_master_ownership_registration_is_synchronous_and_independent_of_health(
     monkeypatch,
 ):

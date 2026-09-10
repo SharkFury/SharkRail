@@ -275,10 +275,12 @@ async def _run_cmd(ns: argparse.Namespace) -> int:
         )
         return _result_exit_code(result)
 
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+    if result.stdout_bytes:
+        sys.stdout.buffer.write(result.stdout_bytes)
+        sys.stdout.buffer.flush()
+    if result.stderr_bytes:
+        sys.stderr.buffer.write(result.stderr_bytes)
+        sys.stderr.buffer.flush()
     return _result_exit_code(result)
 
 

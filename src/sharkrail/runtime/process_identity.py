@@ -10,17 +10,24 @@ from pathlib import Path
 from .windows import process_creation_time
 
 
+def _platform_name() -> str:
+    """Return the runtime platform without inviting static branch folding."""
+
+    return sys.platform
+
+
 def process_birth_identity(pid: int) -> str | None:
     """Return an identity that changes when an operating-system PID is reused."""
 
     if pid <= 0:
         return None
-    if sys.platform == "win32":  # pragma: no cover - exercised by Windows CI
+    platform = _platform_name()
+    if platform == "win32":  # pragma: no cover - exercised by Windows CI
         try:
             return f"windows:{process_creation_time(pid)}"
         except OSError:
             return None
-    if sys.platform.startswith("linux"):
+    if platform.startswith("linux"):
         try:
             stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
             # The command name is parenthesized and may itself contain spaces.
@@ -28,7 +35,7 @@ def process_birth_identity(pid: int) -> str | None:
             return f"linux:{fields_after_name[19]}"
         except (FileNotFoundError, IndexError, OSError, UnicodeError):
             return None
-    if sys.platform == "darwin":
+    if platform == "darwin":
         identity = _darwin_process_birth_identity(pid)
         if identity is not None:
             return identity

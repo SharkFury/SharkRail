@@ -165,8 +165,10 @@ def test_sharkrail_plain_output_preserves_child_streams():
     )
 
     assert result.returncode == 0
-    assert result.stdout == f"OUT{os.linesep}"
-    assert result.stderr == f"ERR{os.linesep}"
+    # text=True normalizes platform line endings; a doubled Windows CRLF would
+    # surface as an extra blank line here.
+    assert result.stdout == "OUT\n"
+    assert result.stderr == "ERR\n"
 
 
 def test_sharkrail_json_validation_error_is_structured():
