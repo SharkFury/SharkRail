@@ -294,7 +294,7 @@ def test_cancel_during_session_registration_cannot_be_lost(monkeypatch, tmp_path
         assert entered_start.wait(3)
         requested = service.cancel(job.id, "tenant")
         assert requested.spec.desired_state == "cancelled"
-        assert requested.observed_generation < requested.generation
+        assert requested.generation == job.generation + 1
         allow_start.set()
 
         completed = _terminal(service, job.id)
