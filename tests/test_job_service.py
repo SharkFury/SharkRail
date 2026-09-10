@@ -116,6 +116,19 @@ def test_direct_service_construction_validates_configuration(tmp_path):
             state_dir=tmp_path,
         )
 
+    with pytest.raises(ConfigError, match="requires secret or secret_file"):
+        JobService(
+            _config(
+                tmp_path,
+                callback_endpoints={
+                    "unsigned": CallbackEndpoint(
+                        url="https://example.com/callback", tenant_id="tenant"
+                    )
+                },
+            ),
+            state_dir=tmp_path,
+        )
+
 
 def test_service_constructor_failure_releases_durable_instance_lock(tmp_path):
     blocked_output = tmp_path / "not-a-directory"
@@ -351,7 +364,9 @@ def test_terminal_persistence_failure_is_recovered_after_lease_expiry(
 
 
 def test_notification_deliveries_run_concurrently(tmp_path, monkeypatch):
-    endpoint = CallbackEndpoint(url="https://example.com/completed", tenant_id="tenant")
+    endpoint = CallbackEndpoint(
+        url="https://example.com/completed", tenant_id="tenant", secret="secret"
+    )
     service = JobService(
         _config(
             tmp_path,
@@ -410,7 +425,9 @@ def test_notification_deliveries_run_concurrently(tmp_path, monkeypatch):
 
 
 def test_callback_endpoint_is_scoped_to_submitting_tenant(tmp_path):
-    endpoint = CallbackEndpoint(url="https://example.com/completed", tenant_id="owner")
+    endpoint = CallbackEndpoint(
+        url="https://example.com/completed", tenant_id="owner", secret="secret"
+    )
     service = JobService(
         _config(tmp_path, callback_endpoints={"receiver": endpoint}),
         state_dir=tmp_path,
@@ -436,7 +453,7 @@ def test_callback_endpoint_is_scoped_to_submitting_tenant(tmp_path):
 def test_callback_delivery_rechecks_persisted_job_tenant(tmp_path, monkeypatch):
     endpoints = {
         "receiver": CallbackEndpoint(
-            url="https://example.com/completed", tenant_id="owner"
+            url="https://example.com/completed", tenant_id="owner", secret="secret"
         )
     }
     service = JobService(
@@ -469,7 +486,7 @@ def test_callback_delivery_rechecks_persisted_job_tenant(tmp_path, monkeypatch):
         assert records[0].tenant_id == "owner"
 
         endpoints["receiver"] = CallbackEndpoint(
-            url="https://example.com/completed", tenant_id="other"
+            url="https://example.com/completed", tenant_id="other", secret="secret"
         )
 
         def unexpected_delivery(**_kwargs):
@@ -594,7 +611,9 @@ def test_callback_deadline_interrupts_tls_handshake(monkeypatch):
 def test_callback_dns_resolution_is_bounded_and_does_not_block_close(
     monkeypatch, tmp_path
 ):
-    endpoint = CallbackEndpoint(url="https://example.com", tenant_id="tenant")
+    endpoint = CallbackEndpoint(
+        url="https://example.com", tenant_id="tenant", secret="secret"
+    )
     service = JobService(
         _config(tmp_path, callback_endpoints={"receiver": endpoint}),
         state_dir=tmp_path,
@@ -660,6 +679,39 @@ def test_http_submit_idempotency_result_and_output(tmp_path):
             assert response.read() == f"from-http{os.linesep}".encode()
         with urllib.request.urlopen(base + "/health/state", timeout=3) as response:
             assert json.load(response)["degraded"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        service.close()
+
+
+def test_http_store_failure_returns_stable_json_503(tmp_path, monkeypatch):
+    service = JobService(_config(tmp_path), state_dir=tmp_path)
+
+    def fail_submit(*_args, **_kwargs):
+        raise StoreError("sensitive database detail")
+
+    monkeypatch.setattr(service, "submit", fail_submit)
+    server = JobHTTPServer(("127.0.0.1", 0), service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/v1/jobs",
+        json.dumps({"command": ["echo"]}).encode(),
+        {"Content-Type": "application/json", "Idempotency-Key": "failure"},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as failure:
+            urllib.request.urlopen(request, timeout=3)
+        response = failure.value
+        payload = json.load(response)
+        assert response.code == 503
+        assert payload["error"] == "internal service error"
+        assert payload["request_id"] == response.headers["X-Request-ID"]
+        assert "sensitive database detail" not in json.dumps(payload)
+        response.close()
     finally:
         server.shutdown()
         server.server_close()

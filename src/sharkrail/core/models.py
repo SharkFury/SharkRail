@@ -40,10 +40,10 @@ class CommandSpec:
     inherit_env: bool = True
 
     def validate(self) -> None:
-        if not self.executable or not self.executable.strip():
+        if not isinstance(self.executable, str) or not self.executable.strip():
             raise ValueError("executable must be a non-empty string")
-        if any(not arg for arg in self.argv):
-            raise ValueError("argv contains empty argument")
+        if any(not isinstance(arg, str) for arg in self.argv):
+            raise TypeError("argv must contain only strings")
         if self.env is not None and any(not key or "=" in key for key in self.env):
             raise ValueError("environment contains an invalid variable name")
         if not isinstance(self.inherit_env, bool):

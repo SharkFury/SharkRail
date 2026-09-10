@@ -751,13 +751,12 @@ class JobService:
             "X-SharkRail-Timestamp": timestamp,
         }
         secret = endpoint.resolved_secret()
-        if secret:
-            signature = hmac.new(
-                secret.encode("utf-8"),
-                timestamp.encode("ascii") + b"." + body,
-                hashlib.sha256,
-            ).hexdigest()
-            headers["X-SharkRail-Signature"] = f"sha256={signature}"
+        signature = hmac.new(
+            secret.encode("utf-8"),
+            timestamp.encode("ascii") + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+        headers["X-SharkRail-Signature"] = f"sha256={signature}"
         deadline = time.monotonic() + self.config.notifications.request_timeout_seconds
         try:
             hostname, port, addresses = self._resolve_callback_destination(

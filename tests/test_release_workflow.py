@@ -20,14 +20,14 @@ def run_check(tag: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_current_release_tag_matches_package_version() -> None:
+def test_unreleased_candidate_cannot_be_tagged_as_a_release() -> None:
     result = run_check(f"v{__version__}")
 
-    assert result.returncode == 0
-    assert f"matches SharkRail {__version__}" in result.stdout
+    assert result.returncode != 0
+    assert "has no dated" in result.stderr
     changelog = (REPOSITORY / "CHANGELOG.md").read_text(encoding="utf-8")
     assert re.search(
-        rf"^## \[{re.escape(__version__)}\] - \d{{4}}-\d{{2}}-\d{{2}}$",
+        rf"^## \[{re.escape(__version__)}\] - Unreleased$",
         changelog,
         re.MULTILINE,
     )

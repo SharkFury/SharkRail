@@ -125,19 +125,24 @@ class CallbackEndpoint:
     secret_file: Optional[str] = None
     allow_private_networks: bool = False
 
-    def resolved_secret(self) -> Optional[str]:
+    def resolved_secret(self) -> str:
         if self.secret is not None:
+            if not self.secret.strip():
+                raise ConfigError("callback secret must not be empty or whitespace")
             return self.secret
         if self.secret_file is None:
-            return None
+            raise ConfigError("callback endpoint requires secret or secret_file")
         try:
-            return read_verified_text_file(
+            secret = read_verified_text_file(
                 Path(self.secret_file), forbidden_permissions=0o027
             ).strip()
         except (OSError, UnicodeError) as err:
             raise ConfigError(
                 f"cannot read callback secret file {self.secret_file!r}: {err}"
             ) from err
+        if not secret:
+            raise ConfigError(f"callback secret file {self.secret_file!r} is empty")
+        return secret
 
 
 @dataclass(frozen=True)
@@ -254,6 +259,10 @@ def system_config_path(
         if not base:
             base = _windows_program_data()
         return Path(base) / "SharkRail" / "sharkrail.toml"
+    if platform == "darwin":
+        # /etc is a system symlink on macOS. Use its canonical system-owned
+        # location so verified no-follow traversal can retain its guarantees.
+        return Path("/private/etc/sharkrail/sharkrail.toml")
     return Path("/etc/sharkrail/sharkrail.toml")
 
 
@@ -272,6 +281,8 @@ def state_directory(
         if not base:
             base = _windows_program_data()
         return Path(base) / "SharkRail" / "data"
+    if platform == "darwin":
+        return Path("/private/var/lib/sharkrail")
     return Path("/var/lib/sharkrail")
 
 
@@ -505,12 +516,12 @@ def _validate_config(
                 raise ConfigError(
                     f"callback endpoint {name!r} {setting} must be a non-empty string"
                 )
-        validate_callback_destination(endpoint, name=name, resolve=resolve_callbacks)
         if endpoint.secret and endpoint.secret_file:
             raise ConfigError(
                 f"callback endpoint {name!r} cannot set secret and secret_file"
             )
         endpoint.resolved_secret()
+        validate_callback_destination(endpoint, name=name, resolve=resolve_callbacks)
     if config.logging.level.upper() not in {
         "CRITICAL",
         "ERROR",

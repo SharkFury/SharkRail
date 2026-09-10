@@ -1,7 +1,8 @@
 # Reliable asynchronous jobs
 
-Status: experimental single-host implementation in `Unreleased`; the
-multi-host architecture in this document remains a design direction.
+Status: experimental single-host implementation in the unreleased v0.1.3
+candidate; the multi-host architecture in this document remains a design
+direction.
 
 This document defines an optional, self-hosted client/server layer for long-
 running SharkRail commands. Clients declare desired state, the API persists it,
@@ -543,11 +544,13 @@ content returns `409 Conflict`.
 ```http
 GET  /v1/jobs/{job_id}
 GET  /v1/jobs/{job_id}/result
-GET  /v1/jobs/{job_id}/output?stream=stdout&cursor=...
+GET  /v1/jobs/{job_id}/output?stream=stdout
 POST /v1/jobs/{job_id}/cancel
 ```
 
-Polling remains a supported recovery path when a webhook cannot be delivered.
+The output endpoint returns the retained stream as one bounded response;
+incremental durable-output cursors are not implemented. Polling job state
+remains a supported recovery path when a webhook cannot be delivered.
 SSE or protocol event subscriptions may be added for operators and interactive
 clients, but business clients must not need a live connection.
 Cancellation updates the resource intent to `desired_state=cancelled`; it does

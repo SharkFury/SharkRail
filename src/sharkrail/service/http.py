@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import logging
 import socket
 import socketserver
 import threading
@@ -12,10 +13,13 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from .config import is_loopback_listener
 from .server import JobService
 from .store import AdmissionLimited, IdempotencyConflict, JobNotFound, StoreError
+
+LOGGER = logging.getLogger("sharkrail.runtime.service.http")
 
 
 class JobHTTPServer(ThreadingHTTPServer):
@@ -77,6 +81,8 @@ class JobRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SharkRail"
     _tenant_id: str
+    _response_started = False
+    _request_id: str
 
     @property
     def job_server(self) -> JobHTTPServer:
@@ -84,21 +90,47 @@ class JobRequestHandler(BaseHTTPRequestHandler):
         return self.server
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
-        if path == "/health/state":
-            if not self._authorized_admin():
+        self._request_id = uuid4().hex
+        try:
+            path = urlparse(self.path).path
+            if path == "/health/state":
+                if not self._authorized_admin():
+                    return
+            elif path in {"/health/live", "/health/ready"}:
+                if not self._authorized_probe():
+                    return
+            elif not self._authorized_tenant():
                 return
-        elif path in {"/health/live", "/health/ready"}:
-            if not self._authorized_probe():
-                return
-        elif not self._authorized_tenant():
-            return
-        self._do_get()
+            self._do_get()
+        except Exception as err:  # noqa: BLE001 - HTTP request boundary
+            self._internal_error(err)
 
     def do_POST(self) -> None:
-        if not self._authorized_tenant():
+        self._request_id = uuid4().hex
+        try:
+            if not self._authorized_tenant():
+                return
+            self._do_post()
+        except Exception as err:  # noqa: BLE001 - HTTP request boundary
+            self._internal_error(err)
+
+    def _internal_error(self, err: Exception) -> None:
+        LOGGER.exception(
+            "HTTP request failed (request_id=%s)",
+            self._request_id,
+            exc_info=err,
+        )
+        if self._response_started:
             return
-        self._do_post()
+        status = (
+            HTTPStatus.SERVICE_UNAVAILABLE
+            if isinstance(err, (StoreError, OSError))
+            else HTTPStatus.INTERNAL_SERVER_ERROR
+        )
+        self._json(
+            status,
+            {"error": "internal service error", "request_id": self._request_id},
+        )
 
     def _do_get(self) -> None:
         parsed = urlparse(self.path)
@@ -148,7 +180,7 @@ class JobRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "job not found"})
             return
         except StoreError as err:
-            self._json(HTTPStatus.CONFLICT, {"error": str(err)})
+            self._internal_error(err)
             return
         except (OSError, ValueError) as err:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(err)})
@@ -328,12 +360,14 @@ class JobRequestHandler(BaseHTTPRequestHandler):
         content_type: str = "application/octet-stream",
         headers: Optional[dict[str, str]] = None,
     ) -> None:
+        self._response_started = True
         self.send_response(status.value)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         if self.job_server.service.config.durability == "volatile":
             self.send_header("X-SharkRail-Durability", "volatile")
+        self.send_header("X-Request-ID", self._request_id)
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()

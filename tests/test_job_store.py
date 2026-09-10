@@ -258,6 +258,8 @@ def test_stale_callback_delivery_cannot_overwrite_new_claim():
 def test_job_spec_applies_non_optional_bounded_resource_limits():
     defaulted = JobSpec.from_dict({"command": ["echo"]})
     assert defaulted.timeout_seconds == DEFAULT_JOB_TIMEOUT_SECONDS
+    with_empty_argument = JobSpec.from_dict({"command": ["echo", ""]})
+    assert with_empty_argument.command == ("echo", "")
 
     with pytest.raises(ValueError, match="unknown Job field"):
         JobSpec.from_dict({"command": ["echo"], "timeoutSeconds": 1})

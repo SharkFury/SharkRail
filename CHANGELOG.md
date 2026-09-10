@@ -4,7 +4,7 @@ Notable changes to SharkRail are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and package releases
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.3] - 2026-09-09
+## [0.1.3] - Unreleased
 
 ### Added
 
@@ -35,6 +35,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Preserve child stderr and timeout exit code 124 in the human CLI, accept empty
+  argument values, and return structured JSON for CLI validation failures.
+- Use canonical macOS system paths without weakening verified no-follow reads.
+- Require callback signing secrets, return stable JSON for unexpected HTTP
+  failures, and strictly validate JSON-RPC control parameter types and ranges.
 - Fail closed on unsafe pre-existing POSIX storage paths, publish Job output
   pairs atomically, reconcile crash leftovers, and bound durable retention.
 - Materialize host resource ceilings for Job execution and reject policy-denied

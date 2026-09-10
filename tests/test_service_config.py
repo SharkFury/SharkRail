@@ -39,6 +39,29 @@ def test_missing_implicit_config_uses_volatile_sqlite(monkeypatch, tmp_path):
     assert config.config_path is None
 
 
+def test_darwin_missing_implicit_config_uses_volatile_defaults(monkeypatch):
+    expected = system_config_path(platform="darwin", environ={})
+
+    monkeypatch.setattr(
+        "sharkrail.service.config.system_config_path", lambda **_kwargs: expected
+    )
+
+    def missing(path, *, forbidden_permissions):
+        assert path == expected
+        assert forbidden_permissions == 0o027
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(
+        "sharkrail.service.config.read_verified_text_file",
+        missing,
+    )
+
+    config = load_config(environ={})
+
+    assert config.durability == "volatile"
+    assert config.config_path is None
+
+
 def test_explicit_missing_config_is_an_error(tmp_path):
     with pytest.raises(ConfigError, match="does not exist"):
         load_config(tmp_path / "missing.toml", require_explicit=True)
@@ -154,7 +177,8 @@ def test_callback_rejects_non_public_destination_by_default(tmp_path):
     path = _write_config(
         tmp_path / "service.toml",
         '[callback_endpoints.local]\ntenant_id = "default"\n'
-        'url = "http://127.0.0.1/hook"\n',
+        'url = "http://127.0.0.1/hook"\n'
+        'secret = "test-secret"\n',
     )
 
     with pytest.raises(ConfigError, match="non-public address"):
@@ -166,11 +190,34 @@ def test_callback_private_destination_requires_explicit_opt_in(tmp_path):
         tmp_path / "service.toml",
         '[callback_endpoints.local]\ntenant_id = "default"\n'
         'url = "http://127.0.0.1/hook"\n'
+        'secret = "test-secret"\n'
         "allow_private_networks = true\n",
     )
 
     config = load_config(path)
     assert config.callback_endpoints["local"].allow_private_networks is True
+
+
+def test_callback_without_authentication_is_rejected():
+    endpoint = CallbackEndpoint(
+        url="https://example.com/callback",
+        tenant_id="tenant",
+    )
+
+    with pytest.raises(ConfigError, match="requires secret or secret_file"):
+        endpoint.resolved_secret()
+
+
+def test_empty_callback_secret_file_is_rejected(tmp_path):
+    secret = _write_config(tmp_path / "empty-secret", " \n")
+    endpoint = CallbackEndpoint(
+        url="https://example.com/callback",
+        tenant_id="tenant",
+        secret_file=str(secret),
+    )
+
+    with pytest.raises(ConfigError, match="is empty"):
+        endpoint.resolved_secret()
 
 
 def test_callback_requires_tenant_and_strict_private_network_flag(tmp_path):
@@ -204,7 +251,8 @@ def test_callback_rejects_non_unicast_destinations(tmp_path, address):
     path = _write_config(
         tmp_path / "non-unicast.toml",
         '[callback_endpoints.unsafe]\ntenant_id = "default"\n'
-        f'url = "http://{address}/hook"\n',
+        f'url = "http://{address}/hook"\n'
+        'secret = "test-secret"\n',
     )
 
     with pytest.raises(ConfigError, match="non-public address"):
@@ -360,6 +408,12 @@ def test_system_paths_follow_platform_conventions():
     assert (
         system_config_path(platform="win32", environ={"ProgramData": r"D:\SharedData"})
         == Path(r"D:\SharedData") / "SharkRail" / "sharkrail.toml"
+    )
+    assert system_config_path(platform="darwin", environ={}) == Path(
+        "/private/etc/sharkrail/sharkrail.toml"
+    )
+    assert state_directory(platform="darwin", environ={}) == Path(
+        "/private/var/lib/sharkrail"
     )
     assert (
         state_directory(platform="win32", environ={"ProgramData": r"D:\SharedData"})

@@ -66,10 +66,15 @@ class JobSpec:
     desired_state: str = "active"
 
     def validate(self) -> None:
-        if not self.command or any(
-            not isinstance(item, str) or not item for item in self.command
+        if (
+            not self.command
+            or not isinstance(self.command[0], str)
+            or not self.command[0].strip()
+            or any(not isinstance(item, str) for item in self.command[1:])
         ):
-            raise ValueError("command must be a non-empty array of non-empty strings")
+            raise ValueError(
+                "command must contain a non-empty executable followed by string arguments"
+            )
         if self.cwd is not None and not isinstance(self.cwd, str):
             raise ValueError("cwd must be a string")
         if self.env is not None and any(

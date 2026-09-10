@@ -1,6 +1,6 @@
 # 可靠异步任务架构
 
-状态：`Unreleased` 已提供实验性的单机实现；本文中的多机架构仍是设计方向。
+状态：未发布的 v0.1.3 候选版已提供实验性的单机实现；本文中的多机架构仍是设计方向。
 
 该功能在现有运行时之上增加一个可选、自托管的 C/S 控制面。客户端声明期望状态，API
 将它写入状态存储，多个可重入 Controller 持续比较期望状态与实际状态并执行调谐。客户端
@@ -440,11 +440,12 @@ Content-Type: application/json
 ```http
 GET  /v1/jobs/{job_id}
 GET  /v1/jobs/{job_id}/result
-GET  /v1/jobs/{job_id}/output?stream=stdout&cursor=...
+GET  /v1/jobs/{job_id}/output?stream=stdout
 POST /v1/jobs/{job_id}/cancel
 ```
 
-查询接口始终保留，作为 Webhook 投递失败时的兜底。可以为操作人员或交互客户端增加
+输出接口以单个有界响应返回保留的完整流；增量持久化输出游标尚未实现。
+Job 状态查询接口始终保留，作为 Webhook 投递失败时的兜底。可以为操作人员或交互客户端增加
 SSE，但业务客户端不应依赖长连接。
 取消接口只把资源意图更新为 `desired_state=cancelled`；它不能绕过调谐循环直接向进程
 发信号，并在实际状态尚未收敛时错误地报告成功。
