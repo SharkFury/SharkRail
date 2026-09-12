@@ -388,6 +388,51 @@ def test_output_reconcile_removes_unpublished_atomic_staging_directory(tmp_path)
         output.close()
 
 
+def test_output_quota_accounting_does_not_rescan_all_jobs(monkeypatch, tmp_path):
+    output = FileOutputStore("file://./output", state_dir=tmp_path, max_total_bytes=64)
+    first_job = f"job_{'a' * 32}"
+    second_job = f"job_{'b' * 32}"
+    try:
+        output.write_job(first_job, b"old", b"error")
+
+        def reject_rescan(*_args, **_kwargs):
+            raise AssertionError("normal quota accounting must not scan the store")
+
+        monkeypatch.setattr(Path, "rglob", reject_rescan)
+        output.write_job(second_job, b"new", b"")
+        output.write(first_job, "stdout", b"replacement")
+        output.delete_job(second_job, None, None)
+
+        assert output._size_locked() == len(b"replacement") + len(b"error")
+    finally:
+        output.close()
+
+
+def test_output_quota_reconciles_after_unclean_shutdown(tmp_path):
+    job_id = f"job_{'a' * 32}"
+    output = FileOutputStore("file://./output", state_dir=tmp_path, max_total_bytes=5)
+    recovered = None
+    try:
+        stdout = Path(output.write(job_id, "stdout", b"1234"))
+        # Model a file changed by an interrupted older process. Reconciliation
+        # is the startup boundary that must repair the in-memory counter.
+        stdout.write_bytes(b"1")
+        output.close()
+        recovered = FileOutputStore(
+            "file://./output", state_dir=tmp_path, max_total_bytes=5
+        )
+        recovered.reconcile({job_id})
+
+        recovered.write(job_id, "stderr", b"2345")
+        with pytest.raises(OSError, match="capacity exceeded"):
+            recovered.write(f"job_{'b' * 32}", "stdout", b"x")
+        assert recovered._size_locked() == 5
+    finally:
+        output.close()
+        if recovered is not None:
+            recovered.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX path policy")
 def test_storage_rejects_system_shared_directories_without_mutating_them():
     root_mode = stat.S_IMODE(Path("/").stat().st_mode)

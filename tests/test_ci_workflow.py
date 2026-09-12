@@ -2,6 +2,9 @@ import re
 from pathlib import Path
 
 CI_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = (
+    Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+)
 
 
 def test_ci_runs_complete_suite_on_every_matrix_member():
@@ -22,6 +25,8 @@ def test_ci_enforces_types_format_coverage_and_installed_wheel():
         "python -m mypy src/sharkrail",
         "--cov-fail-under=70",
         "--cov-branch",
+        "--cov-report=json:coverage.json",
+        ".github/scripts/check_critical_coverage.py coverage.json",
         ".github/scripts/wheel_smoke.py",
     ):
         assert gate in workflow
@@ -31,6 +36,17 @@ def test_python_39_type_checker_remains_supported():
     metadata = (CI_WORKFLOW.parents[2] / "pyproject.toml").read_text(encoding="utf-8")
 
     assert '"mypy>=1.15,<2"' in metadata
+
+
+def test_ci_and_release_block_on_platform_resolved_dependency_vulnerabilities():
+    for path in (CI_WORKFLOW, RELEASE_WORKFLOW):
+        workflow = path.read_text(encoding="utf-8")
+        assert "pip-audit==2.9.0" in workflow
+        assert "python -m pip_audit . --progress-spinner off" in workflow
+
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert 'python-version: ["3.9", "3.11", "3.14"]' in ci
+    assert "windows-latest" in ci
 
 
 def test_ci_actions_are_pinned_and_checkout_drops_credentials():

@@ -82,11 +82,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Repair the MCP `session_read` input schema, avoid reverse DNS during HTTP
   binding, select IPv6 for IPv6 listeners, keep Python 3.9 mypy checks active,
   and emit unique runtime-only SBOM components.
+- Honor the host-configured event-page limit through JSON-RPC and maintain
+  output-store quota usage incrementally, with startup and failure recovery
+  reconciliation instead of a full filesystem scan for every completed Job.
+- Capture CLI subprocess coverage and enforce independent coverage floors for
+  the CLI, process backends, Control Master, and ownership channel.
 
 ### Security
 
 - Enforce protected Windows DACLs for sensitive configuration, durable state,
   SQLite sidecars, locks, and persisted output.
+- Block CI and release verification when platform-resolved runtime dependencies
+  have known vulnerabilities.
 
 ## 0.1.2 - 2026-09-07
 

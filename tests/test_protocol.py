@@ -7,6 +7,7 @@ import pytest
 
 from sharkrail.core.models import CommandSpec
 from sharkrail.integrations.protocol import JsonRpcRuntime, serve_stdio
+from sharkrail.runtime.sessions import SessionManager
 
 
 def request(
@@ -118,6 +119,28 @@ def test_protocol_rejects_coerced_or_out_of_range_control_types(method, params):
         response = await JsonRpcRuntime().dispatch(request(method, params))
         assert response is not None
         assert response["error"]["code"] == -32602
+
+    asyncio.run(_run())
+
+
+def test_jsonrpc_event_limit_respects_custom_manager_limit():
+    async def _run() -> None:
+        runtime = JsonRpcRuntime(SessionManager(max_event_page_size=200))
+        session = await runtime.manager.start(
+            CommandSpec(executable=sys.executable, argv=("-c", "pass"))
+        )
+        await runtime.manager.wait(session.id)
+
+        response = await runtime.dispatch(
+            request(
+                "session.subscribe",
+                {"session_id": session.id, "limit": 101},
+            )
+        )
+
+        assert response is not None
+        assert "error" not in response
+        assert response["result"]["events"]
 
     asyncio.run(_run())
 

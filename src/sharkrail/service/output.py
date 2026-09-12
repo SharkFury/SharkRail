@@ -58,17 +58,26 @@ class FileOutputStore:
             path = Path(raw_path or "./output")
             self.root = path if path.is_absolute() else (state_dir or Path.cwd()) / path
             ensure_private_directory(self.root)
+        # Rebuild the accounting once when opening the store. Normal writes and
+        # removals update this value incrementally; reconcile() recalibrates it
+        # after cleaning up state left by an unclean shutdown.
+        self._used_bytes = self._scan_size_locked()
 
     def write(self, job_id: str, stream: str, data: bytes) -> str:
         if stream not in {"stdout", "stderr"}:
             raise ValueError("unknown output stream")
         if not job_id or Path(job_id).name != job_id:
             raise OSError("invalid output Job ID")
-        target_dir = self.root / job_id
-        ensure_private_directory(target_dir)
-        target = target_dir / f"{stream}.bin"
         with self._lock:
-            if self._size_locked() + len(data) > self._max_total_bytes:
+            target_dir = self.root / job_id
+            ensure_private_directory(target_dir)
+            target = target_dir / f"{stream}.bin"
+            existing_size = (
+                target.stat().st_size
+                if target.is_file() and not target.is_symlink()
+                else 0
+            )
+            if self._size_locked() - existing_size + len(data) > self._max_total_bytes:
                 raise OSError("output store capacity exceeded")
             descriptor, temporary_name = create_private_temp_file(
                 target_dir, f".{stream}."
@@ -80,6 +89,7 @@ class FileOutputStore:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary, target)
+                self._used_bytes += len(data) - existing_size
                 secure_private_path(target, directory=False)
                 _sync_directory(target_dir)
             except BaseException:
@@ -101,9 +111,7 @@ class FileOutputStore:
         with self._lock:
             if os.path.lexists(target_dir):
                 ensure_private_directory(target_dir)
-            existing_size = sum(
-                target.stat().st_size for target in targets if target.is_file()
-            )
+            existing_size = self._directory_size_locked(target_dir)
             if (
                 self._size_locked() - existing_size + len(stdout) + len(stderr)
                 > self._max_total_bytes
@@ -123,11 +131,17 @@ class FileOutputStore:
                     os.replace(temporary, staging_dir / f"{stream}.bin")
                 _sync_directory(staging_dir)
                 if target_dir.exists():
-                    self._remove_job_directory(target_dir)
+                    removed_size = self._remove_job_directory(target_dir)
+                    self._used_bytes -= removed_size
                 os.replace(staging_dir, target_dir)
+                self._used_bytes += len(stdout) + len(stderr)
                 _sync_directory(self.root)
             except BaseException:
                 self._remove_job_directory(staging_dir, missing_ok=True)
+                # A failure can occur after a rename or a partial cleanup. This
+                # exceptional path recalibrates rather than carrying a stale
+                # quota into later writes.
+                self._used_bytes = self._scan_size_locked()
                 raise
         return str(targets[0]), str(targets[1])
 
@@ -136,17 +150,20 @@ class FileOutputStore:
 
         removed = 0
         with self._lock:
-            for child in tuple(self.root.iterdir()):
-                if child.is_symlink() or not child.is_dir():
-                    raise OSError(f"unexpected entry in output store: {child.name}")
-                is_staging = _STAGING_DIRECTORY.fullmatch(child.name) is not None
-                is_job = _JOB_DIRECTORY.fullmatch(child.name) is not None
-                if not is_staging and not is_job:
-                    raise OSError(f"unexpected entry in output store: {child.name}")
-                if not is_staging and child.name in referenced_job_ids:
-                    continue
-                self._remove_job_directory(child)
-                removed += 1
+            try:
+                for child in tuple(self.root.iterdir()):
+                    if child.is_symlink() or not child.is_dir():
+                        raise OSError(f"unexpected entry in output store: {child.name}")
+                    is_staging = _STAGING_DIRECTORY.fullmatch(child.name) is not None
+                    is_job = _JOB_DIRECTORY.fullmatch(child.name) is not None
+                    if not is_staging and not is_job:
+                        raise OSError(f"unexpected entry in output store: {child.name}")
+                    if not is_staging and child.name in referenced_job_ids:
+                        continue
+                    self._remove_job_directory(child)
+                    removed += 1
+            finally:
+                self._used_bytes = self._scan_size_locked()
         return removed
 
     @staticmethod
@@ -182,7 +199,12 @@ class FileOutputStore:
                 raise OSError("persisted output path escapes Job output directory")
 
         with self._lock:
-            self._remove_job_directory(target_dir, missing_ok=True)
+            try:
+                removed_size = self._remove_job_directory(target_dir, missing_ok=True)
+                self._used_bytes -= removed_size
+            except BaseException:
+                self._used_bytes = self._scan_size_locked()
+                raise
 
     def close(self) -> None:
         if not self._temporary:
@@ -201,28 +223,51 @@ class FileOutputStore:
             pass
 
     def _size_locked(self) -> int:
+        """Return cached usage while the caller holds ``_lock``."""
+
+        return self._used_bytes
+
+    def _scan_size_locked(self) -> int:
+        """Recalculate usage when opening or reconciling the store."""
+
         return sum(
-            path.stat().st_size for path in self.root.rglob("*") if path.is_file()
+            path.stat().st_size
+            for path in self.root.rglob("*")
+            if path.is_file() and not path.is_symlink()
         )
 
     @staticmethod
-    def _remove_job_directory(path: Path, *, missing_ok: bool = False) -> None:
+    def _directory_size_locked(path: Path) -> int:
+        if not os.path.lexists(path):
+            return 0
+        return sum(
+            child.stat().st_size
+            for child in path.iterdir()
+            if child.is_file() and not child.is_symlink()
+        )
+
+    @staticmethod
+    def _remove_job_directory(path: Path, *, missing_ok: bool = False) -> int:
         if not os.path.lexists(path):
             if missing_ok:
-                return
+                return 0
             raise FileNotFoundError(path)
         ensure_private_directory(path)
         try:
             children = tuple(path.iterdir())
         except FileNotFoundError:
             if missing_ok:
-                return
+                return 0
             raise
+        removed_size = 0
         for child in children:
             if not child.is_file() and not child.is_symlink():
                 raise OSError("unexpected directory in Job output")
+            if child.is_file() and not child.is_symlink():
+                removed_size += child.stat().st_size
             child.unlink()
         path.rmdir()
+        return removed_size
 
 
 def _sync_directory(path: Path) -> None:
