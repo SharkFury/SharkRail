@@ -386,6 +386,12 @@ class SessionManager:
         self._created_monotonic = time.monotonic()
         self._starting_sessions = 0
 
+    @property
+    def max_event_page_size(self) -> int:
+        """Return the host-configured maximum number of events in one page."""
+
+        return self._max_event_page_size
+
     async def start(
         self,
         spec: CommandSpec,

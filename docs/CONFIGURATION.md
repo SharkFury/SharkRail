@@ -6,10 +6,19 @@ CLI, Python API, and JSON-RPC service observe the same core behavior.
 
 ## Asynchronous service configuration
 
-`sharkrail server` reads strict TOML from `/etc/sharkrail/sharkrail.toml` on
-Unix or `%ProgramData%\SharkRail\sharkrail.toml` on Windows. An explicitly
-selected missing or invalid file fails startup; an absent implicit system file
-is valid and selects bounded SQLite memory mode.
+`sharkrail server` reads strict TOML from the platform's canonical system path:
+
+| Platform | System configuration | Default durable state |
+| --- | --- | --- |
+| Linux and other Unix | `/etc/sharkrail/sharkrail.toml` | `/var/lib/sharkrail` |
+| macOS | `/private/etc/sharkrail/sharkrail.toml` | `/private/var/lib/sharkrail` |
+| Windows | `%ProgramData%\SharkRail\sharkrail.toml` | `%ProgramData%\SharkRail\data` |
+
+macOS uses the canonical `/private` paths because `/etc` and `/var` are system
+symlinks and secure configuration loading does not follow symlinks. Use
+`sharkrail config paths` as the executable source of truth on the current host.
+An explicitly selected missing or invalid file fails startup; an absent
+implicit system file is valid and selects bounded SQLite memory mode.
 
 ```bash
 sharkrail config paths
@@ -54,8 +63,9 @@ max_event_records = 10000000
 job_ttl_seconds = 2592000
 ```
 
-Relative paths resolve under `/var/lib/sharkrail` on Unix and
-`%ProgramData%\SharkRail\data` on Windows, unless `SHARKRAIL_STATE_DIR` is set.
+Relative paths resolve under `/var/lib/sharkrail` on Linux and other Unix,
+`/private/var/lib/sharkrail` on macOS, and `%ProgramData%\SharkRail\data` on
+Windows, unless `SHARKRAIL_STATE_DIR` is set.
 File SQLite uses WAL, full synchronous writes, foreign keys, and a local
 single-instance lock. The current release supports SQLite JobStore and local
 file OutputStore only; unsupported schemes fail startup instead of silently

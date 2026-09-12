@@ -15,11 +15,13 @@ program behaves identically on every machine.
 | A documented integration example stops working | every Python file in `examples/` is executed and JSON-validated by `test_examples.py` | Linux, macOS, Windows; unsupported capabilities skip explicitly |
 | Supply-chain workflow drifts | pinned-action, least-privilege, release, SBOM and provenance tests | GitHub Actions |
 
-The CI matrix runs the complete suite on Python 3.9, 3.11, and 3.14 across
-Ubuntu, macOS, and Windows. Coverage is a regression signal with a 70% floor;
-it is not a substitute for platform and failure-path assertions. Property tests
-use reproducible Hypothesis examples and save minimized local failures outside
-version control.
+The CI matrix runs the complete suite and a platform-resolved dependency audit
+on Python 3.9, 3.11, and 3.14 across Ubuntu, macOS, and Windows. Coverage is a
+regression signal with a 70% repository floor. CLI subprocesses participate in
+coverage collection, and high-risk CLI, process-backend, Control Master, and
+ownership modules also have independent floors. Coverage is not a substitute
+for platform and failure-path assertions. Property tests use reproducible
+Hypothesis examples and save minimized local failures outside version control.
 
 Before citing a reliability result, record the exact commit, OS image, Python
 version, backend, iteration count, configured limits, workload, failure

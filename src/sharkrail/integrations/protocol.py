@@ -22,7 +22,6 @@ from .schema import protocol_schema
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_PENDING_REQUESTS = 256
-MAX_EVENT_PAGE_SIZE = 100
 MAX_CONTROL_WAIT_MS = 24 * 60 * 60 * 1000
 MAX_CANCELLATION_GRACE_MS = 5 * 60 * 1000
 MAX_TERMINAL_DIMENSION = 65535
@@ -182,6 +181,7 @@ class JsonRpcRuntime:
         if method in {"session.subscribe", "session.events"}:
             session_id = _required_str(params, "session_id")
             cursor = _bounded_int(params, "cursor", default=0, minimum=0)
+            max_page_size = self.manager.max_event_page_size
             events, next_cursor, has_more = await self.manager.event_page(
                 session_id,
                 cursor=cursor,
@@ -195,9 +195,9 @@ class JsonRpcRuntime:
                 limit=_bounded_int(
                     params,
                     "limit",
-                    default=MAX_EVENT_PAGE_SIZE,
+                    default=max_page_size,
                     minimum=1,
-                    maximum=MAX_EVENT_PAGE_SIZE,
+                    maximum=max_page_size,
                 ),
             )
             return {
