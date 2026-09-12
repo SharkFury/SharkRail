@@ -32,12 +32,15 @@ class AckConnection:
         self.closed = True
 
 
-def _handle(*, birth_identity="posix:123"):
+def _handle(*, birth_identity="posix:123", job=...):
+    if job is ...:
+        job = SimpleNamespace(handle_value=99)
     return SimpleNamespace(
         pid=42,
         process_tree="process_group",
         birth_identity=birth_identity,
         _ownership_id=None,
+        job=job,
     )
 
 
@@ -109,7 +112,7 @@ def test_ownership_client_rejects_missing_identity_windows_owner_and_closed_chan
         SimpleNamespace(name="nt", getpid=lambda: 7),
     )
     with pytest.raises(RuntimeError, match="stable Job owner"):
-        client.register(_handle())
+        client.register(_handle(job=None))
 
     client.close()
     with pytest.raises(RuntimeError, match="channel is closed"):

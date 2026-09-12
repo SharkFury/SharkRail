@@ -426,8 +426,8 @@ def test_documented_macos_paths_match_runtime_defaults():
         Path(__file__).resolve().parents[1] / "docs" / "CONFIGURATION.md"
     ).read_text(encoding="utf-8")
 
-    assert str(system_config_path(platform="darwin", environ={})) in documentation
-    assert str(state_directory(platform="darwin", environ={})) in documentation
+    assert system_config_path(platform="darwin", environ={}).as_posix() in documentation
+    assert state_directory(platform="darwin", environ={}).as_posix() in documentation
     assert "`sharkrail config paths`" in documentation
 
 
